@@ -1,6 +1,6 @@
-# Status — 2026-10-09, M3.5 verified on Windows
+# Status — 2026-10-09, M4 planning
 
-M0–M3, M3.5 and the locally evidenced Windows P0 gate are verified on Windows. The accessible preview splitter, metadata and broad informational contrast coverage pass browser and actual WebView2 checks. Independent M3.5 architecture review and P0/E2E traceability audit are clear for this host. M4/M5, macOS, remote CI, installers and signing are not verified.
+M0–M3, M3.5 and the locally evidenced Windows P0 gate are verified on Windows; M3.5 is pushed as `acd6bc0`. M4 is active with its checklist expanded from the charter and current code. M4.1 watcher lifecycle/health implementation and review are in progress; no M4 slice is accepted yet. M5, macOS, remote CI, installers and signing are not verified.
 
 ## Completed milestone evidence
 
@@ -27,7 +27,7 @@ Custom glob compilation and recursive Git ignore state/input are bounded and fai
 
 The current app supports workspace selection/refresh, a searchable virtual tree, selection/reasons/force actions, lazy ignored browsing, bounded read-only preview, count/byte estimates, Copy/Export and persisted policy/intents. The approved vector brand, compact shell, collapsible sidebar, All / Selected / Ignored projections, minimal Settings, include-only filter editor, safe version-1 settings migration, collapsible bounded preview and fixed export footer are implemented. The actual native reference/standard/minimum screenshots have been inspected. See the [redesign contract](../CONTEXTPICK_UI_REDESIGN.md) and single authoritative [roadmap](ROADMAP.md).
 
-Next action: record the independent M3.5 review disposition and final scale result, commit and push the verified M3.5 milestone, then continue with M4 in dependency order. First map watcher, generation, reconciliation and cache invalidation boundaries; then implement small RF-01/SC-04/MT-03 slices with race/performance review. Do not infer macOS, remote CI, packaging or signing results.
+Next action: implement M4.1 from the [authoritative roadmap](ROADMAP.md): validate a maintained cross-platform watcher/debouncer against MSRV/target constraints, then add bounded event collection and truthful watcher health without mutating the workspace index. The current pipeline has one authoritative full scan and generation-checked publish; keep it that way while writing deterministic and actual WebView2 tests. Commit/push remains required at the M4 gate. Do not infer macOS, remote CI, packaging or signing results.
 
 ## Platform and release limits
 
