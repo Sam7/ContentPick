@@ -477,4 +477,38 @@ mod tests {
         assert_eq!(writer.output, vec![b'`'; 4096]);
         assert_eq!(total, 4096);
     }
+
+    struct FullDisk {
+        remaining: usize,
+    }
+
+    impl io::Write for FullDisk {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::other("synthetic disk full"));
+            }
+            let written = self.remaining.min(buffer.len());
+            self.remaining -= written;
+            Ok(written)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn partial_output_write_failure_is_propagated_without_reporting_success() {
+        let mut reader = &b"synthetic source content"[..];
+        let mut writer = FullDisk { remaining: 4 };
+        let mut total = 0;
+        let error = copy_with_cancel(
+            &mut reader,
+            &mut writer,
+            &AtomicBool::new(false),
+            &mut total,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Io(error) if error.to_string() == "synthetic disk full"));
+        assert_eq!(total, 0);
+    }
 }

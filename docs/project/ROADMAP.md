@@ -1,11 +1,68 @@
-# Roadmap
+# ContextPick delivery roadmap
 
-| Gate | Scope | State | Evidence |
+This is the **single authoritative execution plan**. Requirement definitions live in the one matrix in [`docs/PRODUCT_CHARTER.md`](../PRODUCT_CHARTER.md). The approved visual contract is [`docs/CONTEXTPICK_UI_REDESIGN.md`](../CONTEXTPICK_UI_REDESIGN.md). Milestones are evidence gates, not claims that code merely exists.
+
+## Milestone state
+
+| Gate | Scope | State | Evidence / remaining gate |
 |---|---|---|---|
-| M0 | Toolchains, shell/core, CI, domain | Local gate passed | STATUS; CI remote unrun |
-| M1 | Picker, files, preview, initial export/copy | Native Windows slice verified | docs/testing/2026-10-08-native-smoke.md |
-| M2 | WS-03/04/05, FL-01/02/03/04, SC-02/03, PR-01 | Implemented, breadth/gate in progress | REVIEW_LOG; 30 core+3 shell tests |
-| M3 | MT-01/02, SC-01, QA-01; UX-01/02 | Virtualisation done, scale/IPC pending | 15 RTL+3 E2E; benchmark in progress |
-| M4 | RF-01, SC-04, MT-03 | Planned | Concurrency review required |
-| M5 | PR-02, SE-01, UX-03, RF-02 | Planned | Release review / OS proof |
-| M6 | P2 | Deferred | User feedback required |
+| M0 | Toolchains, shell/core, CI, domain | Verified locally | [STATUS](STATUS.md); remote CI has not been run |
+| M1 | Native picker, files, preview, export/copy | Verified on Windows | [Native smoke](../testing/2026-10-08-native-smoke.md) |
+| M2 | WS-03/04/05, FL-01/02/03/04, SC-02/03, PR-01 | **Open** | Native ignore/force/recovery/restart and core behavior are evidenced. Current policy hardening is in the uncommitted tree; full revalidation and M2 review remain. A review also found unbounded copying of ancestor `.gitignore` matchers; see closure tasks below. |
+| M3 | MT-01/02, SC-01, QA-01, UX-01/02 | **Open** | Paging, cancellation reconciliation, virtualisation, search, estimates and core benchmarks are implemented and tested. Final native 20k/cancel/timing evidence against the reconciled binary remains. |
+| M3.5 | UX-03/04/05, BR-01, FL-02 migration | Planned; reference audit complete | Approved UI and logo are in `docs/design`. No UI or asset implementation has started. Close after M2 and M3, before M4. |
+| M4 | RF-01, SC-04, MT-03 | Planned | Watcher/tokenizer concurrency and cache review; depends on M3.5 gate. |
+| M5 | PR-02, SE-01, RF-02, release breadth | Planned | Whole-app release review and target-OS evidence. |
+| M6 | P2 expansion | Deferred | User evidence and a separate product decision required. |
+
+## Required order
+
+```text
+Close M2 policy/safety gate → close M3 technical/performance gate
+  → implement and verify M3.5 redesign and revised FL-02
+  → close full P0 gate → M4 watcher/tokenizer work
+  → M5 release readiness → optional M6 only after feedback
+```
+
+Keep the app runnable. Work one small slice at a time using red → green → refactor, focused checks, independent review and durable status updates. Do not mark a gate complete while its evidence is pending.
+
+## M2 — Selection and policy closure
+
+Previously verified work remains accepted: one Rust selection evaluator; inherited intent and explainable reasons; `.gitignore` toggling and lazy ignored browsing; hard safety precedence; persisted workspace choices; native force/reset/restart journeys; settings recovery; path/extension behavior; and native outside-link/cycle checks. See [STATUS](STATUS.md), [native P0 evidence](../testing/2026-10-08-native-p0.md) and [REVIEW_LOG](REVIEW_LOG.md).
+
+- [ ] **M2.1 Bound custom policy compilation.** The working tree now contains fallible glob-set compilation and limits (256 total rules, 4 KiB per rule, 64 KiB aggregate text), plus regression fixtures for the reproduced 200 kB compile panic and limit boundaries. **Depends on:** existing policy engine. **Accept when:** malformed/over-complex candidates return actionable errors without panic or replacing saved/current policy; common precedence and extensionless behavior still pass. **Verify:** `cargo test -p contextpick-core --test workspace --locked`, full workspace tests, fmt and strict Clippy; inspect the adapter's persist-before-publish path.
+- [ ] **M2.2 Bound inherited ignore state.** Replace recursive deep copies of parent `Gitignore` matchers with shared ownership and enforce a cumulative `.gitignore` source/rule budget before compilation. Current review evidence: at depth 128, 128 valid 64 KiB ignore files can make `parents.to_vec()` retain about 1 GiB of duplicated matcher strings. This is a bounded-input analysis, not a 1 GiB reproduction. **Depends on:** scanner implementation. **Accept when:** nested ignore matcher memory does not multiply by traversal depth; budget exhaustion is explicit/incomplete; readable siblings remain visible; existing Git semantics pass. **Verify:** injected small-budget nested fixture, sibling regression, nested-negation fixtures, then independent Sol review.
+- [ ] **M2.3 Complete selection/error contract fixtures.** Truth-table and Git parent-negation fixtures now exist in the working tree. **Depends on:** M2.1 and M2.2. **Accept when:** hard × soft policy × intent combinations, browse-versus-force behavior, `.gitignore` open/build errors, and ignored-parent negation match the written contract with useful diagnostics. **Verify:** `cargo test -p contextpick-core --test selection --test contract_fixtures --test workspace --locked`; independently inspect expected outcomes against Git semantics.
+- [ ] **M2 gate — independent architecture/correctness review.** **Depends on:** M2.1–M2.3. **Accept when:** full Rust tests, formatting, strict Clippy, native build, applicable frontend checks and policy persistence regressions pass; reviewer closes all high/critical findings and confirms one policy engine, bounded compilation/ignore state, deterministic reasons and safe migration seam. Update STATUS/REVIEW_LOG with exact commands and results.
+
+## M3 — Estimates, scalable browsing and preview closure
+
+Implemented evidence to preserve: 512-entry / 256 KiB generation-checked IPC pages, progressive loading, immutable view snapshots, authoritative cancellation reconciliation, a virtualised searchable tree, metadata-based count/byte estimate, bounded preview, 20k Rust/page fixtures, a 20k source + 100k ignored core benchmark, and actual Windows 605-entry WebView2 Playwright coverage. See [native paging](../testing/2026-10-08-native-paging.md), [native Playwright](../testing/2026-10-08-native-playwright.md) and [performance](../testing/2026-10-08-performance.md).
+
+- [ ] **M3.1 Add repeatable native scale evidence and rerun on the reconciled build.** **Depends on:** M2 gate. **Acceptance:** an opt-in, safely isolated native Playwright fixture/spec can generate and clean up 20k source files plus 100k ignored files; actual WebView2 loads the final page, searches/previews the tail, and leaves the ignored subtree pruned; an in-flight refresh can be cancelled and leaves one authoritative generation with usable controls. Record at least three launch-to-ready timings and sampled whole-app process-tree memory (Tauri parent plus WebView descendants), with host, method, and limitations. **Verify:** TDD the native interactions and fixture cleanup; build the current MSVC binary; run the regular native suite and opt-in scale suite; inspect screenshots; compare against the historical manual observation. Current regular harness covers 605 entries only, and the previous 20k smoke predates cancellation reconciliation and omitted startup timing and WebView child memory.
+- [ ] **M3 technical gate — scale, browsing and correctness review.** **Depends on:** M3.1 plus M2 gate. **Accept when:** M3 performance/browsing requirements and applicable E2E-01–05/07/08 are evidenced; no synchronous/full-content estimate scan; scan limits and incomplete counts remain truthful; Windows native smoke and full local suites pass. Review performance, keyboard/accessibility baseline, race handling and complexity; fix material findings. This closes M3 work only: revised FL-02 migration is deliberately assigned to M3.5, so this is **not** full P0 acceptance.
+
+## M3.5 — Approved desktop UI and brand adoption
+
+**Purpose:** Apply the approved reference without replacing the working domain model. Preserve real root selection, scan, policy, intent, reason, preview, metric and export behavior. The supplied screenshot guides composition, not product scope. All tasks below are mandatory for this redesign gate; `[x]` is reserved for tested and reviewed completion.
+
+- [x] **M3.5.0 Audit and lock references.** **Depends on:** none. **Acceptance/evidence:** current native screenshot and real implementation/evidence reviewed; approved 1536 × 1024 UI and logo confirmed at [`docs/design/design-draft.png`](../design/design-draft.png) and [`docs/design/Logo.png`](../design/Logo.png); existing vs missing behavior and exclusion-extension migration recorded in [`CONTEXTPICK_UI_REDESIGN.md`](../CONTEXTPICK_UI_REDESIGN.md). Documentation only; this does not mark the redesign implemented.
+- [ ] **M3.5.1 Vector brand assets.** **Depends on:** M3 gate, M3.5.0. **Acceptance:** clean icon and wordmark are editable SVG shapes from one maintained source; no embedded raster/proprietary font; generated Tauri/Windows/macOS icons are wired to the app and legible at 16/24/32/48/64/128 px on light/dark backgrounds. **Verify:** inspect source and generated assets at each size, compare with approved logo, run asset/build checks, independent asset review.
+- [ ] **M3.5.2 Compact shell and workspace toolbar.** **Depends on:** M3 gate, M3.5.1. **Acceptance:** remove marketing hero and separate KPI strip; add compact branded toolbar with real workspace path/selection, refresh and change-folder actions; preserve native title bar and visible scan/error outcomes. **Verify:** failing-before interaction/layout tests, actual native folder-picker/refresh flow, screenshot at 1536 × 1024 and 1200 × 800.
+- [ ] **M3.5.3 Sidebar views and Settings.** **Depends on:** M3.5.2. **Acceptance:** collapsible sidebar exposes All / Selected / Ignored as projections over one index and one selection state; Ignored is Git-only; partial/lazy counts are honest. Settings reuses the existing Reset selections action and local-persistence facts; no fabricated preferences or duplicated Filters state. Switching views does not change saved intent. **Verify:** tests for empty/partial/full views and unchanged manifest/intent; keyboard/focus checks and native screenshots with sidebar open/collapsed.
+- [ ] **M3.5.4 Filters and saved-settings migration.** **Depends on:** M2 gate, M3.5.3. **Acceptance:** sidebar Filters provides Respect `.gitignore`, Include Extensions only, existing ordered include/exclude path rules and Reset filters; no active `excludeExtensions` UI/bridge/core/storage policy. Version-1 settings migrate every legacy exclusion to equivalent visible path rule(s) while preserving other settings and intent. Backup/validation/save is transactional; unrepresentable values or backup failure preserve original settings and block silent defaults/partial migration. **Verify:** TDD fixtures for case-insensitive mixed extensions, nested/root files, dotfiles, extensionless `<none>`, literal glob characters, overlaps, invalid/corrupt settings, failed backup, restart and idempotency; Rust and frontend policy suites; independent review of migration semantics.
+- [ ] **M3.5.5 Tree and preview composition.** **Depends on:** M3.5.2–M3.5.3. **Acceptance:** center tree is the primary searchable/virtualised pane; right preview is read-only, bounded and collapsible/resizable; existing tri-state, reasons, explicit force action, lazy ignored browsing and safe preview states remain intact. Search/view/pane changes never mutate intent. **Verify:** existing regression suites plus keyboard navigation, long-path, selected/ignored/partial-state and narrow-window native screenshots.
+- [ ] **M3.5.6 Persistent export footer.** **Depends on:** M3.5.2, M3.5.4, M3.5.5. **Acceptance:** fixed footer displays actual selected-file count, clearly estimated Markdown bytes, truthful token state (`Unavailable` until MT-03), and existing Copy/Export actions from the same effective selection. Empty selection, cancellation and failures remain clear; no hard-coded values or invented budget gauge. **Verify:** red/green tests for selection/rule updates, empty state and export results; actual native Copy/Export evidence including byte count and errors.
+- [ ] **M3.5 gate — visual, accessibility and architecture review; revised FL-02 closure.** **Depends on:** M3.5.1–M3.5.6. **Acceptance:** screenshots at reference, standard and minimum supported window sizes match the approved composition; keyboard/focus/labels/contrast/high-DPI and independent scrolling pass; Windows native app functions end-to-end; all existing domain behavior and legacy settings survive; revised FL-02 is verified. Full frontend/Rust suites, typecheck/lint/build, native E2E and relevant manual native dialogs pass. Independent reviewer checks duplicated state, policy leakage into React, SRP, abstraction/dependency growth, performance, accessibility, cross-platform effects and drift. Recheck every P0 requirement and applicable charter E2E scenario; claim the full P0 gate only if all pass. M4 cannot start until this gate and full P0 acceptance pass. Record missing macOS/installer/signing evidence separately; no release claim.
+
+## M4–M6 — Later delivery
+
+- **M4 (RF-01, SC-04, MT-03):** watchers, reconciliation/recovery, cache invalidation and background local tokenizer. Depends on M3.5 gate; run concurrency/performance architecture review.
+- **M5 (PR-02, SE-01, RF-02 and release breadth):** selected profile UX, common-secret warnings, complete cross-platform/CI/package/signing documentation and release evidence. Run whole-architecture review.
+- **M6 (P2):** context budget, changed-file selection, CLI, full local secret scanning and alternate formats only after user evidence and a separate product decision.
+
+AI relevance/chat, semantic search, IDE/editor features, dashboards, remote/cloud services and unrequested export formats remain out of scope. M3.5 adds no tokenizer, watcher, profile or secret-scanner work.
+
+## Progress discipline
+
+For each checkbox, write/identify the failing behavior or visual assertion first; implement one small vertical slice; run the relevant test; refactor; request independent review; fix material findings; capture actual UI evidence where visual; then update [`STATUS.md`](STATUS.md), [`NEXT_SESSION.md`](NEXT_SESSION.md) and [`REVIEW_LOG.md`](REVIEW_LOG.md) as appropriate. At M2/M3.5/M4/M5 gates, answer the charter's architecture questions and remove avoidable duplication or complexity before proceeding. This roadmap is the only task checklist; supporting plans may explain the active slice but must not fork milestone status.

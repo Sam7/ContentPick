@@ -29,6 +29,18 @@ On this Windows development host, `. ./scripts/env.ps1` adds existing Node/local
 
 The browser bridge uses synthetic fixtures only and is not evidence of native filesystem, dialog, or clipboard behavior.
 
+### Windows native UI automation
+
+Playwright can also drive the **real Windows Tauri WebView2** and Rust bridge. Build the debug app, then run the separate suite:
+
+```powershell
+. ./scripts/env.ps1
+cargo +stable-x86_64-pc-windows-msvc build -p contextpick --locked
+corepack pnpm test:native
+```
+
+The harness starts its own app with disposable synthetic sources, settings and WebView2 profile. A loopback debugging endpoint is enabled only for that test process; it does not change production app configuration. Tests and screenshots use Playwright locators and assertions. Native folder/save dialogs remain a short manual smoke check; source safety and transactional export faults are covered in Rust tests. This follows [Playwright's WebView2 setup](https://playwright.dev/docs/webview2). Windows only; not evidence for macOS.
+
 ## Current behavior
 
 Choose a folder; eligible files are selected by default. Expand directories, preview a file, change selection, inspect filter reasons, then Copy context or Export Markdown. Force include is an explicit menu action; it cannot bypass binary or link guards. Ignored folders are placeholders until you explicitly browse them. Refresh after source changes; watching and tokenization are not implemented yet.
@@ -36,6 +48,8 @@ Choose a folder; eligible files are selected by default. Expand directories, pre
 Settings and path-bound intentions are stored in the OS application config directory. Hidden files are visible; `.gitignore` is enabled by default. `.ignore`, parent/global excludes and Git metadata traversal are disabled by documented policy. Gitignore is not a secret scanner. Previews are capped at 256 KiB UTF-8 output; clipboard at 8 MiB. UTF-8/BOM UTF-16 are supported; invalid/binary content makes an export fail explicitly. Sources are never edited. New exports inside the workspace are persistently excluded from source context. Existing workspace paths cannot be overwritten; choose a new filename. Outside the workspace, replacing an existing file requires confirmation. Publication requires filesystem hard-link support when creating a new output and fails safely if unavailable.
 
 Invalid settings are preserved in a bounded recovery backup before defaults can be saved. If backup fails, the app starts with a visible recovery instruction and refuses settings changes until the original is protected and the app restarted. Settings reads, writes and recovery backups are capped at 4 MiB.
+
+Index transfer uses generation-checked pages of at most512 entries/256KiB serialized JSON. Scanning caps raw directory attempts at200k, depth at128, retained path/reason text at16MiB and diagnostic text at16KiB. A cutoff is reported as incomplete; it is not a complete selection count for unknown descendants.
 
 Example section (UTF-8 output, source line endings preserved):
 

@@ -5,6 +5,7 @@ target/
 test-results/
 playwright-report/
 *.log
+Thumbs.db
 src-tauri/gen/
 src-tauri/icons/android/
 src-tauri/icons/ios/

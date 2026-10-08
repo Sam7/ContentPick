@@ -11,3 +11,4 @@
 - Prefer small modules and established libraries; avoid speculative interfaces, duplicate policies, and peripheral features.
 - No destructive unrelated changes, credential use or public publishing without authorization.
 - Commands and current environment limitations: README. Run affected tests during development and full checks at milestone gates.
+- Prefer Playwright for repeatable UI tests and screenshots, including the real Windows WebView2 suite (`pnpm test:native`). Reserve desktop automation for native OS dialogs and short smoke checks. Run expensive scale fixtures at milestone gates, not after every small UI edit.

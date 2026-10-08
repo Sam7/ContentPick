@@ -1,5 +1,8 @@
-use contextpick_core::workspace::{FilterPolicy, Workspace};
 use contextpick_core::{ManifestEntry, export};
+use contextpick_core::{
+    selection::Intent,
+    workspace::{FilterPolicy, Workspace},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -144,6 +147,120 @@ fn gitignore_anchors_and_parent_negation_match_git_check_ignore() {
             "workspace/Git disagreement for {path}"
         );
     }
+}
+
+#[test]
+fn ignored_parent_stays_ignored_until_gitignore_unignores_the_parent() {
+    require_git();
+    let temp = tempdir().unwrap();
+    fs::create_dir_all(temp.path().join("dist")).unwrap();
+    fs::write(temp.path().join("dist/keep.ts"), "keep").unwrap();
+    fs::write(temp.path().join("dist/drop.ts"), "drop").unwrap();
+    fs::write(temp.path().join(".gitignore"), "dist/\n!dist/keep.ts\n").unwrap();
+    let git_init = Command::new("git")
+        .args(["-C", temp.path().to_str().unwrap(), "init", "--quiet"])
+        .status()
+        .expect("Git is a required prerequisite for Git parity fixture tests");
+    assert!(
+        git_init.success(),
+        "git init must succeed for parity fixture"
+    );
+
+    // A child negation cannot re-include a file under an ignored parent.
+    for path in ["dist/keep.ts", "dist/drop.ts"] {
+        assert!(
+            git_check_ignored(temp.path(), path),
+            "Git unexpectedly unignored {path}"
+        );
+    }
+    let ignored_parent = scan(temp.path(), FilterPolicy::default());
+    let placeholder = ignored_parent
+        .view(1)
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == "dist")
+        .unwrap();
+    assert!(!placeholder.enumerated);
+    assert!(
+        !ignored_parent
+            .view(1)
+            .entries
+            .iter()
+            .any(|entry| entry.path == "dist/keep.ts")
+    );
+
+    // Unignore the parent first, then selectively unignore one child.
+    fs::write(
+        temp.path().join(".gitignore"),
+        "dist/\n!dist/\ndist/*\n!dist/keep.ts\n",
+    )
+    .unwrap();
+    assert!(!git_check_ignored(temp.path(), "dist/keep.ts"));
+    assert!(git_check_ignored(temp.path(), "dist/drop.ts"));
+    let parent_reincluded = scan(temp.path(), FilterPolicy::default());
+    for path in ["dist/keep.ts", "dist/drop.ts"] {
+        let expected_selected = !git_check_ignored(temp.path(), path);
+        assert_eq!(
+            selected(&parent_reincluded, path),
+            expected_selected,
+            "workspace/Git disagreement for {path}"
+        );
+    }
+}
+
+#[test]
+fn browsing_ignored_parent_does_not_select_children_without_force_override() {
+    let temp = tempdir().unwrap();
+    fs::create_dir_all(temp.path().join("dist/nested")).unwrap();
+    fs::write(temp.path().join(".gitignore"), "dist/\n").unwrap();
+    fs::write(temp.path().join("dist/nested/keep.ts"), "text").unwrap();
+    let browsed = BTreeSet::from(["dist".to_owned(), "dist/nested".to_owned()]);
+
+    let inspected = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        browsed.clone(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let entry = inspected
+        .view(1)
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == "dist/nested/keep.ts")
+        .unwrap();
+    assert!(!entry.selected);
+    assert!(
+        entry
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("gitignore"))
+    );
+    assert!(
+        inspected
+            .manifest()
+            .iter()
+            .all(|manifest_entry| !manifest_entry.path.starts_with("dist/"))
+    );
+
+    let forced = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::from([("dist/nested/keep.ts".into(), Intent::ForceInclude)]),
+        browsed,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        forced
+            .manifest()
+            .iter()
+            .filter(|manifest_entry| manifest_entry.path.starts_with("dist/"))
+            .map(|manifest_entry| manifest_entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["dist/nested/keep.ts"]
+    );
 }
 
 #[test]

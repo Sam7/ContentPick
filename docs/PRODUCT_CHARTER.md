@@ -1,9 +1,9 @@
 # ContextPick — Product & Engineering Build Charter
 
-> **Status:** Initial authoritative specification, version 1.0  
-> **Prepared:** 2026-10-08  
-> **Working product name:** ContextPick — *Select code. Export AI context.*  
-> **Audience:** Codex root orchestrator, delegated coding/review agents, human maintainers  
+> **Status:** Authoritative specification, version 1.1
+> **Prepared:** 2026-10-08; approved desktop UI and extension-policy revision 2026-10-09
+> **Working product name:** ContextPick — *Select code. Export AI context.*
+> **Audience:** Codex root orchestrator, delegated coding/review agents, human maintainers
 > **Purpose:** Build a reliable, lightweight, open-source Windows/macOS desktop application from an empty repository, incrementally, with short feedback loops and long-horizon architectural integrity.
 
 ---
@@ -73,7 +73,7 @@ No cloud backend, authentication, payments, subscriptions, embeddings, model cal
 | WS-04 | P0 | File and folder selection; inherited intent | Folder choice applies to eligible descendants; nearest explicit choice resolves conflicts |
 | WS-05 | P0 | Explicit per-file/folder force-include and force-exclude | User can override filters intentionally; reason is displayed; safety still enforced |
 | FL-01 | P0 | Toggle `.gitignore` policy | Both states tested on nested ignore fixtures; explicit user intent persists |
-| FL-02 | P0 | Include/exclude extensions and paths | Common source files supported; extensionless files handled; deterministic precedence |
+| FL-02 | P0 | Include-extension allowlist and include/exclude path rules | Empty allowlist imposes no extension filter; normalized extensions and extensionless files behave deterministically; no exclude-extension feature; existing saved exclusions migrate visibly to path rules without losing intent |
 | FL-03 | P0 | Explain every exclusion | UI displays effective reason and source rule when known |
 | FL-04 | P0 | Hidden files and `.ignore` policy explicit | No accidental undisclosed matcher defaults |
 | SC-01 | P0 | Fast, bounded metadata-first scanning | No eager full-file loading; no synchronous UI scan |
@@ -96,7 +96,10 @@ No cloud backend, authentication, payments, subscriptions, embeddings, model cal
 | RF-02 | P1 | Signed/notarised release strategy and artifacts | Release checklist and tested binaries for target platforms |
 | SC-04 | P1 | Robust rename, watcher overflow and cache invalidation | Dedicated integration tests |
 | SE-01 | P1 | Warnings for common secrets and private keys | Confirmation before intentional sensitive export |
-| UX-03 | P1 | Optional collapsible preview and splitter | Layout persists; export controls remain prominent |
+| UX-03 | P1 | Collapsible/resizable preview and splitter | Preview can collapse/restore; export controls remain visible at supported window sizes |
+| UX-04 | P1 | Compact desktop shell with collapsible sidebar, minimal Settings destination and persistent footer | Workspace toolbar, sidebar, tree, read-only preview and estimates/actions fit one window; panes scroll independently; Settings adds no speculative preferences; no marketing/dashboard chrome |
+| UX-05 | P1 | All / Selected / Ignored file views | Views filter one indexed workspace and one selection state; Ignored means Git-ignored; unknown counts stay partial |
+| BR-01 | P1 | Approved ContextPick vector brand and application icons | Editable path-based SVG artwork matches the approved logo; generated platform icons remain legible at required sizes and are used by the app |
 | MT-04 | P2 | User-defined token budget/indicator | Budget warnings without false exactness |
 | GI-01 | P2 | Git changed-files selection | Optional status-based selection; Git CLI/library compatibility verified |
 | CLI-01 | P2 | Headless CLI using same Rust core | Can export from a persisted profile without GUI |
@@ -108,15 +111,17 @@ No cloud backend, authentication, payments, subscriptions, embeddings, model cal
 
 ### 3.1 Primary layout
 
-Use a clean, efficient desktop interface with a persistent root/location bar at the top, left-side file tree with selection controls, optional right-hand read-only text preview, and persistent bottom/right export panel. Suggested initial split: 40% file tree / 60% preview; allow resize/collapse. No obligatory onboarding wizard.
+Use the approved compact desktop layout shown in [`docs/design/design-draft.png`](design/design-draft.png): a compact workspace toolbar; a narrow, collapsible left sidebar for All / Selected / Ignored views, workspace filters and a minimal Settings destination; a searchable, virtualised file tree as the main work area; a secondary read-only preview; and a persistent bottom bar for selected-file count, estimated export bytes, honest token-estimate state, Copy and Export. Keep panes independently scrollable and adapt at the supported minimum window size. No obligatory onboarding wizard, marketing hero, dashboard cards or full-window scrolling.
 
-Header: application name, chosen local workspace path, Change Folder, Refresh, scan/watch state, compact settings/filter action.
+Header: approved ContextPick mark/wordmark, chosen local workspace path, Change Folder and Refresh. Show only real scan state; do not invent watcher status.
 
-Tree panel: search bar; disclosure arrows; tri-state checkboxes; file/folder icons; selected/excluded/muted styles; optional reason tooltip or side detail; counts only when known.
+Sidebar: mutually exclusive All / Selected / Ignored view filters; a collapsible Filters section for `.gitignore`, Include Extensions and ordered path rules; Settings contains only existing settings/actions and does not duplicate filter state. Selected and Ignored are projections over the same workspace index, not separate selection stores. Ignored means `.gitignore` policy only.
+
+Tree: search bar; disclosure arrows; tri-state checkboxes; file/folder icons; selected/excluded/muted styles; reason detail; counts only when known. Existing domain and bridge results remain authoritative.
 
 Preview: filename, relative path, file size and eligibility, bounded text content, truncation notice, non-text/unreadable/no-selection states. Preview is read-only, not an editor.
 
-Export area: **estimated tokens prominent**, estimated Markdown bytes, number of selected eligible files, estimation freshness (`Calculating...` if needed), `Copy`, `Export Markdown`, and export report on completion.
+Footer: selected eligible file count, estimated Markdown bytes, and token estimate or an honest `Unavailable` / `Calculating…` state. `Copy` and `Export Markdown` use the same effective selection and existing export result reporting. Do not imply a tokenizer exists until MT-03 is implemented.
 
 UI states must be designed for: no folder chosen; empty folder; scanning; scan cancelled; watcher unavailable; binary file; unknown encoding; permission denied; stale index; profile changed; large file; export errors. Don't replace explanatory states with blank space.
 
@@ -463,7 +468,7 @@ Create disposable synthetic repositories and test these exact classes of behavio
 1. **Nested `.gitignore`:** root ignores `dist/`, nested ignore of `*.generated.ts`, nested negation, slash-anchored patterns, escaped spaces, and ignore effects when Gitignore toggle switches.
 2. **Parent ignored directory:** confirm `!nested/file` does not magically enumerate an ignored parent under normal Git semantics; explicit manual inclusion of a known file is separately supported by controlled path discovery.
 3. **Conflicting selection intent:** select root, unselect tests folder, include one specific test file; unselect root, include one nested directory; change filters and restore prior choices.
-4. **Glob precedence:** extension allow/block, path include/exclude, dotfiles, extensionless `Dockerfile`, mixed-case extension, wildcard metacharacters and custom rules that overlap.
+4. **Glob precedence:** include-extension allowlist, path include/exclude, dotfiles, extensionless `Dockerfile`, mixed-case extension, wildcard metacharacters and overlapping custom rules. Test conversion of persisted exclude-extension rules as part of FL-02; no runtime exclude-extension policy remains after migration.
 5. **Ignored large subtree:** generate an ignored subtree with tens of thousands of entries; test enumeration counter proving pruning, not merely checking screen appearance.
 6. **Binary/encoding:** UTF-8, UTF-8 BOM, UTF-16LE/BE BOM, CRLF, NUL-containing `.txt`, PNG renamed `.cs`, arbitrary extensionless text and invalid encodings.
 7. **Markdown injection/fencing:** source containing triple, quadruple and long backticks; Markdown-like headings; Unicode names; unusual spaces; file paths containing Markdown formatting characters.
@@ -502,6 +507,8 @@ The **public desktop release is complete only when** the additional P1 reliabili
 
 **No waterfall.** Treat this entire charter as the backlog and invariant contract, but implement **one small user-visible capability at a time**, with tests and inspection. Milestones are gates, not fixed-duration phases. Reorder work when new evidence warrants it, recording why; never silently drop critical scope.
 
+This section defines the high-level milestone intent. Current milestone states, task checkboxes, dependencies and implementation acceptance are maintained only in [`docs/project/ROADMAP.md`](project/ROADMAP.md); do not maintain a second execution checklist here.
+
 ### M0 — Discovery, feasibility, architecture sketch
 
 **Deliver:** Running minimal Tauri 2 + React app; Rust core skeleton; `AGENTS.md`; short status/roadmap; first ADR; automated test commands in CI. Validate native picker, OS paths, typed IPC, core testability and development HMR. Compare feasible alternatives briefly and explicitly choose stack. No premature styling.
@@ -525,6 +532,12 @@ The **public desktop release is complete only when** the additional P1 reliabili
 **Deliver:** Incremental metadata aggregates, prominent estimate panel, responsive virtualised tree, search, bounded preview, sensible empty/error states and accessibility baseline. Tokenisation may initially remain `estimated from bytes` with honest label until local tokenizer is implemented in P1.
 
 **Gate:** Main workflows tested on ≥20k-entry fixtures; no full content scan for UI estimates; responsive interaction measured. Run UX walkthrough, capture screenshots and log specific usability flaws; implement the meaningful findings.
+
+### M3.5 — Approved desktop UI and brand adoption
+
+**Deliver:** Implement the approved compact desktop composition and genuine vector logo in small, testable slices while reusing the M0–M3 workspace, selection, preview, estimate and export behaviours. Add the All / Selected / Ignored view projections, a minimal honest Settings destination, and a safe one-time migration from persisted exclude-extension settings to visible exclude-path rules. The detailed visual contract is [`CONTEXTPICK_UI_REDESIGN.md`](CONTEXTPICK_UI_REDESIGN.md); the single execution checklist and dependencies are [`docs/project/ROADMAP.md`](project/ROADMAP.md).
+
+**Gate:** Approved vector assets are used by the UI and app icon pipeline; all views and rules operate on the existing selection engine; saved user intent survives migration/restart; actual native screenshots match the supplied reference at large and compact supported sizes; UI and domain regression suites pass; independent review finds no duplicate selection/filter state or unnecessary UI framework. This closes revised FL-02 and triggers a final §10.3 P0 check; do not claim the MVP or proceed to M4 until that check passes. Tokenization, watchers and unrelated features remain outside this gate.
 
 ### M4 — Resilience and background freshness
 

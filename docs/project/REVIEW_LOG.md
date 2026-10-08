@@ -1,5 +1,37 @@
 # Reviews
 
+## M3 evidence audit — 2026-10-09
+
+- **Independent read-only audit:** current native Playwright harness validates real WebView2 and Rust IPC on 605 entries, but no opt-in 20k/100k native fixture/spec or process-tree sampler exists; it also has no refresh/cancel scenario or three-run scale timing. Historical 20k evidence used a pre-cancellation binary, omitted timing, and measured only the parent. Audit sources: `tests/native/native.fixture.ts`, `tests/native/workspace.spec.ts`, `docs/testing/2026-10-08-native-paging.md`.
+- **Disposition:** expanded M3.1 to include building the isolated scale fixture/spec and measurement method before rerunning current behavior. M3 remains open; no gate or requirement is marked complete.
+
+## Approved desktop redesign planning and consistency review — 2026-10-09
+
+Planning-only audit reviewed the existing React/Tauri/core paths, requirements matrix, native screenshot and test evidence. The app already supports folder selection/refresh, virtualised tree/search, selection and override reasons, lazy ignored browsing, bounded read-only preview, selected/byte estimates, Copy/Export and persistence. The compact toolbar/sidebar/views/footer and vector brand require adaptation; All/Selected/Ignored and a Settings destination are absent. Tokenization remains unavailable.
+
+The audit confirmed `excludeExtensions` is active in the Rust policy, bridge and persisted settings v1; it is not dead code. The charter now requires Include Extensions only and a transactional migration to visible path rules. No migration or UI code was implemented. M3.5 is placed after still-open M2/M3 gates and before M4. The charter contains the only requirements matrix; ROADMAP contains the only task checklist; the redesign document is the visual/interaction contract.
+
+Independent consistency pass checked every redesign item against a charter requirement and M3.5 task, dependencies, objective acceptance and verification; checked M0/M1 evidence remains verified and M2/M3 remain open; checked tokenization/watchers and other out-of-scope features remain deferred; checked the actual asset paths and the historical-vs-current limits of test evidence. No contradiction or scope expansion remained. This review covered planning documents only and is not a code review or implementation gate.
+
+## Bounded IPC, cancellation and scanner checkpoint — 2026-10-08
+
+Independent Sol reviews covered native paging, frontend progressive loading, cancellation reconciliation, scanner limits and the export benchmark. Root integrated fixes and reran the full Windows suite:76 Rust tests, strict Clippy, formatting and native debug build passed.25 RTL/7 browser E2E passed; native Playwright automation is being added following the user's request to reduce repetitive desktop automation.
+
+- Native pages have512-entry/256KiB serialized limits, immutable cached generations and stale request rejection. Scanner diagnostic flooding is bounded to64 messages/16KiB so initial headers remain usable. Unit fixtures cover20k complete ordered transfer and escaped Unicode byte costs.
+- Cancellation returns the authoritative retained native workspace. Tests cover already-published new roots with in-flight original responses, unpublished scans, obsolete pages and UI reconciliation. Unknown cancellation outcomes disable export until refresh. First-root policy hydration also fixed.
+- Clipboard preflight uses checked addition, and a final cancellation check precedes OS clipboard mutation; both regressions were observed RED before fixing. Partial writer failure propagates without success accounting.
+- Native ignored-file inspection found the action menu occluded by virtual rows. A portal fixed pointer targeting (compact-window RED→GREEN). Independent review found portal keyboard focus missing; first enabled action now receives focus, Escape returns focus, and outside pointer closing preserves its target. Keyboard RED→GREEN; final source review clear.
+- Scanner caps global raw directory attempts at200k and retained path/reason text at16MiB. Index clones share an Arc; hierarchy ordering no longer builds keys proportional to path depth. Injected-limit tests cover cutoffs and ancestor incompleteness. Sol found local read/depth failures conflated with global exhaustion; ScanOutcome distinguishes these. A depth-limited branch hiding a readable sibling was observed RED→GREEN. Invalid filename/iterator/metadata omissions also mark ancestors incomplete. Unix-only invalid-filename fixtures are not executed on Windows.
+- Windows child junction/outside-root and link-cycle coverage passed; previews and forged-manifest exports cannot follow them. This extends the earlier root-replacement test.
+
+No release or full-P0 signoff is implied; the broad M2 gate and remaining native fault/performance evidence still need closure.
+
+## Faster native UI tests and M2 gate followup
+
+User requested reducing desktop automation. Luna added actual WebView2 Playwright attachment using owned synthetic settings/source/profile/app copy and loopback-only CDP. No dependencies, production hooks or IPC mocks. Independent Sol review clear; root corrected unit-test discovery and included native/browser tests in typechecking. Full frontend checks passed:25RTL/7browserE2E/2nativeE2E, typecheck/lint/build. Native suite9.8s total;605-entry launch→Copy-ready1,445ms. Dialogs and clipboard-byte comparisons remain separate native smoke evidence.
+
+Broader M2 review confirms one pure selection engine, explainable DTOs, proportionate modules/index ownership and no necessary framework refactor. It found valid complex custom globs can panic inside globset's infallible matcher API before persistence limits apply. Sol reproduced200kB valid pattern panic using installed MSVC artifact. Fallible policy compilation and explicit aggregate/per-rule/count bounds are being implemented. Truth-table and exact ignored-parent-negation parity fixtures are also being added before the gate closes.
+
 2026-10-08: charter/environment exploration delegated to Luna.
 
 ## M1 correctness / M2 architecture — 2026-10-08

@@ -2,17 +2,58 @@ use crate::{
     Error, ManifestEntry, Result, WorkspaceRoot, content,
     selection::{self, Intent},
 };
-use globset::{Glob, GlobMatcher};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 const ENTRY_LIMIT: usize = 200_000;
+const INDEX_TEXT_BYTES_LIMIT: usize = 16 * 1024 * 1024;
+const DIAGNOSTIC_LIMIT: usize = 64;
+const DIAGNOSTIC_BYTES_LIMIT: usize = 16 * 1024;
+const DIAGNOSTIC_MESSAGE_BYTES_LIMIT: usize = 1024;
+const DIAGNOSTIC_SUMMARY_RESERVE: usize = 128;
+const DIAGNOSTIC_LIMIT_MESSAGE_RESERVE: usize = 3;
+const DIAGNOSTIC_LIMIT_BYTES_RESERVE: usize =
+    DIAGNOSTIC_LIMIT_MESSAGE_RESERVE * DIAGNOSTIC_MESSAGE_BYTES_LIMIT;
+const FILTER_RULE_LIMIT: usize = 256;
+const FILTER_RULE_BYTES_LIMIT: usize = 4 * 1024;
+const FILTER_RULE_TEXT_BYTES_LIMIT: usize = 64 * 1024;
+
+#[derive(Clone, Copy)]
+struct ScanLimits {
+    raw_entry_attempts: usize,
+    retained_text_bytes: usize,
+    gitignore_bytes: usize,
+    gitignore_rules: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanOutcome {
+    Complete,
+    Incomplete,
+    Exhausted,
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self {
+            raw_entry_attempts: ENTRY_LIMIT,
+            retained_text_bytes: INDEX_TEXT_BYTES_LIMIT,
+            gitignore_bytes: 1024 * 1024,
+            gitignore_rules: 4096,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -36,34 +77,79 @@ impl Default for FilterPolicy {
 }
 
 struct CompiledPolicy {
-    include: Vec<(String, GlobMatcher)>,
-    exclude: Vec<(String, GlobMatcher)>,
+    include_rules: Vec<String>,
+    include: GlobSet,
+    exclude_rules: Vec<String>,
+    exclude: GlobSet,
 }
 impl CompiledPolicy {
     fn new(policy: &FilterPolicy) -> Result<Self> {
-        let compile = |rules: &[String]| {
-            rules
-                .iter()
-                .map(|rule| {
-                    Glob::new(rule)
-                        .map(|g| (rule.clone(), g.compile_matcher()))
-                        .map_err(|e| Error::Message(format!("invalid glob {rule}: {e}")))
-                })
-                .collect::<Result<Vec<_>>>()
+        let rule_lists = [
+            ("include extension", &policy.include_extensions),
+            ("exclude extension", &policy.exclude_extensions),
+            ("include path", &policy.include_paths),
+            ("exclude path", &policy.exclude_paths),
+        ];
+        let rule_count = rule_lists
+            .iter()
+            .map(|(_, rules)| rules.len())
+            .sum::<usize>();
+        if rule_count > FILTER_RULE_LIMIT {
+            return Err(Error::Message(format!(
+                "filter policy allows at most {FILTER_RULE_LIMIT} total rules across extension and path filters; remove some rules"
+            )));
+        }
+        let mut total_bytes = 0usize;
+        for (kind, rules) in rule_lists {
+            for (index, rule) in rules.iter().enumerate() {
+                if rule.len() > FILTER_RULE_BYTES_LIMIT {
+                    return Err(Error::Message(format!(
+                        "filter policy {kind} rule #{} exceeds 4 KiB per rule; shorten it",
+                        index + 1
+                    )));
+                }
+                total_bytes = total_bytes.saturating_add(rule.len());
+            }
+        }
+        if total_bytes > FILTER_RULE_TEXT_BYTES_LIMIT {
+            return Err(Error::Message(
+                "filter policy allows at most 64 KiB of total rule text; shorten or remove rules"
+                    .into(),
+            ));
+        }
+
+        let compile = |kind: &str, rules: &[String]| -> Result<GlobSet> {
+            let mut builder = GlobSetBuilder::new();
+            for (index, rule) in rules.iter().enumerate() {
+                let glob = Glob::new(rule).map_err(|e| {
+                    Error::Message(format!(
+                        "invalid filter policy {kind} rule #{}: {e}",
+                        index + 1
+                    ))
+                })?;
+                builder.add(glob);
+            }
+            builder.build().map_err(|_| {
+                Error::Message(format!(
+                    "filter policy {kind} path rules are too complex to compile; simplify or remove rules"
+                ))
+            })
         };
         Ok(Self {
-            include: compile(&policy.include_paths)?,
-            exclude: compile(&policy.exclude_paths)?,
+            include_rules: policy.include_paths.clone(),
+            include: compile("include path", &policy.include_paths)?,
+            exclude_rules: policy.exclude_paths.clone(),
+            exclude: compile("exclude path", &policy.exclude_paths)?,
         })
     }
     fn reason(&self, path: &str, directory: bool, policy: &FilterPolicy) -> Option<String> {
-        if let Some((rule, _)) = self.exclude.iter().rev().find(|(_, g)| g.is_match(path)) {
-            return Some(format!("custom exclude: {rule}"));
+        if let Some(index) = self.exclude.matches(path).last() {
+            return Some(format!("custom exclude: {}", self.exclude_rules[*index]));
         }
         if directory {
             return None;
         }
-        if !self.include.is_empty() && !self.include.iter().any(|(_, g)| g.is_match(path)) {
+        if !self.include_rules.is_empty() && !self.include.is_match(path) {
             return Some("custom include: no matching path".into());
         }
         let extension = extension(path);
@@ -111,9 +197,21 @@ pub struct Workspace {
     pub intents: BTreeMap<String, Intent>,
     pub browsed: BTreeSet<String>,
     pub generated_outputs: BTreeSet<String>,
-    entries: Vec<IndexedEntry>,
+    entries: Arc<Vec<IndexedEntry>>,
     pub diagnostics: Vec<String>,
     pub enumerated_entries: usize,
+    diagnostic_bytes: usize,
+    omitted_diagnostics: usize,
+    scan_limits: ScanLimits,
+    raw_entry_attempts: usize,
+    retained_text_bytes: usize,
+    gitignore_body_bytes_read: usize,
+    gitignore_rule_count: usize,
+    gitignore_bytes_exhausted: bool,
+    gitignore_rules_exhausted: bool,
+    gitignore_budget_reported: bool,
+    raw_entry_limit_reported: bool,
+    retained_text_limit_reported: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -196,6 +294,26 @@ impl Workspace {
         generated_outputs: BTreeSet<String>,
         cancel: &AtomicBool,
     ) -> Result<Self> {
+        Self::scan_pinned_with_limits(
+            root_handle,
+            policy,
+            intents,
+            browsed,
+            generated_outputs,
+            ScanLimits::default(),
+            cancel,
+        )
+    }
+
+    fn scan_pinned_with_limits(
+        root_handle: WorkspaceRoot,
+        policy: FilterPolicy,
+        intents: BTreeMap<String, Intent>,
+        browsed: BTreeSet<String>,
+        generated_outputs: BTreeSet<String>,
+        scan_limits: ScanLimits,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
         root_handle.validate_anchor()?;
         let root = root_handle.path().to_path_buf();
         if !root.is_dir() {
@@ -210,13 +328,107 @@ impl Workspace {
             intents,
             browsed,
             generated_outputs,
-            entries: vec![],
+            entries: Arc::new(vec![]),
             diagnostics: vec![],
             enumerated_entries: 0,
+            diagnostic_bytes: 0,
+            omitted_diagnostics: 0,
+            scan_limits,
+            raw_entry_attempts: 0,
+            retained_text_bytes: 0,
+            gitignore_body_bytes_read: 0,
+            gitignore_rule_count: 0,
+            gitignore_bytes_exhausted: false,
+            gitignore_rules_exhausted: false,
+            gitignore_budget_reported: false,
+            raw_entry_limit_reported: false,
+            retained_text_limit_reported: false,
         };
         workspace.scan_directory(&dir, "", &[], None, &compiled, cancel, 0)?;
-        workspace.entries.sort_by(|a, b| a.path.cmp(&b.path));
+        workspace.finalize_diagnostics();
+        Arc::make_mut(&mut workspace.entries).sort_by(|a, b| a.path.cmp(&b.path));
         Ok(workspace)
+    }
+
+    fn count_raw_entry_attempt(&mut self) -> bool {
+        if self.raw_entry_attempts >= self.scan_limits.raw_entry_attempts {
+            self.report_raw_entry_limit();
+            return false;
+        }
+        self.raw_entry_attempts += 1;
+        true
+    }
+
+    fn report_raw_entry_limit(&mut self) {
+        if !self.raw_entry_limit_reported {
+            self.push_limit_diagnostic(
+                "raw directory entry limit reached; scan is incomplete".into(),
+            );
+            self.raw_entry_limit_reported = true;
+        }
+    }
+
+    fn reserve_entry_text(&mut self, path: &str, hard: Option<&str>, soft: Option<&str>) -> bool {
+        let bytes = path
+            .len()
+            .saturating_add(hard.map(str::len).unwrap_or_default())
+            .saturating_add(soft.map(str::len).unwrap_or_default());
+        if self.retained_text_bytes.saturating_add(bytes) > self.scan_limits.retained_text_bytes {
+            if !self.retained_text_limit_reported {
+                self.push_limit_diagnostic(format!(
+                    "{path}: retained metadata text budget reached; scan is incomplete"
+                ));
+                self.retained_text_limit_reported = true;
+            }
+            return false;
+        }
+        self.retained_text_bytes += bytes;
+        true
+    }
+
+    fn push_diagnostic(&mut self, message: String) {
+        let message = truncate_diagnostic(&message);
+        let byte_limit_before_summary = DIAGNOSTIC_BYTES_LIMIT
+            .saturating_sub(DIAGNOSTIC_SUMMARY_RESERVE)
+            .saturating_sub(DIAGNOSTIC_LIMIT_BYTES_RESERVE);
+        let diagnostic_count_limit = DIAGNOSTIC_LIMIT - 1 - DIAGNOSTIC_LIMIT_MESSAGE_RESERVE;
+        let fits = self.diagnostics.len() < diagnostic_count_limit
+            && self.diagnostic_bytes.saturating_add(message.len()) <= byte_limit_before_summary;
+        if fits {
+            self.diagnostic_bytes += message.len();
+            self.diagnostics.push(message);
+        } else {
+            self.omitted_diagnostics = self.omitted_diagnostics.saturating_add(1);
+        }
+    }
+
+    fn push_limit_diagnostic(&mut self, message: String) {
+        let message = truncate_diagnostic(&message);
+        debug_assert!(message.len() <= DIAGNOSTIC_MESSAGE_BYTES_LIMIT);
+        debug_assert!(self.diagnostics.len() < DIAGNOSTIC_LIMIT - 1);
+        debug_assert!(
+            self.diagnostic_bytes.saturating_add(message.len())
+                <= DIAGNOSTIC_BYTES_LIMIT - DIAGNOSTIC_SUMMARY_RESERVE
+        );
+        self.diagnostic_bytes += message.len();
+        self.diagnostics.push(message);
+    }
+
+    fn finalize_diagnostics(&mut self) {
+        if self.omitted_diagnostics == 0 {
+            return;
+        }
+        let summary = format!(
+            "Additional scan diagnostics omitted: {}",
+            self.omitted_diagnostics
+        );
+        debug_assert!(summary.len() <= DIAGNOSTIC_SUMMARY_RESERVE);
+        debug_assert!(self.diagnostics.len() < DIAGNOSTIC_LIMIT);
+        debug_assert!(
+            self.diagnostic_bytes.saturating_add(summary.len()) <= DIAGNOSTIC_BYTES_LIMIT
+        );
+        self.diagnostic_bytes += summary.len();
+        self.diagnostics.push(summary);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -224,71 +436,219 @@ impl Workspace {
         &mut self,
         dir: &cap_std::fs::Dir,
         relative: &str,
-        parents: &[Gitignore],
+        parents: &[Arc<Gitignore>],
         inherited_ignore: Option<String>,
         compiled: &CompiledPolicy,
         cancel: &AtomicBool,
         depth: usize,
-    ) -> Result<()> {
+    ) -> Result<ScanOutcome> {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Message("scan cancelled".into()));
         }
         if depth >= 128 {
-            self.diagnostics
-                .push(format!("{relative}: directory depth limit reached"));
-            return Ok(());
+            self.push_diagnostic(format!("{relative}: directory depth limit reached"));
+            return Ok(ScanOutcome::Incomplete);
         }
         let mut matchers = parents.to_vec();
+        let mut outcome = ScanOutcome::Complete;
+        let mut local_ignore_failure_reason = None;
         if self.policy.gitignore {
             let ignore_path = if relative.is_empty() {
                 ".gitignore".to_owned()
             } else {
                 format!("{relative}/.gitignore")
             };
-            if let Ok(file) = content::open_safe(&self.root_handle, &ignore_path) {
-                let mut text = String::new();
-                match file.take(1024 * 1024 + 1).read_to_string(&mut text) {
-                    Ok(_) if text.len() <= 1024 * 1024 => {
-                        let mut builder = GitignoreBuilder::new(self.root.join(relative));
-                        for line in text.lines() {
-                            if let Err(e) =
-                                builder.add_line(Some(PathBuf::from(&ignore_path)), line)
-                            {
-                                self.diagnostics.push(format!("{ignore_path}: {e}"));
+            match content::open_safe(&self.root_handle, &ignore_path) {
+                Ok(file) => {
+                    if self.gitignore_bytes_exhausted || self.gitignore_rules_exhausted {
+                        let reason = format!(
+                            "{ignore_path}: ignore source not read because the cumulative .gitignore budget is exhausted; subtree is conservatively excluded"
+                        );
+                        self.push_diagnostic(reason.clone());
+                        local_ignore_failure_reason = Some(reason);
+                        outcome = ScanOutcome::Incomplete;
+                    } else {
+                        let remaining_bytes = self
+                            .scan_limits
+                            .gitignore_bytes
+                            .saturating_sub(self.gitignore_body_bytes_read);
+                        let read_limit = remaining_bytes.saturating_add(1).min(1024 * 1024 + 1);
+                        let mut bytes = Vec::new();
+                        let read_result = file.take(read_limit as u64).read_to_end(&mut bytes);
+                        self.gitignore_body_bytes_read =
+                            self.gitignore_body_bytes_read.saturating_add(bytes.len());
+                        let byte_limit_exceeded =
+                            self.gitignore_body_bytes_read > self.scan_limits.gitignore_bytes;
+                        if byte_limit_exceeded {
+                            self.gitignore_bytes_exhausted = true;
+                        }
+
+                        if let Err(error) = read_result {
+                            let reason = if byte_limit_exceeded {
+                                format!(
+                                    "{ignore_path}: cumulative .gitignore budget (input) exceeded; subtree is conservatively excluded"
+                                )
+                            } else {
+                                format!(
+                                    "{ignore_path}: unreadable .gitignore ({error}); subtree is conservatively excluded"
+                                )
+                            };
+                            if byte_limit_exceeded && !self.gitignore_budget_reported {
+                                self.push_limit_diagnostic(reason.clone());
+                                self.gitignore_budget_reported = true;
+                            } else {
+                                self.push_diagnostic(reason.clone());
+                            }
+                            local_ignore_failure_reason = Some(reason);
+                            outcome = ScanOutcome::Incomplete;
+                        } else if byte_limit_exceeded {
+                            let reason = format!(
+                                "{ignore_path}: cumulative .gitignore budget (input) exceeded; subtree is conservatively excluded"
+                            );
+                            if !self.gitignore_budget_reported {
+                                self.push_limit_diagnostic(reason.clone());
+                                self.gitignore_budget_reported = true;
+                            }
+                            local_ignore_failure_reason = Some(reason);
+                            outcome = ScanOutcome::Incomplete;
+                        } else if bytes.len() > 1024 * 1024 {
+                            let reason = format!(
+                                "{ignore_path}: .gitignore exceeds 1 MiB; subtree is conservatively excluded"
+                            );
+                            self.push_diagnostic(reason.clone());
+                            local_ignore_failure_reason = Some(reason);
+                            outcome = ScanOutcome::Incomplete;
+                        } else {
+                            match String::from_utf8(bytes) {
+                                Err(error) => {
+                                    let reason = format!(
+                                        "{ignore_path}: invalid UTF-8 .gitignore ({error}); subtree is conservatively excluded"
+                                    );
+                                    self.push_diagnostic(reason.clone());
+                                    local_ignore_failure_reason = Some(reason);
+                                    outcome = ScanOutcome::Incomplete;
+                                }
+                                Ok(text) => {
+                                    let rule_count = text.lines().count();
+                                    if self.gitignore_rule_count.saturating_add(rule_count)
+                                        > self.scan_limits.gitignore_rules
+                                    {
+                                        self.gitignore_rules_exhausted = true;
+                                        self.gitignore_rule_count =
+                                            self.gitignore_rule_count.saturating_add(rule_count);
+                                        let reason = format!(
+                                            "{ignore_path}: cumulative .gitignore budget (rule) exceeded; subtree is conservatively excluded"
+                                        );
+                                        if !self.gitignore_budget_reported {
+                                            self.push_limit_diagnostic(reason.clone());
+                                            self.gitignore_budget_reported = true;
+                                        }
+                                        local_ignore_failure_reason = Some(reason);
+                                        outcome = ScanOutcome::Incomplete;
+                                    } else {
+                                        self.gitignore_rule_count += rule_count;
+                                        let mut builder =
+                                            GitignoreBuilder::new(self.root.join(relative));
+                                        let mut parse_failed = false;
+                                        for line in text.lines() {
+                                            if let Err(e) = builder
+                                                .add_line(Some(PathBuf::from(&ignore_path)), line)
+                                            {
+                                                self.push_diagnostic(format!("{ignore_path}: {e}"));
+                                                parse_failed = true;
+                                            }
+                                        }
+                                        if parse_failed {
+                                            let reason = format!(
+                                                "{ignore_path}: one or more ignore rules could not be parsed; subtree is conservatively excluded"
+                                            );
+                                            self.push_diagnostic(reason.clone());
+                                            local_ignore_failure_reason = Some(reason);
+                                            outcome = ScanOutcome::Incomplete;
+                                        } else {
+                                            match builder.build() {
+                                                Ok(matcher) => matchers.push(Arc::new(matcher)),
+                                                Err(e) => {
+                                                    let reason = format!(
+                                                        "{ignore_path}: ignore rules could not be compiled ({e}); subtree is conservatively excluded"
+                                                    );
+                                                    self.push_diagnostic(reason.clone());
+                                                    local_ignore_failure_reason = Some(reason);
+                                                    outcome = ScanOutcome::Incomplete;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        match builder.build() {
-                            Ok(matcher) => matchers.push(matcher),
-                            Err(e) => self.diagnostics.push(format!("{ignore_path}: {e}")),
-                        }
                     }
-                    _ => self.diagnostics.push(format!(
-                        "{ignore_path}: unreadable, invalid UTF-8 or larger than 1 MiB"
-                    )),
+                }
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    let is_non_file = matches!(
+                        &error,
+                        Error::Message(message) if message.starts_with("not a regular file:")
+                    );
+                    if is_non_file {
+                        self.push_diagnostic(format!("{ignore_path}: {error}"));
+                    } else {
+                        let reason = format!(
+                            "{ignore_path}: unreadable ignore source ({error}); subtree is conservatively excluded"
+                        );
+                        self.push_diagnostic(reason.clone());
+                        local_ignore_failure_reason = Some(reason);
+                    }
+                    outcome = ScanOutcome::Incomplete;
                 }
             }
         }
+        let inherited_ignore = inherited_ignore.or(local_ignore_failure_reason);
         let inherited_force =
             selection::evaluate(relative, None, inherited_ignore.as_deref(), &self.intents)
                 .force_included;
         let targeted =
             inherited_ignore.is_some() && !self.browsed.contains(relative) && !inherited_force;
         let names: Vec<String> = if targeted {
-            self.intents
-                .iter()
-                .filter(|(p, i)| {
-                    **i == Intent::ForceInclude
-                        && selection::is_descendant(p, relative)
-                        && p.as_str() != relative
-                })
-                .filter_map(|(p, _)| {
-                    p.strip_prefix(&format!("{relative}/"))
-                        .and_then(|tail| tail.split('/').next())
-                        .map(str::to_owned)
-                })
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
+            let mut names = BTreeSet::new();
+            let remaining = self
+                .scan_limits
+                .raw_entry_attempts
+                .saturating_sub(self.raw_entry_attempts);
+            let mut exceeded_limit = false;
+            let prefix = if relative.is_empty() {
+                String::new()
+            } else {
+                format!("{relative}/")
+            };
+            for (path, intent) in &self.intents {
+                if *intent != Intent::ForceInclude
+                    || !selection::is_descendant(path, relative)
+                    || path.as_str() == relative
+                {
+                    continue;
+                }
+                let Some(name) = path
+                    .strip_prefix(&prefix)
+                    .and_then(|tail| tail.split('/').next())
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                if !names.contains(&name) {
+                    if names.len() >= remaining {
+                        exceeded_limit = true;
+                        break;
+                    }
+                    names.insert(name);
+                }
+            }
+            self.raw_entry_attempts += names.len();
+            if exceeded_limit {
+                self.report_raw_entry_limit();
+                outcome = ScanOutcome::Exhausted;
+            }
+            names.into_iter().collect()
         } else {
             let location = if relative.is_empty() {
                 Path::new(".")
@@ -302,36 +662,38 @@ impl Workspace {
                         if cancel.load(Ordering::Relaxed) {
                             return Err(Error::Message("scan cancelled".into()));
                         }
-                        if names.len() + self.entries.len() >= ENTRY_LIMIT {
-                            self.diagnostics
-                                .push("entry limit reached; index is incomplete".into());
+                        if !self.count_raw_entry_attempt() {
+                            outcome = ScanOutcome::Exhausted;
                             break;
                         }
                         match entry {
                             Ok(e) => match e.file_name().into_string() {
                                 Ok(n) => names.push(n),
-                                Err(_) => self.diagnostics.push(format!(
-                                    "{relative}: non-UTF-8 filename cannot be represented safely"
-                                )),
+                                Err(_) => {
+                                    self.push_diagnostic(format!(
+                                        "{relative}: non-UTF-8 filename cannot be represented safely"
+                                    ));
+                                    outcome = ScanOutcome::Incomplete;
+                                }
                             },
-                            Err(e) => self.diagnostics.push(format!("{relative}: {e}")),
+                            Err(e) => {
+                                self.push_diagnostic(format!("{relative}: {e}"));
+                                outcome = ScanOutcome::Incomplete;
+                            }
                         }
                     }
                     names.sort();
                     names
                 }
                 Err(e) => {
-                    self.diagnostics.push(format!("{relative}: {e}"));
-                    return Ok(());
+                    self.push_diagnostic(format!("{relative}: {e}"));
+                    return Ok(ScanOutcome::Incomplete);
                 }
             }
         };
         for name in names {
             if cancel.load(Ordering::Relaxed) {
                 return Err(Error::Message("scan cancelled".into()));
-            }
-            if self.entries.len() >= ENTRY_LIMIT {
-                break;
             }
             let path = if relative.is_empty() {
                 name
@@ -342,7 +704,10 @@ impl Workspace {
             let metadata = match dir.symlink_metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    self.diagnostics.push(format!("{path}: {e}"));
+                    self.push_diagnostic(format!("{path}: {e}"));
+                    if outcome == ScanOutcome::Complete {
+                        outcome = ScanOutcome::Incomplete;
+                    }
                     continue;
                 }
             };
@@ -416,6 +781,10 @@ impl Workspace {
             }
             let decision =
                 selection::evaluate(&path, hard.as_deref(), soft.as_deref(), &self.intents);
+            if !self.reserve_entry_text(&path, hard.as_deref(), soft.as_deref()) {
+                outcome = ScanOutcome::Exhausted;
+                break;
+            }
             let required = self.intents.iter().any(|(p, i)| {
                 *i == Intent::ForceInclude && selection::is_descendant(p, &path) && *p != path
             });
@@ -433,7 +802,8 @@ impl Workspace {
                 .unwrap_or(0);
             let complete = traverse
                 && (soft.is_none() || decision.force_included || self.browsed.contains(&path));
-            self.entries.push(IndexedEntry {
+            let entry_index = self.entries.len();
+            Arc::make_mut(&mut self.entries).push(IndexedEntry {
                 path: path.clone(),
                 kind: if directory {
                     "directory"
@@ -450,10 +820,21 @@ impl Workspace {
                 enumerated: !directory || complete,
             });
             if traverse {
-                self.scan_directory(dir, &path, &matchers, soft, compiled, cancel, depth + 1)?;
+                let subtree_outcome =
+                    self.scan_directory(dir, &path, &matchers, soft, compiled, cancel, depth + 1)?;
+                if subtree_outcome != ScanOutcome::Complete {
+                    Arc::make_mut(&mut self.entries)[entry_index].enumerated = false;
+                    if subtree_outcome == ScanOutcome::Exhausted {
+                        outcome = ScanOutcome::Exhausted;
+                        break;
+                    }
+                    if outcome == ScanOutcome::Complete {
+                        outcome = ScanOutcome::Incomplete;
+                    }
+                }
             }
         }
-        Ok(())
+        Ok(outcome)
     }
 
     fn generated_reason(&self, path: &str) -> Option<&'static str> {
@@ -548,23 +929,14 @@ impl Workspace {
         // The index and manifest retain canonical lexical path order. The view is
         // presentation data, so expose a deterministic depth-first tree with
         // directories before files at each sibling level.
-        let kinds: BTreeMap<String, bool> = entries
+        let directory_paths: BTreeSet<&str> = self
+            .entries
             .iter()
-            .map(|entry| (entry.path.clone(), entry.kind == "directory"))
+            .filter(|entry| entry.kind == "directory")
+            .map(|entry| entry.path.as_str())
             .collect();
-        entries.sort_by_cached_key(|entry| {
-            let mut key = Vec::new();
-            let mut prefix = String::new();
-            for component in entry.path.split('/') {
-                if !prefix.is_empty() {
-                    prefix.push('/');
-                }
-                prefix.push_str(component);
-                let directory_first = kinds.get(prefix.as_str()).copied().unwrap_or(false);
-                key.push((u8::from(!directory_first), component.to_owned()));
-            }
-            key
-        });
+        entries
+            .sort_by(|left, right| compare_tree_paths(&left.path, &right.path, &directory_paths));
 
         let manifest = self.manifest();
         WorkspaceView {
@@ -581,5 +953,609 @@ impl Workspace {
             entries,
             diagnostics: self.diagnostics.clone(),
         }
+    }
+}
+
+fn compare_tree_paths(left: &str, right: &str, directories: &BTreeSet<&str>) -> CmpOrdering {
+    let mut left_start = 0;
+    let mut right_start = 0;
+    let mut left_parts = left.split('/');
+    let mut right_parts = right.split('/');
+
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (Some(left_part), Some(right_part)) if left_part == right_part => {
+                left_start += left_part.len() + 1;
+                right_start += right_part.len() + 1;
+            }
+            (Some(left_part), Some(right_part)) => {
+                let left_end = left_start + left_part.len();
+                let right_end = right_start + right_part.len();
+                let left_is_directory = directories.contains(&left[..left_end]);
+                let right_is_directory = directories.contains(&right[..right_end]);
+                return (!left_is_directory)
+                    .cmp(&(!right_is_directory))
+                    .then_with(|| left_part.cmp(right_part));
+            }
+            (None, None) => return CmpOrdering::Equal,
+            (None, Some(_)) => return CmpOrdering::Less,
+            (Some(_), None) => return CmpOrdering::Greater,
+        }
+    }
+}
+
+fn truncate_diagnostic(message: &str) -> String {
+    if message.len() <= DIAGNOSTIC_MESSAGE_BYTES_LIMIT {
+        return message.to_owned();
+    }
+
+    const MARKER: &str = " …[truncated]… ";
+    let available = DIAGNOSTIC_MESSAGE_BYTES_LIMIT - MARKER.len();
+    let prefix_budget = available * 3 / 4;
+    let suffix_budget = available - prefix_budget;
+    let mut prefix_end = prefix_budget;
+    while !message.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    let mut suffix_start = message.len() - suffix_budget;
+    while !message.is_char_boundary(suffix_start) {
+        suffix_start += 1;
+    }
+    format!(
+        "{}{}{}",
+        &message[..prefix_end],
+        MARKER,
+        &message[suffix_start..]
+    )
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::{
+        DIAGNOSTIC_BYTES_LIMIT, DIAGNOSTIC_LIMIT, FilterPolicy, ScanLimits, Workspace,
+        truncate_diagnostic,
+    };
+    use crate::{WorkspaceRoot, selection::Intent};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::atomic::AtomicBool,
+    };
+
+    #[test]
+    fn diagnostic_truncation_preserves_utf8_boundary_prefix_and_suffix() {
+        let message = format!("useful path: {}: useful error reason", "é".repeat(800));
+        let truncated = truncate_diagnostic(&message);
+
+        assert!(truncated.len() <= 1024);
+        assert!(truncated.starts_with("useful path: "));
+        assert!(truncated.contains("[truncated]"));
+        assert!(truncated.ends_with("useful error reason"));
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn raw_entry_budget_stops_descendant_and_marks_its_directory_incomplete() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("tree/inner")).unwrap();
+        std::fs::write(temp.path().join("a.ts"), "a").unwrap();
+        std::fs::write(temp.path().join("tree/inner/b.ts"), "b").unwrap();
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                raw_entry_attempts: 2,
+                retained_text_bytes: usize::MAX,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        let view = workspace.view(1);
+        let tree = view
+            .entries
+            .iter()
+            .find(|entry| entry.path == "tree")
+            .unwrap();
+        assert!(!tree.enumerated);
+        assert!(!view.entries.iter().any(|entry| entry.path == "tree/inner"));
+        assert_eq!(workspace.enumerated_entries, 2);
+        assert!(view.incomplete);
+        assert_eq!(
+            view.diagnostics
+                .iter()
+                .filter(|message| message.contains("raw directory entry limit"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn retained_text_budget_stops_descendants_and_marks_all_ancestors_incomplete() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("outer/inner")).unwrap();
+        std::fs::write(temp.path().join("outer/inner/source.ts"), "text").unwrap();
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                raw_entry_attempts: usize::MAX,
+                retained_text_bytes: "outer".len() + "outer/inner".len(),
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        let view = workspace.view(1);
+        for path in ["outer", "outer/inner"] {
+            let directory = view
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .unwrap();
+            assert!(
+                !directory.enumerated,
+                "{path} incorrectly claims completeness"
+            );
+        }
+        assert!(
+            !view
+                .entries
+                .iter()
+                .any(|entry| entry.path.ends_with("source.ts"))
+        );
+        assert!(view.incomplete);
+        assert!(
+            view.diagnostics
+                .iter()
+                .any(|message| { message.contains("retained metadata text budget") })
+        );
+    }
+
+    #[test]
+    fn cumulative_gitignore_budget_is_injected_and_preserves_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("a")).unwrap();
+        std::fs::create_dir_all(temp.path().join("b")).unwrap();
+        std::fs::write(temp.path().join("a/.gitignore"), "*.ts\n").unwrap();
+        std::fs::write(temp.path().join("b/.gitignore"), "hidden.ts\n").unwrap();
+        std::fs::write(temp.path().join("a/hidden.ts"), "ignored by known rule").unwrap();
+        std::fs::write(temp.path().join("b/hidden.ts"), "unknown rule").unwrap();
+        std::fs::write(temp.path().join("b/forced.ts"), "explicit intent").unwrap();
+        std::fs::write(temp.path().join("z.ts"), "readable sibling").unwrap();
+        let intents = BTreeMap::from([("b/forced.ts".into(), Intent::ForceInclude)]);
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            intents,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                gitignore_bytes: 5,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let view = workspace.view(1);
+
+        assert!(
+            view.incomplete,
+            "budget exhaustion must mark the scan incomplete"
+        );
+        assert!(view.diagnostics.iter().any(|message| {
+            message.contains("cumulative .gitignore budget") && message.contains("b/.gitignore")
+        }));
+        assert!(
+            view.entries
+                .iter()
+                .any(|entry| entry.path == "z.ts" && entry.selected)
+        );
+        assert!(
+            !view
+                .entries
+                .iter()
+                .any(|entry| entry.path == "a/hidden.ts" && entry.selected)
+        );
+        assert!(
+            !view
+                .entries
+                .iter()
+                .any(|entry| entry.path == "b/hidden.ts" && entry.selected)
+        );
+        assert!(
+            view.entries
+                .iter()
+                .any(|entry| entry.path == "b/forced.ts" && entry.selected)
+        );
+    }
+
+    #[test]
+    fn cumulative_gitignore_rule_budget_is_checked_before_building_matchers() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("a")).unwrap();
+        std::fs::write(temp.path().join("a/.gitignore"), "secret.ts\nother.ts\n").unwrap();
+        std::fs::write(temp.path().join("a/secret.ts"), "unknown rules").unwrap();
+        std::fs::write(temp.path().join("z.ts"), "readable sibling").unwrap();
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                gitignore_rules: 1,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let view = workspace.view(1);
+
+        assert!(view.incomplete);
+        assert!(view.diagnostics.iter().any(|message| {
+            message.contains("cumulative .gitignore budget") && message.contains("a/.gitignore")
+        }));
+        assert!(
+            !view
+                .entries
+                .iter()
+                .any(|entry| entry.path == "a/secret.ts" && entry.selected)
+        );
+        assert!(
+            view.entries
+                .iter()
+                .any(|entry| entry.path == "z.ts" && entry.selected)
+        );
+    }
+
+    #[test]
+    fn cumulative_gitignore_cutoff_bounds_body_reads_and_preserves_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        for directory in ["a", "b", "c", "d"] {
+            std::fs::create_dir_all(temp.path().join(directory)).unwrap();
+        }
+        let budget = 5;
+        std::fs::write(temp.path().join("a/.gitignore"), "a\n").unwrap();
+        std::fs::write(temp.path().join("b/.gitignore"), "secret.ts\n").unwrap();
+        std::fs::write(temp.path().join("b/secret.ts"), "unknown rule").unwrap();
+        std::fs::write(temp.path().join("b/forced.ts"), "explicit intent").unwrap();
+        std::fs::write(temp.path().join("c/visible.ts"), "readable sibling").unwrap();
+        std::fs::write(temp.path().join("d/.gitignore"), "hidden.ts\n").unwrap();
+        std::fs::write(temp.path().join("d/hidden.ts"), "later unknown rule").unwrap();
+        let intents = BTreeMap::from([("b/forced.ts".into(), Intent::ForceInclude)]);
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            intents,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                gitignore_bytes: budget,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let view = workspace.view(1);
+
+        assert!(workspace.gitignore_body_bytes_read <= budget + 1);
+        assert!(view.incomplete);
+        assert!(
+            !view
+                .entries
+                .iter()
+                .any(|entry| { entry.path == "b/secret.ts" && entry.selected })
+        );
+        assert!(
+            !view
+                .entries
+                .iter()
+                .any(|entry| { entry.path == "d/hidden.ts" && entry.selected })
+        );
+        assert!(view.entries.iter().any(|entry| {
+            entry.path == "b/forced.ts" && entry.selected && entry.force_included
+        }));
+        assert!(
+            view.entries
+                .iter()
+                .any(|entry| { entry.path == "c/visible.ts" && entry.selected })
+        );
+    }
+
+    #[test]
+    fn root_gitignore_budget_preserves_top_level_force_include() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".gitignore"), "secret.ts\n").unwrap();
+        std::fs::write(temp.path().join("secret.ts"), "conservatively excluded").unwrap();
+        std::fs::write(temp.path().join("forced.ts"), "explicit intent").unwrap();
+        let intents = BTreeMap::from([("forced.ts".into(), Intent::ForceInclude)]);
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            intents,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                gitignore_bytes: 0,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let view = workspace.view(1);
+
+        assert!(view.incomplete);
+        assert!(!view.entries.iter().any(|entry| entry.path == "secret.ts"));
+        assert!(
+            view.entries.iter().any(|entry| {
+                entry.path == "forced.ts" && entry.selected && entry.force_included
+            })
+        );
+    }
+
+    #[test]
+    fn oversized_root_gitignore_conservatively_excludes_but_keeps_force_include() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ignore = String::from("secret.ts\n");
+        ignore.push_str(&"# padding\n".repeat(1024 * 1024 / 10 + 2));
+        assert!(ignore.len() > 1024 * 1024);
+        std::fs::write(temp.path().join(".gitignore"), ignore).unwrap();
+        std::fs::write(temp.path().join("secret.ts"), "unknown ignore rules").unwrap();
+        std::fs::write(temp.path().join("forced.ts"), "explicit intent").unwrap();
+        let intents = BTreeMap::from([("forced.ts".into(), Intent::ForceInclude)]);
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            intents,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                gitignore_bytes: usize::MAX,
+                gitignore_rules: usize::MAX,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let view = workspace.view(1);
+
+        assert!(view.incomplete);
+        assert!(!view.entries.iter().any(|entry| entry.path == "secret.ts"));
+        assert!(view.diagnostics.iter().any(|message| {
+            message.contains(".gitignore") && message.contains("conservatively excluded")
+        }));
+        assert!(
+            view.entries.iter().any(|entry| {
+                entry.path == "forced.ts" && entry.selected && entry.force_included
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_ignore_rule_excludes_its_subtree_but_keeps_sibling_and_force_include() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("a")).unwrap();
+        std::fs::write(temp.path().join("a/.gitignore"), "{secret.ts\n").unwrap();
+        std::fs::write(temp.path().join("a/{secret.ts"), "literal Git pattern").unwrap();
+        std::fs::write(temp.path().join("a/forced.ts"), "explicit intent").unwrap();
+        std::fs::write(temp.path().join("z.ts"), "readable sibling").unwrap();
+        let intents = BTreeMap::from([("a/forced.ts".into(), Intent::ForceInclude)]);
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            intents,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let view = workspace.view(1);
+
+        assert!(view.incomplete);
+        assert!(
+            !view
+                .entries
+                .iter()
+                .any(|entry| entry.path == "a/{secret.ts" && entry.selected)
+        );
+        assert!(view.diagnostics.iter().any(|message| {
+            message.contains("a/.gitignore") && message.contains("conservatively excluded")
+        }));
+        assert!(view.entries.iter().any(|entry| {
+            entry.path == "a/forced.ts" && entry.selected && entry.force_included
+        }));
+        assert!(
+            view.entries
+                .iter()
+                .any(|entry| entry.path == "z.ts" && entry.selected)
+        );
+    }
+
+    #[test]
+    fn all_limit_notices_and_diagnostic_flood_fit_the_bounded_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("a/c")).unwrap();
+        let malformed = std::iter::repeat_n("bad\\", 2_000)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(temp.path().join("a/.gitignore"), &malformed).unwrap();
+        std::fs::write(temp.path().join("a/c/.gitignore"), "secret.ts\n").unwrap();
+        std::fs::write(temp.path().join("a/c/other.ts"), "other").unwrap();
+        std::fs::write(temp.path().join("a/c/secret.ts"), "secret").unwrap();
+        std::fs::write(temp.path().join("a/c/third.ts"), "third").unwrap();
+        std::fs::write(temp.path().join("z.ts"), "sibling").unwrap();
+        let parse_failure_reason = "a/.gitignore: one or more ignore rules could not be parsed; subtree is conservatively excluded";
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            BTreeMap::new(),
+            BTreeSet::from(["a".into(), "a/c".into()]),
+            BTreeSet::new(),
+            ScanLimits {
+                raw_entry_attempts: 7,
+                retained_text_bytes: "a".len()
+                    + "a/.gitignore".len()
+                    + parse_failure_reason.len()
+                    + "a/c".len()
+                    + parse_failure_reason.len(),
+                gitignore_bytes: malformed.len(),
+                gitignore_rules: usize::MAX,
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        let diagnostics = workspace.view(1).diagnostics;
+        for marker in [
+            "raw directory entry limit",
+            "retained metadata text budget",
+            "cumulative .gitignore budget",
+            "Additional scan diagnostics omitted",
+        ] {
+            assert!(
+                diagnostics.iter().any(|message| message.contains(marker)),
+                "missing diagnostic {marker}"
+            );
+        }
+        assert!(diagnostics.len() <= DIAGNOSTIC_LIMIT);
+        assert!(diagnostics.iter().map(String::len).sum::<usize>() <= DIAGNOSTIC_BYTES_LIMIT);
+    }
+
+    #[test]
+    fn targeted_force_names_consume_the_shared_raw_entry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("dist/a")).unwrap();
+        std::fs::create_dir_all(temp.path().join("dist/b")).unwrap();
+        std::fs::write(temp.path().join(".gitignore"), "dist/\n").unwrap();
+        std::fs::write(temp.path().join("dist/a/one.ts"), "one").unwrap();
+        std::fs::write(temp.path().join("dist/b/two.ts"), "two").unwrap();
+        let intents = BTreeMap::from([
+            ("dist/a/one.ts".into(), Intent::ForceInclude),
+            ("dist/b/two.ts".into(), Intent::ForceInclude),
+        ]);
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            intents,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                raw_entry_attempts: 3,
+                retained_text_bytes: usize::MAX,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        let view = workspace.view(1);
+        let dist = view
+            .entries
+            .iter()
+            .find(|entry| entry.path == "dist")
+            .unwrap();
+        assert!(!dist.enumerated);
+        assert!(view.incomplete);
+        assert!(!view.entries.iter().any(|entry| entry.path == "dist/b"));
+        assert!(
+            view.diagnostics
+                .iter()
+                .any(|message| { message.contains("raw directory entry limit") })
+        );
+    }
+
+    #[test]
+    fn scan_limit_notice_survives_a_flood_of_malformed_rule_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("a")).unwrap();
+        let malformed = std::iter::repeat_n("bad\\", 2_000)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(temp.path().join("a/.gitignore"), malformed).unwrap();
+        std::fs::write(temp.path().join("a/inside.ts"), "a").unwrap();
+        std::fs::write(temp.path().join("b.ts"), "b").unwrap();
+        std::fs::write(temp.path().join("c.ts"), "c").unwrap();
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            BTreeMap::new(),
+            BTreeSet::from(["a".into()]),
+            BTreeSet::new(),
+            ScanLimits {
+                raw_entry_attempts: 2,
+                retained_text_bytes: usize::MAX,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        let diagnostics = workspace.view(1).diagnostics;
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| { message.contains("raw directory entry limit") })
+        );
+        assert!(diagnostics.len() <= DIAGNOSTIC_LIMIT);
+        assert!(diagnostics.iter().map(String::len).sum::<usize>() <= DIAGNOSTIC_BYTES_LIMIT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_directory_entries_consume_the_raw_entry_budget() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        for name in [[0xff, b'a'], [0xfe, b'b'], [0xfd, b'c']] {
+            std::fs::write(
+                temp.path()
+                    .join(std::ffi::OsString::from_vec(name.to_vec())),
+                "text",
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            FilterPolicy::default(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ScanLimits {
+                raw_entry_attempts: 2,
+                retained_text_bytes: usize::MAX,
+                ..ScanLimits::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        assert!(
+            workspace
+                .view(1)
+                .diagnostics
+                .iter()
+                .any(|message| { message.contains("raw directory entry limit") })
+        );
     }
 }

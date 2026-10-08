@@ -407,3 +407,252 @@ fn registered_outputs_and_export_leftovers_are_hard_excluded_even_when_forced() 
 
     assert_eq!(std::fs::read(&source).unwrap(), b"fn main() {}\n");
 }
+
+#[test]
+fn malformed_ignore_diagnostics_have_a_bounded_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let malformed = std::iter::repeat_n("bad\\", 2_000)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(temp.path().join(".gitignore"), malformed).unwrap();
+
+    let workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let diagnostics = workspace.view(1).diagnostics;
+
+    assert!(diagnostics.len() <= 64);
+    assert!(diagnostics.iter().map(String::len).sum::<usize>() <= 16 * 1024);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("omitted"))
+    );
+}
+
+#[test]
+fn complex_glob_is_rejected_without_panicking_or_changing_the_current_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let current = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let original_manifest = current
+        .manifest()
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect::<Vec<_>>();
+    let original_view = current.view(7);
+    let oversized_glob = "*a".repeat(100_000);
+    let candidate = FilterPolicy {
+        include_paths: vec![oversized_glob],
+        ..FilterPolicy::default()
+    };
+
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Workspace::scan(
+            temp.path(),
+            candidate,
+            BTreeMap::new(),
+            BTreeSet::new(),
+            &AtomicBool::new(false),
+        )
+    }));
+
+    assert!(attempt.is_ok(), "invalid candidate policy must never panic");
+    let error = attempt
+        .unwrap()
+        .err()
+        .expect("oversized candidate should be rejected");
+    assert!(error.to_string().contains("filter policy"));
+    assert_eq!(
+        current
+            .manifest()
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>(),
+        original_manifest
+    );
+    assert_eq!(current.view(7).selected_count, original_view.selected_count);
+    assert_eq!(
+        current.view(7).policy.include_paths,
+        original_view.policy.include_paths
+    );
+}
+
+#[test]
+fn policy_rule_count_and_total_bytes_have_explicit_limits() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+    let too_many = FilterPolicy {
+        include_paths: (0..257).map(|index| format!("file-{index}.rs")).collect(),
+        ..FilterPolicy::default()
+    };
+    let error = Workspace::scan(
+        temp.path(),
+        too_many,
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .err()
+    .expect("too many rules should be rejected");
+    assert!(error.to_string().contains("256 total rules"));
+
+    let too_many_bytes = FilterPolicy {
+        include_paths: vec!["a".repeat(4_097)],
+        ..FilterPolicy::default()
+    };
+    let error = Workspace::scan(
+        temp.path(),
+        too_many_bytes,
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .err()
+    .expect("oversized rule should be rejected");
+    assert!(error.to_string().contains("4 KiB per rule"));
+
+    let too_much_text = FilterPolicy {
+        include_paths: (0..17).map(|_| "a".repeat(4_000)).collect(),
+        ..FilterPolicy::default()
+    };
+    let error = Workspace::scan(
+        temp.path(),
+        too_much_text,
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .err()
+    .expect("too much total rule text should be rejected");
+    assert!(error.to_string().contains("64 KiB of total rule text"));
+}
+
+#[test]
+fn invalid_gitignore_path_is_reported_and_does_not_hide_siblings() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join(".gitignore")).unwrap();
+    std::fs::write(temp.path().join("main.ts"), "readable sibling").unwrap();
+
+    let workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let view = workspace.view(1);
+
+    assert!(
+        view.incomplete,
+        "invalid ignore path must mark the scan incomplete"
+    );
+    assert!(
+        view.diagnostics
+            .iter()
+            .any(|message| message.contains(".gitignore")),
+        "invalid ignore path should have an actionable diagnostic"
+    );
+    assert!(
+        view.entries
+            .iter()
+            .any(|entry| entry.path == "main.ts" && entry.selected)
+    );
+}
+
+#[test]
+fn depth_limited_branch_does_not_hide_readable_siblings() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut deep = temp.path().join("a");
+    for _ in 0..128 {
+        deep = deep.join("d");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(temp.path().join("z.ts"), "readable sibling").unwrap();
+    let workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let view = workspace.view(1);
+    assert!(view.incomplete);
+    assert!(
+        view.diagnostics
+            .iter()
+            .any(|message| message.contains("depth limit"))
+    );
+    assert!(
+        workspace
+            .manifest()
+            .iter()
+            .any(|entry| entry.path == "z.ts")
+    );
+    assert!(
+        !view
+            .entries
+            .iter()
+            .find(|entry| entry.path == "a")
+            .unwrap()
+            .enumerated
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_filename_marks_ancestors_incomplete_without_hiding_readable_siblings() {
+    use std::os::unix::ffi::OsStringExt;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("a/inner")).unwrap();
+    std::fs::write(
+        temp.path()
+            .join("a/inner")
+            .join(std::ffi::OsString::from_vec(vec![0xff])),
+        "unrepresentable",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("a/inner/visible.ts"), "visible").unwrap();
+    std::fs::write(temp.path().join("z.ts"), "sibling").unwrap();
+    let workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let view = workspace.view(1);
+    for path in ["a", "a/inner"] {
+        assert!(
+            !view
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .unwrap()
+                .enumerated
+        );
+    }
+    let manifest = workspace.manifest();
+    assert!(
+        manifest
+            .iter()
+            .any(|entry| entry.path == "a/inner/visible.ts")
+    );
+    assert!(manifest.iter().any(|entry| entry.path == "z.ts"));
+}

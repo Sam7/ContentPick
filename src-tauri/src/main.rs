@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod paging;
+
 use contextpick_core::{
     content,
     destination::Destination,
@@ -8,6 +10,7 @@ use contextpick_core::{
     selection::Intent,
     workspace::{FilterPolicy, Workspace, WorkspaceView},
 };
+use paging::{WorkspacePage, WorkspaceResponse};
 use std::{
     collections::BTreeSet,
     sync::{
@@ -22,6 +25,7 @@ use tauri_plugin_dialog::DialogExt;
 #[derive(Default)]
 struct Session {
     workspace: Option<Workspace>,
+    snapshot: Option<Arc<WorkspaceView>>,
     generation: u64,
     cancel: Arc<AtomicBool>,
     preferences: Preferences,
@@ -54,18 +58,54 @@ fn begin_scan(shared: &Shared) -> CommandResult<(u64, Arc<AtomicBool>)> {
     Ok((state.generation, state.cancel.clone()))
 }
 
-fn publish(shared: &Shared, workspace: Workspace, generation: u64) -> CommandResult<WorkspaceView> {
+fn publish(
+    shared: &Shared,
+    workspace: Workspace,
+    generation: u64,
+) -> CommandResult<WorkspaceResponse> {
+    let snapshot = Arc::new(workspace.view(generation));
+    let response = paging::initial(&snapshot)?;
     let mut state = lock(shared)?;
     if state.generation != generation {
         return Err("operation superseded by a newer request".into());
     }
     persist_workspace(&mut state, &workspace)?;
     state.workspace = Some(workspace);
-    Ok(state
-        .workspace
-        .as_ref()
-        .expect("workspace just assigned")
-        .view(generation))
+    state.snapshot = Some(snapshot);
+    Ok(response)
+}
+
+fn get_workspace_page(
+    shared: &Shared,
+    generation: u64,
+    offset: usize,
+) -> CommandResult<WorkspacePage> {
+    let snapshot = {
+        let state = lock(shared)?;
+        if state.generation != generation {
+            return Err("workspace page superseded by a newer request".into());
+        }
+        state
+            .snapshot
+            .clone()
+            .filter(|view| view.generation == generation)
+            .ok_or("workspace snapshot is not ready")?
+    };
+    let response = paging::page(&snapshot, offset)?;
+    if lock(shared)?.generation != generation {
+        return Err("workspace page superseded by a newer request".into());
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+async fn workspace_page(
+    generation: u64,
+    offset: usize,
+    state: State<'_, Shared>,
+) -> CommandResult<WorkspacePage> {
+    let shared = state.inner().clone();
+    blocking(move || get_workspace_page(&shared, generation, offset)).await
 }
 
 fn persist_workspace(state: &mut Session, workspace: &Workspace) -> CommandResult<()> {
@@ -96,7 +136,7 @@ fn persist_workspace(state: &mut Session, workspace: &Workspace) -> CommandResul
 }
 
 #[tauri::command]
-async fn restore_workspace(state: State<'_, Shared>) -> CommandResult<Option<WorkspaceView>> {
+async fn restore_workspace(state: State<'_, Shared>) -> CommandResult<Option<WorkspaceResponse>> {
     let shared = state.inner().clone();
     let (generation, cancel) = begin_scan(&shared)?;
     blocking(move || {
@@ -138,7 +178,7 @@ async fn restore_workspace(state: State<'_, Shared>) -> CommandResult<Option<Wor
 async fn choose_workspace(
     app: tauri::AppHandle,
     state: State<'_, Shared>,
-) -> CommandResult<Option<WorkspaceView>> {
+) -> CommandResult<Option<WorkspaceResponse>> {
     let shared = state.inner().clone();
     let (generation, cancel) = begin_scan(&shared)?;
     blocking(move || {
@@ -171,7 +211,7 @@ async fn rescan(
     shared: Shared,
     policy: Option<FilterPolicy>,
     browse: Option<String>,
-) -> CommandResult<WorkspaceView> {
+) -> CommandResult<WorkspaceResponse> {
     let mut previous = lock(&shared)?
         .workspace
         .clone()
@@ -193,7 +233,7 @@ async fn rescan(
     rescan_candidate(shared, previous).await
 }
 
-async fn rescan_candidate(shared: Shared, previous: Workspace) -> CommandResult<WorkspaceView> {
+async fn rescan_candidate(shared: Shared, previous: Workspace) -> CommandResult<WorkspaceResponse> {
     let (generation, cancel) = begin_scan(&shared)?;
     blocking(move || {
         let workspace = Workspace::scan_pinned_with_outputs(
@@ -211,18 +251,21 @@ async fn rescan_candidate(shared: Shared, previous: Workspace) -> CommandResult<
 }
 
 #[tauri::command]
-async fn refresh_workspace(state: State<'_, Shared>) -> CommandResult<WorkspaceView> {
+async fn refresh_workspace(state: State<'_, Shared>) -> CommandResult<WorkspaceResponse> {
     rescan(state.inner().clone(), None, None).await
 }
 #[tauri::command]
 async fn set_policy(
     policy: FilterPolicy,
     state: State<'_, Shared>,
-) -> CommandResult<WorkspaceView> {
+) -> CommandResult<WorkspaceResponse> {
     rescan(state.inner().clone(), Some(policy), None).await
 }
 #[tauri::command]
-async fn browse_ignored(path: String, state: State<'_, Shared>) -> CommandResult<WorkspaceView> {
+async fn browse_ignored(
+    path: String,
+    state: State<'_, Shared>,
+) -> CommandResult<WorkspaceResponse> {
     rescan(state.inner().clone(), None, Some(path)).await
 }
 
@@ -231,7 +274,7 @@ async fn set_intent(
     path: String,
     intent: Option<Intent>,
     state: State<'_, Shared>,
-) -> CommandResult<WorkspaceView> {
+) -> CommandResult<WorkspaceResponse> {
     let shared = state.inner().clone();
     let mut workspace = lock(&shared)?
         .workspace
@@ -256,7 +299,7 @@ async fn set_intent(
 }
 
 #[tauri::command]
-async fn reset_selections(state: State<'_, Shared>) -> CommandResult<WorkspaceView> {
+async fn reset_selections(state: State<'_, Shared>) -> CommandResult<WorkspaceResponse> {
     let shared = state.inner().clone();
     let mut workspace = lock(&shared)?
         .workspace
@@ -375,9 +418,7 @@ async fn copy_markdown(
     } = manifest(&shared)?;
     blocking(move || {
         const LIMIT: u64 = 8 * 1024 * 1024;
-        if entries.iter().map(|e| e.size).sum::<u64>() > LIMIT {
-            return Err("selection exceeds 8 MiB clipboard safety limit; export to a file".into());
-        }
+        clipboard_preflight(&entries, LIMIT)?;
         let temp = tempfile::Builder::new()
             .prefix(contextpick_core::destination::TEMP_PREFIX)
             .tempdir()
@@ -389,21 +430,64 @@ async fn copy_markdown(
             return Err("Markdown exceeds 8 MiB clipboard safety limit; export to a file".into());
         }
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        app.clipboard()
-            .write_text(text)
-            .map_err(|e| e.to_string())?;
+        write_clipboard(&cancel, text, |text| {
+            app.clipboard().write_text(text).map_err(|e| e.to_string())
+        })?;
         result.destination = "Clipboard".into();
         Ok(result)
     })
     .await
 }
 
-#[tauri::command]
-fn cancel_operation(state: State<'_, Shared>) -> CommandResult<()> {
-    let mut state = lock(state.inner())?;
-    state.cancel.store(true, Ordering::Relaxed);
-    state.generation += 1;
+fn clipboard_preflight(
+    entries: &[contextpick_core::ManifestEntry],
+    limit: u64,
+) -> CommandResult<()> {
+    entries.iter().try_fold(0u64, |total, entry| {
+        total
+            .checked_add(entry.size)
+            .filter(|size| *size <= limit)
+            .ok_or("selection exceeds 8 MiB clipboard safety limit; export to a file")
+    })?;
     Ok(())
+}
+
+fn write_clipboard(
+    cancel: &AtomicBool,
+    text: String,
+    write: impl FnOnce(String) -> CommandResult<()>,
+) -> CommandResult<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("copy cancelled".into());
+    }
+    write(text)
+}
+
+#[tauri::command]
+async fn cancel_operation(state: State<'_, Shared>) -> CommandResult<Option<WorkspaceResponse>> {
+    let shared = state.inner().clone();
+    blocking(move || cancel_and_snapshot(&shared)).await
+}
+
+fn cancel_and_snapshot(shared: &Shared) -> CommandResult<Option<WorkspaceResponse>> {
+    let (generation, workspace) = {
+        let mut state = lock(shared)?;
+        state.cancel.store(true, Ordering::Relaxed);
+        state.generation += 1;
+        state.cancel = Arc::new(AtomicBool::new(false));
+        (state.generation, state.workspace.clone())
+    };
+    let snapshot = workspace.map(|workspace| Arc::new(workspace.view(generation)));
+    let response = snapshot
+        .as_ref()
+        .map(|view| paging::initial(view))
+        .transpose()?;
+    let mut state = lock(shared)?;
+    if state.generation != generation {
+        return Err("cancellation superseded by a newer request".into());
+    }
+    state.snapshot = snapshot;
+    Ok(response)
 }
 
 fn main() {
@@ -411,17 +495,27 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let config=app.path().app_config_dir()?;
+            let config = app.path().app_config_dir()?;
             #[cfg(debug_assertions)]
-            let config=std::env::var_os("CONTEXTPICK_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or(config);
-            let settings_path=config.join("settings.json");
-            let recovery=Preferences::load_with_recovery(&settings_path);
-            let startup_notice=recovery.notice.map(|notice|if recovery.saving_blocked {
-                format!("{notice} Close ContextPick, preserve the original, fix directory permissions and restart to recover.")
-            } else {
-                format!("{notice} Open a folder to continue with defaults, or close the app to review the original.")
+            let config = std::env::var_os("CONTEXTPICK_CONFIG_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(config);
+            let settings_path = config.join("settings.json");
+            let recovery = Preferences::load_with_recovery(&settings_path);
+            let startup_notice = recovery.notice.map(|notice| {
+                if recovery.saving_blocked {
+                    format!("{notice} Close ContextPick, preserve the original, fix directory permissions and restart to recover.")
+                } else {
+                    format!("{notice} Open a folder to continue with defaults, or close the app to review the original.")
+                }
             });
-            app.manage(Arc::new(Mutex::new(Session { preferences:recovery.preferences,settings_path,startup_notice,settings_saving_blocked:recovery.saving_blocked,..Default::default() })));
+            app.manage(Arc::new(Mutex::new(Session {
+                preferences: recovery.preferences,
+                settings_path,
+                startup_notice,
+                settings_saving_blocked: recovery.saving_blocked,
+                ..Default::default()
+            })));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -434,8 +528,9 @@ fn main() {
             preview_file,
             export_markdown,
             copy_markdown,
-            cancel_operation
-            ,reset_selections
+            cancel_operation,
+            reset_selections,
+            workspace_page
         ])
         .run(tauri::generate_context!())
         .expect("ContextPick desktop startup failed");
@@ -502,6 +597,99 @@ mod tests {
         assert!(second > first);
         assert!(token.load(Ordering::Relaxed));
         assert!(!current.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn workspace_pages_require_the_current_published_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+        assert!(get_workspace_page(&shared, 1, 0).is_err());
+        let first = publish(&shared, fixture(root.path()), 1).unwrap();
+        assert_eq!(first.entry_count, 1);
+        assert_eq!(get_workspace_page(&shared, 1, 0).unwrap().entries.len(), 1);
+        let (next, _) = begin_scan(&shared).unwrap();
+        assert!(get_workspace_page(&shared, 1, 0).is_err());
+        assert!(get_workspace_page(&shared, next, 0).is_err());
+        publish(&shared, fixture(root.path()), next).unwrap();
+        assert!(get_workspace_page(&shared, next, usize::MAX).is_err());
+        assert_eq!(
+            get_workspace_page(&shared, next, 0).unwrap().generation,
+            next
+        );
+    }
+
+    #[test]
+    fn cancellation_returns_already_published_root_even_if_original_response_is_in_flight() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+        publish(&shared, fixture(first.path()), 1).unwrap();
+        let (second_generation, token) = begin_scan(&shared).unwrap();
+        let pending_ipc_response =
+            publish(&shared, fixture(second.path()), second_generation).unwrap();
+        // Cancellation is a view reconciliation, not another preferences write.
+        lock(&shared).unwrap().settings_saving_blocked = true;
+        let authoritative = cancel_and_snapshot(&shared).unwrap().unwrap();
+        assert_eq!(authoritative.view.root, pending_ipc_response.view.root);
+        assert!(authoritative.view.generation > pending_ipc_response.view.generation);
+        assert!(token.load(Ordering::Relaxed));
+        assert!(get_workspace_page(&shared, second_generation, 0).is_err());
+        assert!(get_workspace_page(&shared, authoritative.view.generation, 0).is_ok());
+        assert_eq!(
+            manifest(&shared).unwrap().root.path().display().to_string(),
+            authoritative.view.root
+        );
+    }
+
+    #[test]
+    fn cancellation_retains_previous_workspace_when_new_scan_has_not_published() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+        let original = publish(&shared, fixture(root.path()), 1).unwrap();
+        let (pending_generation, token) = begin_scan(&shared).unwrap();
+        let authoritative = cancel_and_snapshot(&shared).unwrap().unwrap();
+        assert_eq!(authoritative.view.root, original.view.root);
+        assert!(authoritative.view.generation > pending_generation);
+        assert!(token.load(Ordering::Relaxed));
+        assert!(get_workspace_page(&shared, authoritative.view.generation, 0).is_ok());
+    }
+
+    #[test]
+    fn clipboard_limits_cannot_overflow() {
+        let entries = [u64::MAX, 1].map(|size| contextpick_core::ManifestEntry {
+            path: "synthetic.ts".into(),
+            size,
+            modified_ns: 0,
+        });
+        assert!(clipboard_preflight(&entries, 8 * 1024 * 1024).is_err());
+    }
+
+    #[test]
+    fn cancellation_does_not_replace_clipboard() {
+        let mut called = false;
+        assert!(
+            write_clipboard(&AtomicBool::new(true), "synthetic".into(), |_| {
+                called = true;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!called);
     }
 
     #[test]

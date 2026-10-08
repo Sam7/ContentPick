@@ -15,11 +15,21 @@ export type WorkspaceView = {
   root: string;
   generation: number;
   entries: Entry[];
+  entryCount: number;
+  nextOffset: number | null;
   selectedCount: number;
   estimatedBytes: number;
   policy: FilterPolicy;
   incomplete: boolean;
   diagnostics: string[];
+};
+
+export type WorkspacePage = {
+  root: string;
+  generation: number;
+  offset: number;
+  entries: Entry[];
+  nextOffset: number | null;
 };
 
 export type SelectionIntent = 'include' | 'exclude' | 'forceInclude' | 'forceExclude' | null;
@@ -43,10 +53,11 @@ export type ContextPickBridge = {
   set_intent(args: { path: string; intent: SelectionIntent }): Promise<WorkspaceView>;
   reset_selections(): Promise<WorkspaceView>;
   set_policy(args: { policy: FilterPolicy }): Promise<WorkspaceView>;
+  workspace_page(args: { generation: number; offset: number }): Promise<WorkspacePage>;
   preview_file(args: { path: string }): Promise<Preview>;
   export_markdown(): Promise<ExportResult | null>;
   copy_markdown(): Promise<ExportResult | null>;
-  cancel_operation(): Promise<void>;
+  cancel_operation(): Promise<WorkspaceView | null>;
 };
 
 const nativeBridge: ContextPickBridge = {
@@ -57,6 +68,7 @@ const nativeBridge: ContextPickBridge = {
   set_intent: (args) => invoke('set_intent', args),
   reset_selections: () => invoke('reset_selections'),
   set_policy: (args) => invoke('set_policy', args),
+  workspace_page: (args) => invoke('workspace_page', args),
   preview_file: (args) => invoke('preview_file', args),
   export_markdown: () => invoke('export_markdown'),
   copy_markdown: () => invoke('copy_markdown'),
@@ -77,6 +89,8 @@ const fixtureWorkspace: WorkspaceView = {
     { path: 'dist', kind: 'directory', size: 0, selected: false, forceIncluded: false, reason: '.gitignore (dist/)', enumerated: false, partial: false },
     { path: 'README.md', kind: 'file', size: 923, selected: true, forceIncluded: false, reason: null, enumerated: true, partial: false },
   ],
+  entryCount: 9,
+  nextOffset: null,
   selectedCount: 3,
   estimatedBytes: 6240,
   policy: { gitignore: true, includeExtensions: [], excludeExtensions: [], includePaths: [], excludePaths: [] },
@@ -119,6 +133,7 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
     },
     reset_selections: async () => structuredClone(fixtureWorkspace),
     set_policy: async () => structuredClone(fixtureWorkspace),
+    workspace_page: async () => { throw new Error('The browser fixture does not paginate workspaces.'); },
     preview_file: async ({ path }) => {
       if (options.failPreview) throw new Error('Preview could not be read.');
       return fixturePreviews[path] ?? { text: '', truncated: false };
@@ -128,6 +143,7 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
       return {
         ...structuredClone(fixtureWorkspace),
         entries: [...structuredClone(fixtureWorkspace.entries), { path: 'dist/report.md', kind: 'file', size: 404, selected: false, forceIncluded: false, reason: '.gitignore (dist/)', enumerated: true, partial: false }],
+        entryCount: fixtureWorkspace.entryCount + 1,
         incomplete: false,
       };
     },
@@ -136,7 +152,7 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
       return { destination: '/workspace/patchwork/context.md', bytes: 6240, files: 3 };
     },
     copy_markdown: async () => ({ destination: 'clipboard', bytes: 6240, files: 3 }),
-    cancel_operation: async () => undefined,
+    cancel_operation: async () => structuredClone(fixtureWorkspace),
   };
 }
 
