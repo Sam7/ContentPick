@@ -14,7 +14,7 @@ pub struct Preview {
     pub truncated: bool,
 }
 
-fn checked_relative(path: &str) -> Result<PathBuf> {
+pub(crate) fn checked_relative(path: &str) -> Result<PathBuf> {
     if path.is_empty()
         || path.starts_with('/')
         || path.starts_with('\\')

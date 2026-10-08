@@ -2,13 +2,14 @@
 
 use contextpick_core::{
     content,
+    destination::Destination,
     export::{self, ExportResult},
     preferences::{Preferences, SavedWorkspace},
     selection::Intent,
     workspace::{FilterPolicy, Workspace, WorkspaceView},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -26,6 +27,7 @@ struct Session {
     preferences: Preferences,
     settings_path: std::path::PathBuf,
     startup_notice: Option<String>,
+    settings_saving_blocked: bool,
 }
 type Shared = Arc<Mutex<Session>>;
 type CommandResult<T> = std::result::Result<T, String>;
@@ -67,6 +69,12 @@ fn publish(shared: &Shared, workspace: Workspace, generation: u64) -> CommandRes
 }
 
 fn persist_workspace(state: &mut Session, workspace: &Workspace) -> CommandResult<()> {
+    if state.settings_saving_blocked {
+        return Err(format!(
+            "Settings recovery could not preserve the original at {}. Copy it to a safe location, fix config directory permissions and restart ContextPick before saving changes.",
+            state.settings_path.display()
+        ));
+    }
     let mut preferences = state.preferences.clone();
     {
         let root = workspace.root.display().to_string();
@@ -76,6 +84,7 @@ fn persist_workspace(state: &mut Session, workspace: &Workspace) -> CommandResul
             SavedWorkspace {
                 policy: workspace.policy.clone(),
                 intents: workspace.intents.clone(),
+                generated_outputs: workspace.generated_outputs.clone(),
             },
         );
     }
@@ -100,23 +109,20 @@ async fn restore_workspace(state: State<'_, Shared>) -> CommandResult<Option<Wor
                     None => Ok(None),
                 };
             };
-            let saved =
-                state
-                    .preferences
-                    .workspaces
-                    .get(&root)
-                    .cloned()
-                    .unwrap_or(SavedWorkspace {
-                        policy: FilterPolicy::default(),
-                        intents: BTreeMap::new(),
-                    });
+            let saved = state
+                .preferences
+                .workspaces
+                .get(&root)
+                .cloned()
+                .unwrap_or_default();
             (root, saved, notice)
         };
-        let mut workspace = Workspace::scan(
+        let mut workspace = Workspace::scan_with_outputs(
             std::path::Path::new(&root),
             saved.policy,
             saved.intents,
             BTreeSet::new(),
+            saved.generated_outputs,
             &cancel,
         )
         .map_err(|e| format!("Recent folder unavailable: {e}. Open a folder to continue."))?;
@@ -146,13 +152,16 @@ async fn choose_workspace(
             .workspaces
             .get(&canonical.display().to_string())
             .cloned()
-            .unwrap_or(SavedWorkspace {
-                policy: FilterPolicy::default(),
-                intents: BTreeMap::new(),
-            });
-        let workspace =
-            Workspace::scan(&path, saved.policy, saved.intents, BTreeSet::new(), &cancel)
-                .map_err(|e| e.to_string())?;
+            .unwrap_or_default();
+        let workspace = Workspace::scan_with_outputs(
+            &path,
+            saved.policy,
+            saved.intents,
+            BTreeSet::new(),
+            saved.generated_outputs,
+            &cancel,
+        )
+        .map_err(|e| e.to_string())?;
         publish(&shared, workspace, generation).map(Some)
     })
     .await
@@ -187,11 +196,12 @@ async fn rescan(
 async fn rescan_candidate(shared: Shared, previous: Workspace) -> CommandResult<WorkspaceView> {
     let (generation, cancel) = begin_scan(&shared)?;
     blocking(move || {
-        let workspace = Workspace::scan_pinned(
+        let workspace = Workspace::scan_pinned_with_outputs(
             previous.root_handle,
             previous.policy,
             previous.intents,
             previous.browsed,
+            previous.generated_outputs,
             &cancel,
         )
         .map_err(|e| e.to_string())?;
@@ -267,20 +277,36 @@ async fn preview_file(path: String, state: State<'_, Shared>) -> CommandResult<c
     blocking(move || content::preview(&root, &path, 256 * 1024).map_err(|e| e.to_string())).await
 }
 
-fn manifest(
-    shared: &Shared,
-) -> CommandResult<(
-    contextpick_core::WorkspaceRoot,
-    Vec<contextpick_core::ManifestEntry>,
-    Arc<AtomicBool>,
-)> {
-    let state = lock(shared)?;
+struct FrozenExport {
+    root: contextpick_core::WorkspaceRoot,
+    entries: Vec<contextpick_core::ManifestEntry>,
+    cancel: Arc<AtomicBool>,
+    generation: u64,
+}
+
+fn manifest(shared: &Shared) -> CommandResult<FrozenExport> {
+    let mut state = lock(shared)?;
+    state.cancel.store(true, Ordering::Relaxed);
+    state.cancel = Arc::new(AtomicBool::new(false));
     let workspace = state.workspace.as_ref().ok_or("choose a workspace first")?;
-    Ok((
-        workspace.root_handle.clone(),
-        workspace.manifest(),
-        Arc::new(AtomicBool::new(false)),
-    ))
+    Ok(FrozenExport {
+        root: workspace.root_handle.clone(),
+        entries: workspace.manifest(),
+        cancel: state.cancel.clone(),
+        generation: state.generation,
+    })
+}
+
+fn reserve_output(shared: &Shared, generation: u64, path: &str) -> CommandResult<()> {
+    let mut state = lock(shared)?;
+    if generation != state.generation || state.cancel.load(Ordering::Relaxed) {
+        return Err("export superseded by a newer request".into());
+    }
+    let mut candidate = state.workspace.clone().ok_or("choose a workspace first")?;
+    candidate.generated_outputs.insert(path.to_owned());
+    persist_workspace(&mut state, &candidate)?;
+    state.workspace = Some(candidate);
+    Ok(())
 }
 
 #[tauri::command]
@@ -289,8 +315,12 @@ async fn export_markdown(
     state: State<'_, Shared>,
 ) -> CommandResult<Option<ExportResult>> {
     let shared = state.inner().clone();
-    let (root, entries, cancel) = manifest(&shared)?;
-    lock(&shared)?.cancel = cancel.clone();
+    let FrozenExport {
+        root,
+        entries,
+        cancel,
+        generation,
+    } = manifest(&shared)?;
     blocking(move || {
         let Some(path) = app
             .dialog()
@@ -303,6 +333,8 @@ async fn export_markdown(
         };
         let destination = path.into_path().map_err(|e| e.to_string())?;
         let overwrite = destination.exists();
+        let prepared =
+            Destination::prepare(&root, &destination, overwrite).map_err(|e| e.to_string())?;
         if overwrite
             && !app
                 .dialog()
@@ -313,7 +345,16 @@ async fn export_markdown(
         {
             return Ok(None);
         }
-        export::export_to(&root, &entries, &destination, overwrite, &cancel)
+        {
+            let state = lock(&shared)?;
+            if state.generation != generation || cancel.load(Ordering::Relaxed) {
+                return Err("export cancelled or superseded by a newer request".into());
+            }
+        }
+        if let Some(path) = prepared.relative_path() {
+            reserve_output(&shared, generation, path)?;
+        }
+        export::export_prepared(&root, &entries, prepared, &cancel)
             .map(Some)
             .map_err(|e| e.to_string())
     })
@@ -326,14 +367,21 @@ async fn copy_markdown(
     state: State<'_, Shared>,
 ) -> CommandResult<ExportResult> {
     let shared = state.inner().clone();
-    let (root, entries, cancel) = manifest(&shared)?;
-    lock(&shared)?.cancel = cancel.clone();
+    let FrozenExport {
+        root,
+        entries,
+        cancel,
+        ..
+    } = manifest(&shared)?;
     blocking(move || {
         const LIMIT: u64 = 8 * 1024 * 1024;
         if entries.iter().map(|e| e.size).sum::<u64>() > LIMIT {
             return Err("selection exceeds 8 MiB clipboard safety limit; export to a file".into());
         }
-        let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let temp = tempfile::Builder::new()
+            .prefix(contextpick_core::destination::TEMP_PREFIX)
+            .tempdir()
+            .map_err(|e| e.to_string())?;
         let path = temp.path().join("clipboard.md");
         let mut result =
             export::export_to(&root, &entries, &path, false, &cancel).map_err(|e| e.to_string())?;
@@ -367,16 +415,13 @@ fn main() {
             #[cfg(debug_assertions)]
             let config=std::env::var_os("CONTEXTPICK_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or(config);
             let settings_path=config.join("settings.json");
-            let (preferences,startup_notice)=match Preferences::load(&settings_path) {
-                Ok(preferences)=>(preferences,None),
-                Err(error)=>{
-                    let backup=config.join(format!("settings-recovery-{}.json",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()));
-                    std::fs::create_dir_all(&config)?;
-                    std::fs::copy(&settings_path,&backup)?;
-                    (Preferences::default(),Some(format!("{error}. Original settings backed up to {}. Open a folder to recover with defaults.",backup.display())))
-                }
-            };
-            app.manage(Arc::new(Mutex::new(Session { preferences,settings_path,startup_notice,..Default::default() })));
+            let recovery=Preferences::load_with_recovery(&settings_path);
+            let startup_notice=recovery.notice.map(|notice|if recovery.saving_blocked {
+                format!("{notice} Close ContextPick, preserve the original, fix directory permissions and restart to recover.")
+            } else {
+                format!("{notice} Open a folder to continue with defaults, or close the app to review the original.")
+            });
+            app.manage(Arc::new(Mutex::new(Session { preferences:recovery.preferences,settings_path,startup_notice,settings_saving_blocked:recovery.saving_blocked,..Default::default() })));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -399,6 +444,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn fixture(root: &std::path::Path) -> Workspace {
         std::fs::write(root.join("file.rs"), "fn main() {}\n").unwrap();
@@ -456,5 +502,83 @@ mod tests {
         assert!(second > first);
         assert!(token.load(Ordering::Relaxed));
         assert!(!current.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn failed_settings_backup_never_allows_defaults_to_replace_original() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let path = config.path().join("settings.json");
+        std::fs::write(&path, "{synthetic corrupt original").unwrap();
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            settings_path: path.clone(),
+            settings_saving_blocked: true,
+            ..Default::default()
+        }));
+        assert!(publish(&shared, fixture(root.path()), 1).is_err());
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "{synthetic corrupt original"
+        );
+        assert!(lock(&shared).unwrap().workspace.is_none());
+    }
+
+    #[test]
+    fn output_reservation_is_persisted_before_any_file_is_created() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Mutex::new(Session {
+            workspace: Some(fixture(root.path())),
+            generation: 1,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+        reserve_output(&shared, 1, "context.md").unwrap();
+        let restored = Preferences::load(&config.path().join("settings.json")).unwrap();
+        let key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        assert!(
+            restored.workspaces[&key]
+                .generated_outputs
+                .contains("context.md")
+        );
+        assert!(
+            lock(&shared)
+                .unwrap()
+                .workspace
+                .as_ref()
+                .unwrap()
+                .generated_outputs
+                .contains("context.md")
+        );
+        assert!(!root.path().join("context.md").exists());
+    }
+
+    #[test]
+    fn stale_or_failed_output_reservation_does_not_mutate_state() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("not-directory"), "fixture").unwrap();
+        let shared = Arc::new(Mutex::new(Session {
+            workspace: Some(fixture(root.path())),
+            generation: 2,
+            settings_path: config.path().join("not-directory/settings.json"),
+            ..Default::default()
+        }));
+        assert!(reserve_output(&shared, 1, "stale.md").is_err());
+        assert!(reserve_output(&shared, 2, "failed.md").is_err());
+        assert!(
+            lock(&shared)
+                .unwrap()
+                .workspace
+                .as_ref()
+                .unwrap()
+                .generated_outputs
+                .is_empty()
+        );
+        assert!(!root.path().join("failed.md").exists());
     }
 }

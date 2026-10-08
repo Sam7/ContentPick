@@ -1,8 +1,10 @@
-use crate::{Error, ManifestEntry, Result, WorkspaceRoot, content, modified_ns};
+use crate::{
+    Error, ManifestEntry, Result, WorkspaceRoot, content, destination::Destination, modified_ns,
+};
 use serde::Serialize;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const FENCE_WRITE_CHUNK: usize = 4096;
@@ -282,42 +284,10 @@ fn escaped_heading(s: &str) -> String {
     out
 }
 
-fn destination_outside_root(root: &Path, destination: &Path) -> Result<(PathBuf, PathBuf)> {
-    let root = fs::canonicalize(root)?;
-    let absolute = if destination.is_absolute() {
-        destination.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(destination)
-    };
-    let parent = absolute
-        .parent()
-        .ok_or_else(|| Error::Message("destination has no parent".into()))?;
-    let canonical_parent = fs::canonicalize(parent)?;
-    let target = canonical_parent.join(
-        absolute
-            .file_name()
-            .ok_or_else(|| Error::Message("destination has no filename".into()))?,
-    );
-    if target.starts_with(&root) {
-        return Err(Error::Message(
-            "destination must be outside the workspace root".into(),
-        ));
-    }
-    if target.exists() {
-        let resolved = fs::canonicalize(&target)?;
-        if resolved.starts_with(&root) {
-            return Err(Error::Message(
-                "destination must be outside the workspace root".into(),
-            ));
-        }
-    }
-    Ok((target, canonical_parent))
-}
-
 /// Export a frozen manifest transactionally as Markdown.
 ///
-/// The destination must be outside `root`. This slice rejects in-root output
-/// paths so an export cannot mutate sources or become part of a later scan.
+/// In-root callers must persist the destination's exclusion before exporting.
+/// The desktop adapter uses export_prepared to reserve before creating a file.
 pub fn export_to(
     root: &WorkspaceRoot,
     manifest: &[ManifestEntry],
@@ -325,11 +295,33 @@ pub fn export_to(
     overwrite: bool,
     cancel: &AtomicBool,
 ) -> Result<ExportResult> {
+    export_prepared(
+        root,
+        manifest,
+        Destination::prepare(root, destination, overwrite)?,
+        cancel,
+    )
+}
+
+pub fn export_prepared(
+    root: &WorkspaceRoot,
+    manifest: &[ManifestEntry],
+    destination: Destination,
+    cancel: &AtomicBool,
+) -> Result<ExportResult> {
     if manifest.is_empty() {
         return Err(Error::Message("cannot export an empty manifest".into()));
     }
     root.validate_anchor()?;
-    let (target, parent) = destination_outside_root(root.path(), destination)?;
+    if destination
+        .relative_path()
+        .is_some_and(|path| manifest.iter().any(|entry| entry.path == path))
+    {
+        return Err(Error::Message(
+            "export destination is also a manifest input".into(),
+        ));
+    }
+    let destination_text = destination.path().display().to_string();
     let mut sorted = manifest.to_vec();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
     for pair in sorted.windows(2) {
@@ -345,10 +337,11 @@ pub fn export_to(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("workspace");
-    let mut temp = tempfile::NamedTempFile::new_in(&parent)?;
+    let mut transaction = destination.create_temp()?;
+    let temp = transaction.file_mut();
     let mut bytes = 0u64;
     write_counted(
-        &mut temp,
+        &mut *temp,
         format!("# ContextPick export — {}\n\n", escaped_heading(root_name)).as_bytes(),
         &mut bytes,
     )?;
@@ -375,36 +368,34 @@ pub fn export_to(
             )));
         }
         write_counted(
-            &mut temp,
+            &mut *temp,
             format!("## {}\n\n", escaped_heading(&entry.path)).as_bytes(),
             &mut bytes,
         )?;
-        write_repeated(&mut temp, b'`', fence_len, cancel, &mut bytes)?;
-        write_counted(&mut temp, language_tag(&entry.path).as_bytes(), &mut bytes)?;
-        write_counted(&mut temp, b"\n", &mut bytes)?;
+        write_repeated(&mut *temp, b'`', fence_len, cancel, &mut bytes)?;
+        write_counted(&mut *temp, language_tag(&entry.path).as_bytes(), &mut bytes)?;
+        write_counted(&mut *temp, b"\n", &mut bytes)?;
         let content_len = content.seek(SeekFrom::End(0))?;
         content.seek(SeekFrom::Start(content_len.saturating_sub(1)))?;
         let mut last = [0u8; 1];
         let ends_with_newline =
             content_len > 0 && content.read(&mut last)? == 1 && last[0] == b'\n';
         content.seek(SeekFrom::Start(0))?;
-        copy_with_cancel(&mut content, &mut temp, cancel, &mut bytes)?;
+        copy_with_cancel(&mut content, &mut *temp, cancel, &mut bytes)?;
         if !ends_with_newline {
-            write_counted(&mut temp, b"\n", &mut bytes)?;
+            write_counted(&mut *temp, b"\n", &mut bytes)?;
         }
-        write_repeated(&mut temp, b'`', fence_len, cancel, &mut bytes)?;
-        write_counted(&mut temp, b"\n\n", &mut bytes)?;
+        write_repeated(&mut *temp, b'`', fence_len, cancel, &mut bytes)?;
+        write_counted(&mut *temp, b"\n\n", &mut bytes)?;
     }
     check_cancel(cancel)?;
-    temp.as_file_mut().sync_all()?;
-    let destination_text = destination.to_string_lossy().to_string();
-    root.validate_anchor()?;
-    if overwrite {
-        temp.persist(&target).map_err(|e| Error::Io(e.error))?;
-    } else {
-        temp.persist_noclobber(&target)
-            .map_err(|e| Error::Io(e.error))?;
+    if temp.metadata()?.len() != bytes {
+        return Err(Error::Message(
+            "export byte count does not match output file".into(),
+        ));
     }
+    root.validate_anchor()?;
+    transaction.commit(cancel)?;
     Ok(ExportResult {
         bytes,
         files: sorted.len(),

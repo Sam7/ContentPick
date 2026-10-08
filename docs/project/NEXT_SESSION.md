@@ -1,13 +1,11 @@
 # Resume
 
-1. Read AGENTS.md, STATUS.md and `docs/plans/active-p0-hardening.md`; inspect git status/log before editing. Charter: `docs/PRODUCT_CHARTER.md`.
-2. Windows MSVC Build Tools installed with user authorization; Rust1.99 and Node24 available. `. ./scripts/env.ps1` changes only process environment. Use explicit MSVC toolchain for native work.
-3. Latest workspace suite: 39 Rust tests (36 core, 3 shell); 15 RTL and 3 browser E2E pass. Browser fixtures do not prove native filesystem behavior. Check STATUS for final clippy result.
-4. Native folder/preview/copy/save demonstrated on ten-file fixture (615 bytes before language-tag update). Recent root restored on restart; user-requested screenshot is in docs/testing. Native manual selection/filter/error journeys remain.
-5. WorkspaceRoot pins the selected directory. Never reopen its path ambiently. Refresh uses scan_pinned. Root owns native/core integration and commits.
-6. Next: safe in-root export with persistent hard exclusions; bounded IPC pages; remaining acceptance fixtures/native journeys; broader M2 review. Arbitrarily long fences and folder ordering are now fixed/tested.
-7. In-root design review: pin parent with single-component nofollow opens; reserve/persist output before writing; reserved temporary prefix; publish new in-root file via no-clobber hard link, never replacing an existing workspace path. Bind reservation to captured root/generation. Outside-root explicit overwrite remains supported. Implementation pending.
-8. Benchmark20k sources +100k ignored actual files: scan440–910ms, enumerate20,002; observed core peak working set12.8MiB. See performance evidence and limits; repeat after indexing changes.
-9. HMR session64314 ended. Vite45064 and last built native binary may run using .tools/smoke-config. Observe actual processes/ports before restarting. Avoid hot-reload rebuilds during native UI automation.
-10. Reuse Luna agents charter_contract/toolchain for focused implementation and Sol core_security_review for independent review, with disjoint ownership. No agents should be editing currently.
-11. No macOS, installer/signing or remote CI execution evidence. No public publishing authorized. Full P0 and release readiness remain incomplete; continue safe work autonomously.
+1. Read AGENTS.md, STATUS.md, active-p0-hardening plan and Git status/log. Charter remains docs/PRODUCT_CHARTER.md.
+2. Windows prerequisites installed with authorization. `. ./scripts/env.ps1`; use explicit stable-x86_64-pc-windows-msvc. Latest reviewed core suite59 tests, strict Clippy/fmt/native build pass. Frontend checkpoint18 RTL/5 browser E2E; paging currently underway, rerun after integration.
+3. Native in-root export, preview and copy verified:10files673UTF8bytes, generated output blocked after refresh/relaunch, deep intent persisted. Screenshot/docs in docs/testing. User requested screenshot delivered; continue goal.
+4. WorkspaceRoot pins source directory; never reopen ambient source root. Destination pins parent; in-root outputs new filenames only, persisted hard exclusions before publication, no-clobber hard link. Settings backup/save bounded4MiB; preserve original and blocksave on backupfailure.
+5. Next: bounded IPC pages (512entries/256KiB serialized message), cached generation snapshots, stale offsets/generations rejected. Root native; Luna toolchain frontend bridge/App/tests. Verify actual 20k native transfer, then native ignore/force/recovery journeys and remaining fault fixtures.
+6. Clipboard preflight sum overflow/final cancellation before clipboard write remain noticed followups. Scanner diagnostics/index memory budget needs explicit review; performance benchmark only measures core currently.
+7. Agents: toolchain active frontend paging/longpathnotices; charter_contract released prefs; core_security_review released latest core review. Reuse agents with disjoint ownership.
+8. Native app closed before last build. Vite45064 may run. Launch debug binary with CONTEXTPICK_CONFIG_DIR=.tools/smoke-config for isolated synthetic checks; observe processes/windows fresh. Do not trust old UI handles.
+9. Full P0 incomplete. No watcher/tokenizer/macOSexecution/installers/signing/remoteCI/publicpublishing evidence. Close M2 architecture gate before broad P1. Continue safe implementation, no routine approval request.

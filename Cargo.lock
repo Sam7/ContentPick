@@ -438,7 +438,9 @@ dependencies = [
 name = "contextpick-core"
 version = "0.1.0"
 dependencies = [
+ "cap-primitives",
  "cap-std",
+ "getrandom 0.4.3",
  "globset",
  "ignore",
  "proptest",

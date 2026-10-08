@@ -1,5 +1,8 @@
 use contextpick_core::selection::Intent;
-use contextpick_core::workspace::{FilterPolicy, Workspace};
+use contextpick_core::{
+    WorkspaceRoot,
+    workspace::{FilterPolicy, Workspace},
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 
@@ -292,4 +295,115 @@ fn soft_exclusion_defers_unknown_extension_sampling_until_force_include() {
         entry.reason.as_deref(),
         Some("binary or unsupported encoding")
     );
+}
+
+#[test]
+fn newly_reserved_output_guard_applies_to_the_existing_index() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("context.md"), "old indexed text").unwrap();
+    let mut workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    workspace.generated_outputs.insert("context.md".into());
+    workspace
+        .intents
+        .insert("context.md".into(), Intent::ForceInclude);
+    assert!(workspace.manifest().is_empty());
+    let view = workspace.view(1);
+    assert!(!view.entries[0].selected);
+    assert!(
+        view.entries[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("generated output")
+    );
+}
+
+#[test]
+fn registered_outputs_and_export_leftovers_are_hard_excluded_even_when_forced() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("src/main.rs");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, b"fn main() {}\n").unwrap();
+    std::fs::write(temp.path().join("release.md"), b"generated payload\0").unwrap();
+    std::fs::write(
+        temp.path().join(".contextpick-export-temp-123.md"),
+        b"partial\0",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join(".contextpick-export-crash-old.tmp"),
+        b"leftover\0",
+    )
+    .unwrap();
+    let generated = BTreeSet::from(["release.md".to_owned()]);
+    let intents = BTreeMap::from([
+        ("release.md".into(), Intent::ForceInclude),
+        (
+            ".contextpick-export-temp-123.md".into(),
+            Intent::ForceInclude,
+        ),
+        (
+            ".contextpick-export-crash-old.tmp".into(),
+            Intent::ForceInclude,
+        ),
+    ]);
+
+    for generation in 1..=2 {
+        let workspace = if generation == 1 {
+            Workspace::scan_with_outputs(
+                temp.path(),
+                FilterPolicy::default(),
+                intents.clone(),
+                BTreeSet::new(),
+                generated.clone(),
+                &AtomicBool::new(false),
+            )
+        } else {
+            Workspace::scan_pinned_with_outputs(
+                WorkspaceRoot::open(temp.path()).unwrap(),
+                FilterPolicy::default(),
+                intents.clone(),
+                BTreeSet::new(),
+                generated.clone(),
+                &AtomicBool::new(false),
+            )
+        }
+        .unwrap();
+        assert_eq!(workspace.generated_outputs, generated);
+        let view = workspace.view(generation);
+        for path in [
+            "release.md",
+            ".contextpick-export-temp-123.md",
+            ".contextpick-export-crash-old.tmp",
+        ] {
+            let entry = view
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .unwrap();
+            assert!(!entry.selected, "generated output selected at {path}");
+            assert_eq!(entry.kind, "blocked");
+            assert_eq!(
+                entry.reason.as_deref(),
+                Some("generated output is excluded from source context")
+            );
+        }
+        assert_eq!(
+            workspace
+                .manifest()
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/main.rs"]
+        );
+    }
+
+    assert_eq!(std::fs::read(&source).unwrap(), b"fn main() {}\n");
 }

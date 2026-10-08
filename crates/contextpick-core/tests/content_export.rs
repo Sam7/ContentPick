@@ -202,7 +202,7 @@ fn export_uses_allowlisted_language_tags_and_falls_back_to_text() {
 }
 
 #[test]
-fn export_rejects_changed_deleted_invalid_duplicate_empty_and_in_root_destinations_atomically() {
+fn export_rejects_changed_deleted_invalid_duplicate_empty_and_source_destinations_atomically() {
     let tmp = tempdir().unwrap();
     let root = WorkspaceRoot::open(tmp.path()).unwrap();
     fs::write(tmp.path().join("file.txt"), b"original").unwrap();
@@ -236,8 +236,8 @@ fn export_rejects_changed_deleted_invalid_duplicate_empty_and_in_root_destinatio
         export::export_to(
             &root,
             &[original],
-            &tmp.path().join("out.md"),
-            false,
+            &tmp.path().join("file.txt"),
+            true,
             &AtomicBool::new(false)
         )
         .is_err()

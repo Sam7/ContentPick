@@ -110,6 +110,7 @@ pub struct Workspace {
     pub policy: FilterPolicy,
     pub intents: BTreeMap<String, Intent>,
     pub browsed: BTreeSet<String>,
+    pub generated_outputs: BTreeSet<String>,
     entries: Vec<IndexedEntry>,
     pub diagnostics: Vec<String>,
     pub enumerated_entries: usize,
@@ -148,8 +149,26 @@ impl Workspace {
         browsed: BTreeSet<String>,
         cancel: &AtomicBool,
     ) -> Result<Self> {
+        Self::scan_with_outputs(root, policy, intents, browsed, BTreeSet::new(), cancel)
+    }
+
+    pub fn scan_with_outputs(
+        root: &Path,
+        policy: FilterPolicy,
+        intents: BTreeMap<String, Intent>,
+        browsed: BTreeSet<String>,
+        generated_outputs: BTreeSet<String>,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
         let root_handle = WorkspaceRoot::open(root)?;
-        Self::scan_pinned(root_handle, policy, intents, browsed, cancel)
+        Self::scan_pinned_with_outputs(
+            root_handle,
+            policy,
+            intents,
+            browsed,
+            generated_outputs,
+            cancel,
+        )
     }
 
     pub fn scan_pinned(
@@ -157,6 +176,24 @@ impl Workspace {
         policy: FilterPolicy,
         intents: BTreeMap<String, Intent>,
         browsed: BTreeSet<String>,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
+        Self::scan_pinned_with_outputs(
+            root_handle,
+            policy,
+            intents,
+            browsed,
+            BTreeSet::new(),
+            cancel,
+        )
+    }
+
+    pub fn scan_pinned_with_outputs(
+        root_handle: WorkspaceRoot,
+        policy: FilterPolicy,
+        intents: BTreeMap<String, Intent>,
+        browsed: BTreeSet<String>,
+        generated_outputs: BTreeSet<String>,
         cancel: &AtomicBool,
     ) -> Result<Self> {
         root_handle.validate_anchor()?;
@@ -172,6 +209,7 @@ impl Workspace {
             policy,
             intents,
             browsed,
+            generated_outputs,
             entries: vec![],
             diagnostics: vec![],
             enumerated_entries: 0,
@@ -325,6 +363,9 @@ impl Workspace {
             if path.split('/').any(|part| part == ".git") {
                 hard = Some("Git metadata is not source context".into());
             }
+            if let Some(reason) = self.generated_reason(&path) {
+                hard = Some(reason.into());
+            }
             let mut ignored = inherited_ignore.clone();
             if ignored.is_none() && self.policy.gitignore {
                 for matcher in &matchers {
@@ -415,6 +456,18 @@ impl Workspace {
         Ok(())
     }
 
+    fn generated_reason(&self, path: &str) -> Option<&'static str> {
+        (self.generated_outputs.contains(path)
+            || path
+                .split('/')
+                .any(|name| name.starts_with(crate::destination::TEMP_PREFIX)))
+        .then_some("generated output is excluded from source context")
+    }
+
+    fn hard_reason<'a>(&'a self, entry: &'a IndexedEntry) -> Option<&'a str> {
+        self.generated_reason(&entry.path).or(entry.hard.as_deref())
+    }
+
     pub fn manifest(&self) -> Vec<ManifestEntry> {
         self.entries
             .iter()
@@ -422,7 +475,7 @@ impl Workspace {
                 e.kind == "file"
                     && selection::evaluate(
                         &e.path,
-                        e.hard.as_deref(),
+                        self.hard_reason(e),
                         e.soft.as_deref(),
                         &self.intents,
                     )
@@ -443,13 +496,17 @@ impl Workspace {
             .map(|e| {
                 let d = selection::evaluate(
                     &e.path,
-                    e.hard.as_deref(),
+                    self.hard_reason(e),
                     e.soft.as_deref(),
                     &self.intents,
                 );
                 EntryView {
                     path: e.path.clone(),
-                    kind: e.kind.clone(),
+                    kind: if e.kind != "directory" && self.hard_reason(e).is_some() {
+                        "blocked".into()
+                    } else {
+                        e.kind.clone()
+                    },
                     size: e.size,
                     selected: d.selected,
                     force_included: d.force_included,

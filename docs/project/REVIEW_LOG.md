@@ -19,7 +19,13 @@ Validation at initial checkpoint: 30 core + 3 native shell tests, 15 RTL + 3 bro
 
 ## In-root export design review
 
-Independent Sol read-only review recommends pinned, nofollow destination parent; atomic no-clobber hard-link publication for new in-root output; no replacement of existing in-root paths; persisted final-output reservation and reserved temporary prefix; reservation bound to captured root/generation. `Dir::rename` replaces targets and cannot implement no-clobber safely. Implementation and regressions pending.
+Independent Sol read-only review recommends pinned, nofollow destination parent; atomic no-clobber hard-link publication for new in-root output; no replacement of existing in-root paths; persisted final-output reservation and reserved temporary prefix; reservation bound to captured root/generation. Implemented and tested. Subsequent reviews fixed cancellation after flush, post-publication cleanup semantics, canonical case spelling, and a stale canonicalization/junction replacement race. Deterministic race regression passes; final Sol source review found no material findings.59 Rust tests, strict Clippy/fmt/native build green. Native in-root output and repeated copy/relaunch verified separately.
+
+## Recovery and visible outcomes
+
+Luna implemented bounded settings recovery. Root review found unbounded backup copying; bounded to4MiB+1/16name attempts, reject oversized originals. Independent Sol review found oversized saves could create unloadable settings; shared4MiB limited writer and prior-file-preservation test fix this. Native save-block regression observed RED then GREEN. Recovery wording now correctly distinguishes blocked manual recovery. Final core source review closed.
+
+Native smoke found successful outcome hidden in a clipped live region. Luna made it visible; independent review then found errors behind footer and narrow notice overlap. Shared notice/footer dock fixes both; actual browser geometry test observed RED then GREEN (18RTL/5E2E checkpoint). Long unbroken paths need wrapping; included in upcoming frontend paging slice. Search-revealed folders now announce actual expansion and preserve prior disclosure state. Raw filter drafts fix commas being lost during typing; extensionless sentinel supported and tested.
 
 ## Folder ordering and bounded fences slice
 

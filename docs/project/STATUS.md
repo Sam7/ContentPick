@@ -1,30 +1,26 @@
-# Status — 2026-10-08, P0 hardening checkpoint
+# Status — 2026-10-08, safe export checkpoint
 
-Milestone: M0/M1 native slice working; M2 review fixes and M3 bounded tree in progress. Full P0 acceptance is NOT complete.
+M0/M1 native slice verified; M2/M3 hardening in progress. **Full P0 acceptance is not complete.**
 
 ## Verified
 
-- Native Windows MSVC Tauri dev app runs. Actual native picker, Rust preview, Copy and Save As smoke passed on ten-file fixture. Both outputs 615 UTF-8 bytes; 10 sections, ignored sentinel absent. [Evidence](../testing/2026-10-08-native-smoke.md).
-- `cargo +stable-x86_64-pc-windows-msvc test --workspace --locked`: **39 passed** (36 core, 3 shell). Git parity requires actual Git and fails clearly if missing. Selection, custom ancestor exclusion, folder ordering, long fences and language tags have recorded RED → GREEN evidence.
-- Frontend lint/typecheck/build pass, **15 RTL / 3 Playwright tests passed**, including bounded 10k-entry DOM, saved-policy hydration, native string errors and compact footer. Browser tests are synthetic.
-- Native cargo check/build previously passed; current workspace formatting and strict clippy rerun pass. CI Windows/macOS configured but not executed remotely.
-- Folders precede sibling files in a stable hierarchical view; manifest order remains lexical. Filtered unknown extensions are not sampled unless force included. Export handles >16 KiB backtick runs with bounded, cancellable delimiter writes and safe language tags.
-- 20k source + 100k ignored core benchmark: 440–910 ms scan, 20,002 entries enumerated, observed peak working set 12.8 MiB. [Scope/limits](../testing/2026-10-08-performance.md). Native UI screenshot saved at user request; recent-root restoration observed on launch.
+- Windows native picker, bounded Rust preview, Copy and Save As. Latest in-root export: ten files, 673 actual UTF-8 bytes; clipboard byte-identical; ignored sentinel and prior generated output absent. Deep selections and generated exclusion restored after actual relaunch. [Native evidence](../testing/2026-10-08-native-p0.md), [current UI](../testing/2026-10-08-current-ui.jpg).
+- **59 Rust tests passed**: `cargo +stable-x86_64-pc-windows-msvc test --workspace --locked`. Formatting, strict workspace/all-target Clippy and native debug build passed after all core edits. Tests include Git parity, selection, encoding/fences, root/destination races, no-clobber publication, output reservation and bounded settings recovery.
+- Frontend checkpoint: **18 RTL / 5 browser E2E passed**, typecheck/lint/build passed. Geometry tests reproduced hidden error notices, now fixed by a shared footer/notice dock. Browser fixtures are not native filesystem evidence. Paging work now modifies frontend; rerun before next checkpoint.
+- New in-root exports use pinned nofollow parents and atomic no-clobber publication; final paths are persisted as hard exclusions before output creation. Existing workspace paths cannot be overwritten. Outside-root overwrite requires confirmation. Filesystems without hard-link support fail safely.
+- Settings load/save/recovery use a shared 4 MiB cap. Invalid originals are backed up before defaults may be saved; backup failure blocks saving with correct restart instructions. Independent Sol review has no remaining material core findings.
+- Earlier core benchmark: 20k source + 100k ignored files; scan 440–910 ms, 20,002 entries enumerated, observed peak working set 12.8 MiB. [Scope and limits](../testing/2026-10-08-performance.md); not native IPC/UI evidence.
 
-## Current work / next 3
+## Current work / next three
 
-1. Finish current checks/review checkpoint; implement safely excluded in-root generated outputs with pinned destination parent and no-clobber publication.
-2. Bound IPC transfer with generation-checked pages, then verify restoration/error recovery and remaining native P0 journeys.
-3. Complete fixture breadth, repeat relevant performance measurements, close M2 architecture gate, then P1 reliability.
+1. Generation-checked bounded IPC pages and progressive UI loading, with stale-page/cancel tests. Root owns native; Luna toolchain owns frontend. Long-path notice wrapping followup included.
+2. Native ignore/override/recovery and large workspace acceptance; remaining contract/fault fixtures, repeat measurements.
+3. Broader M2 architecture gate, fix findings; then P1 reliability/tokenizer/watchers and release readiness.
 
-## Review disposition
+## Environment / limitations
 
-Independent Sol reviews found root ambient-reopen redirect, lost custom directory exclusions, stale policy editor, commit-before-save and incomplete-directory partial state. All fixed with regressions. Current streaming review found missing cancellation during long delimiter writes; fixed with deterministic test. No further material findings in folder-order/export diff. See REVIEW_LOG.
+Node24.19/pnpm12.10.1 via Corepack, Rust1.99, installed user-authorized MSVC Build Tools and WebView2. `. ./scripts/env.ps1` changes process environment only. Explicit MSVC toolchain is verified. Vite session45064 may still run; native app was closed through UI for build. Isolated debug config `.tools/smoke-config`, fixture `.tools/smoke-repo`.
 
-## Environment and gaps
+No macOS execution, installers, signing, remote CI or public publishing verified. No watcher/tokenizer. Full index still crosses IPC until current slice lands. Scanner limits 200k entries /128 depth; complete memory bounds and diagnostic budget need review. These are ongoing work, not external blockers.
 
-Node 24.19.0 at C:\Program Files\nodejs; pnpm 12.10.1 via Corepack. Rust 1.99.0 local under .tools (user also installed Rust globally). User-authorized MSVC Build Tools installed; WebView2 154. scripts/env.ps1 changes process env and prefers detected MSVC. Initial GNU tests used local libgcc alias; not standard supported setup.
-
-Native HMR session 64314 stopped during an intermediate compiler error (fixed). Independent Vite session 45064 and last successful native binary were started for the requested screenshot, using isolated CONTEXTPICK_CONFIG_DIR=.tools/smoke-config. Fixture .tools/smoke-repo; output .tools/smoke-output/context.md. Windows only verified; macOS/installer/signing unverified. No watcher/tokenizer. Scanner prunes/cancels but returns full index; IPC paging/progressive results remain an engineering gap. In-root export currently rejected pending next fix. No public publishing performed.
-
-Initial reviewed checkpoint: `2715721`. Current agents have completed implementation/review; root integrates and checkpoints. ADR 0001. Charter remains docs/PRODUCT_CHARTER.md. Active plan: `docs/plans/active-p0-hardening.md`.
+Reviewed earlier commits: `2715721`, `5fe1934`. Current core checkpoint follows these; use Git log for hash. Charter: docs/PRODUCT_CHARTER.md; active plan: docs/plans/active-p0-hardening.md; see REVIEW_LOG for dispositions.
