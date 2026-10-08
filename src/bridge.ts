@@ -142,7 +142,10 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
       if (path !== 'dist') return structuredClone(fixtureWorkspace);
       return {
         ...structuredClone(fixtureWorkspace),
-        entries: [...structuredClone(fixtureWorkspace.entries), { path: 'dist/report.md', kind: 'file', size: 404, selected: false, forceIncluded: false, reason: '.gitignore (dist/)', enumerated: true, partial: false }],
+        entries: [
+          ...structuredClone(fixtureWorkspace.entries).map((entry) => entry.path === 'dist' ? { ...entry, enumerated: true } : entry),
+          { path: 'dist/report.md', kind: 'file', size: 404, selected: false, forceIncluded: false, reason: '.gitignore (dist/)', enumerated: true, partial: false },
+        ],
         entryCount: fixtureWorkspace.entryCount + 1,
         incomplete: false,
       };

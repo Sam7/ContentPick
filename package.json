@@ -9,11 +9,12 @@
     "dev:web": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "lint": "eslint src tests/e2e tests/native vite.config.ts playwright.config.ts playwright.native.config.ts eslint.config.js",
+    "lint": "eslint src tests/e2e tests/native vite.config.ts playwright.config.ts playwright.native.config.ts playwright.native.scale.config.ts eslint.config.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:native": "playwright test --config playwright.native.config.ts"
+    "test:native": "playwright test --config playwright.native.config.ts",
+    "test:native:scale": "playwright test --config playwright.native.scale.config.ts"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.13",

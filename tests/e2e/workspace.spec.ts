@@ -46,6 +46,48 @@ test('search reveals nested paths and clearing it restores collapsed ancestors',
   await expect(selectedCount).toHaveText('3');
 });
 
+test('file tree supports arrow-key navigation and keeps the active virtual row in view', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open folder' }).click();
+  const tree = page.getByRole('tree', { name: 'Workspace files' });
+  const selectedCount = page.locator('.metric-primary strong');
+  await expect(tree).toHaveAttribute('aria-multiselectable', 'true');
+  const source = tree.getByRole('treeitem').filter({ has: page.getByText('src', { exact: true }) }).first();
+
+  await expect(source).toHaveAttribute('tabindex', '0');
+  await expect(source).toHaveAttribute('aria-checked', 'true');
+  await expect(source).toHaveAttribute('aria-posinset', '1');
+  await expect(source).toHaveAttribute('aria-setsize', '4');
+  await source.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(source).toHaveAttribute('aria-expanded', 'true');
+  await page.keyboard.press('ArrowDown');
+  const activeItem = tree.locator('[role="treeitem"]:focus');
+  await expect(activeItem.locator('.entry-name')).toHaveText('main.ts');
+  await expect(activeItem).toHaveAttribute('aria-level', '2');
+  await expect(activeItem).toHaveAttribute('aria-posinset', '1');
+  await expect(activeItem).toHaveAttribute('aria-setsize', '3');
+  await expect(selectedCount).toHaveText('3');
+  await page.keyboard.press('ArrowLeft');
+  await expect(activeItem.locator('.entry-name')).toHaveText('src');
+  await page.keyboard.press('ArrowLeft');
+  await expect(source).toHaveAttribute('aria-expanded', 'false');
+
+  const ignored = tree.getByRole('treeitem').filter({ has: page.getByText('dist', { exact: true }) }).first();
+  await expect(ignored).toHaveAttribute('aria-checked', 'false');
+  await ignored.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(ignored).toHaveAttribute('aria-expanded', 'true');
+  await expect(tree.getByText('report.md')).toBeVisible();
+  await expect(selectedCount).toHaveText('3');
+
+  const readme = tree.getByRole('treeitem').filter({ has: page.getByText('README.md', { exact: true }) }).first();
+  await readme.focus();
+  await page.keyboard.press('Space');
+  await expect(readme).toHaveAttribute('aria-checked', 'false');
+  await expect(selectedCount).toHaveText('2');
+});
+
 test('selection action popover stays above virtual rows and all actions reach the target at compact size', async ({ page }) => {
   await page.setViewportSize({ width: 720, height: 520 });
   await page.goto('/');
@@ -66,15 +108,18 @@ test('selection action popover stays above virtual rows and all actions reach th
   await expect(page.locator('.metric-primary strong')).toHaveText('3');
 });
 
-test('selection action popover supports keyboard focus and returns focus only on Escape', async ({ page }) => {
+test('selection action popover preserves keyboard focus after Escape and selection', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Open folder' }).click();
   await page.getByRole('button', { name: 'Expand src', exact: true }).click();
   const trigger = page.getByRole('button', { name: 'More actions for src/main.generated.ts' });
   const menu = page.getByRole('group', { name: 'src/main.generated.ts selection actions' });
+  const row = trigger.locator('xpath=ancestor::*[@role="treeitem"]');
 
-  await trigger.focus();
-  await page.keyboard.press('Enter');
+  await expect(row.locator('button:not([tabindex="-1"]), input:not([tabindex="-1"])')).toHaveCount(0);
+  await row.focus();
+  await expect(row).toBeFocused();
+  await page.keyboard.press('Shift+F10');
   await expect(menu.getByRole('button', { name: 'Force include' })).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(menu.getByRole('button', { name: 'Force exclude' })).toBeFocused();
@@ -82,13 +127,21 @@ test('selection action popover supports keyboard focus and returns focus only on
   await expect(menu).toHaveCount(0);
   await expect(trigger).toBeFocused();
 
-  await trigger.focus();
-  await page.keyboard.press('Space');
+  await row.focus();
+  await page.keyboard.press('Shift+F10');
   await expect(menu.getByRole('button', { name: 'Force include' })).toBeFocused();
   const search = page.getByRole('textbox', { name: 'Search files' });
   await search.click();
   await expect(menu).toHaveCount(0);
   await expect(search).toBeFocused();
+
+  await row.focus();
+  await page.keyboard.press('Shift+F10');
+  await expect(menu.getByRole('button', { name: 'Force include' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await expect(row.locator('.override-pill')).toHaveText('Override');
 });
 
 test('keeps export controls visible at a compact desktop size', async ({ page }) => {

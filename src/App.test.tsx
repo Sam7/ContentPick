@@ -91,6 +91,81 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByText('4', { selector: 'strong' })).toBeInTheDocument();
   });
 
+  it('toggles the focused tree item from the keyboard and exposes its checked state', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const intents: { path: string; intent: string | null }[] = [];
+    const bridge = {
+      ...base,
+      set_intent: async ({ path, intent }: { path: string; intent: string | null }) => {
+        intents.push({ path, intent });
+        return (await base.choose_workspace())!;
+      },
+    };
+    render(<App bridge={bridge} />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+
+    const preview = screen.getByRole('button', { name: 'Preview README.md' });
+    const row = preview.closest<HTMLElement>('[role="treeitem"]')!;
+    expect(row).toHaveAttribute('aria-checked', 'true');
+    row.focus();
+    expect(row).toHaveFocus();
+    await user.keyboard(' ');
+
+    await waitFor(() => expect(intents).toEqual([{ path: 'README.md', intent: 'exclude' }]));
+  });
+
+  it('does not start a keyboard preview while another operation disables preview', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const exportRequest = deferred<{ bytes: number; files: number; destination: string } | null>();
+    const previews: string[] = [];
+    const bridge = {
+      ...base,
+      export_markdown: () => exportRequest.promise,
+      preview_file: async ({ path }: { path: string }) => {
+        previews.push(path);
+        return { text: '# preview', truncated: false };
+      },
+    };
+    render(<App bridge={bridge} />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Export Markdown' }));
+    const row = screen.getByRole('button', { name: 'Preview README.md' }).closest<HTMLElement>('[role="treeitem"]')!;
+    row.focus();
+    await user.keyboard('{Enter}');
+
+    expect(previews).toEqual([]);
+    exportRequest.resolve({ bytes: 12, files: 1, destination: 'context.md' });
+    expect(await screen.findByRole('status')).toHaveTextContent('Export ready');
+  });
+
+  it('does not start ignored-folder browsing from Enter or Right while another operation is busy', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const refreshRequest = deferred<WorkspaceView>();
+    const browsed: string[] = [];
+    const bridge = {
+      ...base,
+      refresh_workspace: () => refreshRequest.promise,
+      browse_ignored: async ({ path }: { path: string }) => {
+        browsed.push(path);
+        return (await base.browse_ignored({ path }))!;
+      },
+    };
+    render(<App bridge={bridge} />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    const row = screen.getByText('dist', { exact: true }).closest<HTMLElement>('[role="treeitem"]')!;
+    row.focus();
+    await user.keyboard('{Enter}');
+    await user.keyboard('{ArrowRight}');
+
+    expect(browsed).toEqual([]);
+    refreshRequest.resolve((await base.refresh_workspace())!);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+  });
+
   it('resets all selection intent separately from resetting a path override', async () => {
     const user = userEvent.setup();
     render(<App bridge={createBrowserBridge()} />);
@@ -495,6 +570,7 @@ describe('ContextPick workspace UI', () => {
     const tree = screen.getByRole('tree', { name: 'Workspace files' });
     await waitFor(() => expect(tree.querySelectorAll('[role="treeitem"]').length).toBeLessThan(40));
     expect(within(tree).getByText('file-00000.ts')).toBeInTheDocument();
+    expect(tree.querySelector('[role="treeitem"]')).toHaveAttribute('tabindex', '0');
     const focusedRow = within(tree).getByRole('button', { name: 'Preview file-00000.ts' });
     focusedRow.focus();
 
@@ -504,6 +580,17 @@ describe('ContextPick workspace UI', () => {
     expect(tree.querySelectorAll('[role="treeitem"]').length).toBeLessThan(40);
     expect(within(tree).getByRole('button', { name: 'Preview file-00000.ts' })).toBeInTheDocument();
     expect(document.activeElement).toBe(focusedRow);
+
+    await user.keyboard('{End}');
+    await waitFor(() => expect(tree.querySelector('[role="treeitem"]:focus .entry-name')).toHaveTextContent('file-09999.ts'));
+    await user.keyboard('{Home}');
+    await waitFor(() => expect(tree.querySelector('[role="treeitem"]:focus .entry-name')).toHaveTextContent('file-00000.ts'));
+
+    await user.keyboard('{ArrowUp}');
+    const search = screen.getByRole('textbox', { name: 'Search files' });
+    search.focus();
+    fireEvent.change(search, { target: { value: 'file-' } });
+    await waitFor(() => expect(search).toHaveFocus());
   });
 
   it('shows string errors returned by native commands', async () => {
