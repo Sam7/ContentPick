@@ -1,8 +1,17 @@
 # Reviews
 
+## M2 closure — 2026-10-09
+
+Independent GPT-6.1 Sol architecture review found no remaining material findings after the fixes. The final implementation keeps one selection evaluator and persist-before-publish path. Custom glob compilation is fallible and bounded by rule count/size/aggregate text. Recursive `.gitignore` matchers share `Arc` ownership; cumulative input, rules and actual body reads are bounded. Unknown, oversized, unreadable or unparseable rules conservatively exclude their subtree, while explicit ForceInclude and readable siblings work and hard guards still win.
+
+The review findings were reproduced red before correction: inherited matcher deep-copy memory (bounded-input analysis estimated 1 GiB at depth 128); root cutoff losing top-level force targets; a third limit notice overrunning the reserved diagnostic bound; a valid Git literal brace pattern becoming selected after parser rejection; and repeated post-cutoff `.gitignore` reads exceeding the cumulative budget. Injected tests now cover each behavior, including aggregate body reads <= budget plus one sentinel. Git anchor/parent-negation parity was checked with actual `git check-ignore`.
+
+Final owner verification on Windows/MSVC: `cargo +stable-x86_64-pc-windows-msvc test --workspace --locked` — **89 passed**; `cargo +stable-x86_64-pc-windows-msvc fmt --all -- --check`; `cargo +stable-x86_64-pc-windows-msvc clippy --workspace --all-targets --locked -- -D warnings`; `cargo +stable-x86_64-pc-windows-msvc build -p contextpick --locked` — all passed. Frontend: typecheck, lint, 25 Vitest, production build and 7 browser Playwright E2E passed; rebuilt current native app and 2 actual WebView2 E2E passed (605-entry fixture). Independent Sol re-ran 44 core policy/contract tests and confirmed `{secret.ts` excluded by default but explicitly force-includable. M2 is locally verified on Windows only; Unix-only filename tests, macOS, remote CI and release artifacts remain unverified.
+
 ## M3 evidence audit — 2026-10-09
 
-- **Independent read-only audit:** current native Playwright harness validates real WebView2 and Rust IPC on 605 entries, but no opt-in 20k/100k native fixture/spec or process-tree sampler exists; it also has no refresh/cancel scenario or three-run scale timing. Historical 20k evidence used a pre-cancellation binary, omitted timing, and measured only the parent. Audit sources: `tests/native/native.fixture.ts`, `tests/native/workspace.spec.ts`, `docs/testing/2026-10-08-native-paging.md`.
+Independent read-only audit: current native Playwright harness validates real WebView2 and Rust IPC on 605 entries, but no opt-in 20k/100k native fixture/spec or process-tree sampler exists; it also has no refresh/cancel scenario or three-run scale timing. Historical 20k evidence used a pre-cancellation binary, omitted timing, and measured only the parent. Audit sources: `tests/native/native.fixture.ts`, `tests/native/workspace.spec.ts`, `docs/testing/2026-10-08-native-paging.md`.
+
 - **Disposition:** expanded M3.1 to include building the isolated scale fixture/spec and measurement method before rerunning current behavior. M3 remains open; no gate or requirement is marked complete.
 
 ## Approved desktop redesign planning and consistency review — 2026-10-09

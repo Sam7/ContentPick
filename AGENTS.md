@@ -8,6 +8,7 @@
 - Hard guards override user force-inclusion. Keep paths inside the root, skip links, bound previews, prune ignored subtrees, stream deterministic exports, never mutate sources.
 - Offline app: no telemetry, cloud services or source uploads. Use synthetic fixtures in tests.
 - After each slice obtain independent review, fix significant findings, update status and continue toward P0. Architecture reviews at M2/M4/M5.
+- The user requested a commit and push after each milestone. After its gate passes, review and stage only the verified milestone scope, confirm the branch/upstream, commit and push; record the resulting commit. This does not authorize release publication or signing.
 - Prefer small modules and established libraries; avoid speculative interfaces, duplicate policies, and peripheral features.
 - No destructive unrelated changes, credential use or public publishing without authorization.
 - Commands and current environment limitations: README. Run affected tests during development and full checks at milestone gates.
