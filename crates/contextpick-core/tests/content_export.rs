@@ -149,6 +149,59 @@ fn export_is_sorted_fenced_streamable_and_preserves_line_endings() {
 }
 
 #[test]
+fn export_supports_backtick_runs_longer_than_sixteen_kib_without_fence_sized_allocation() {
+    let tmp = tempdir().unwrap();
+    let root = WorkspaceRoot::open(tmp.path()).unwrap();
+    let run = "`".repeat(16 * 1024 + 1);
+    fs::write(tmp.path().join("long.rs"), run.as_bytes()).unwrap();
+    let manifest = [entry(tmp.path(), "long.rs")];
+    let out = tmp
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("contextpick-long-fence-{}.md", std::process::id()));
+    let _ = fs::remove_file(&out);
+
+    export::export_to(&root, &manifest, &out, false, &AtomicBool::new(false)).unwrap();
+    let markdown = fs::read_to_string(&out).unwrap();
+    let fence = "`".repeat(run.len() + 1);
+    assert!(markdown.contains(&format!("{fence}rust\n{run}\n{fence}")));
+    fs::remove_file(out).unwrap();
+}
+
+#[test]
+fn export_uses_allowlisted_language_tags_and_falls_back_to_text() {
+    let tmp = tempdir().unwrap();
+    let root = WorkspaceRoot::open(tmp.path()).unwrap();
+    for (path, body) in [
+        ("main.RS", "fn main() {}"),
+        ("README.MD", "# Notes"),
+        ("payload.rs;evil", "literal"),
+    ] {
+        fs::write(tmp.path().join(path), body).unwrap();
+    }
+    let manifest = [
+        entry(tmp.path(), "main.RS"),
+        entry(tmp.path(), "README.MD"),
+        entry(tmp.path(), "payload.rs;evil"),
+    ];
+    let out = tmp
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("contextpick-tags-{}.md", std::process::id()));
+    let _ = fs::remove_file(&out);
+
+    export::export_to(&root, &manifest, &out, false, &AtomicBool::new(false)).unwrap();
+    let markdown = fs::read_to_string(&out).unwrap();
+    assert!(markdown.contains("```rust\nfn main() {}\n```"));
+    assert!(markdown.contains("```markdown\n# Notes\n```"));
+    assert!(markdown.contains("```text\nliteral\n```"));
+    assert!(!markdown.contains("```rs;evil"));
+    fs::remove_file(out).unwrap();
+}
+
+#[test]
 fn export_rejects_changed_deleted_invalid_duplicate_empty_and_in_root_destinations_atomically() {
     let tmp = tempdir().unwrap();
     let root = WorkspaceRoot::open(tmp.path()).unwrap();

@@ -1,5 +1,7 @@
 # Current risks
 
-- Native Windows compilation requires missing MSVC C++ Build Tools. Local Rust installation can proceed; browser work and core design are independent. User asked about installer setup.
+- Windows compiler prerequisite resolved: user-authorized Visual Studio 2022 C++ Build Tools installed; native MSVC test, build and app smoke passed.
+- P0 remains incomplete: in-root export exclusion, bounded IPC transfer, complete contract fixtures and native restoration acceptance still need evidence. These are implementation tasks, not external blockers.
+- Scanner has a 200,000-entry safety limit and 128-level depth limit. It reports incomplete state; performance evidence must distinguish enumerated entries from pruned files.
 - macOS runtime/build/signing cannot be verified on this Windows host. Add CI; do not claim platform success without execution evidence.
 - Credentials and public publishing are release gates, not permission to stop P0 implementation.

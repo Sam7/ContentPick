@@ -184,3 +184,112 @@ fn forced_exception_does_not_unfilter_its_siblings() {
         vec!["dist/one.ts"]
     );
 }
+
+#[test]
+fn view_presents_a_hierarchical_folder_first_tree_but_manifest_stays_lexical() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("zeta/inner")).unwrap();
+    std::fs::create_dir(temp.path().join("alpha")).unwrap();
+    for path in [
+        "zeta/inner/leaf.ts",
+        "zeta/root.ts",
+        "alpha/item.ts",
+        "beta.ts",
+        "aardvark.ts",
+    ] {
+        std::fs::write(temp.path().join(path), "text").unwrap();
+    }
+
+    let workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    assert_eq!(
+        workspace
+            .view(1)
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "alpha",
+            "alpha/item.ts",
+            "zeta",
+            "zeta/inner",
+            "zeta/inner/leaf.ts",
+            "zeta/root.ts",
+            "aardvark.ts",
+            "beta.ts",
+        ]
+    );
+    assert_eq!(
+        workspace
+            .manifest()
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "aardvark.ts",
+            "alpha/item.ts",
+            "beta.ts",
+            "zeta/inner/leaf.ts",
+            "zeta/root.ts",
+        ]
+    );
+}
+
+#[test]
+fn soft_exclusion_defers_unknown_extension_sampling_until_force_include() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("payload.opaque"),
+        b"text\0with binary marker",
+    )
+    .unwrap();
+    let policy = FilterPolicy {
+        exclude_paths: vec!["**/*.opaque".into()],
+        ..Default::default()
+    };
+
+    let excluded = Workspace::scan(
+        temp.path(),
+        policy.clone(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let entry = excluded
+        .view(1)
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == "payload.opaque")
+        .unwrap();
+    assert_eq!(entry.kind, "file");
+    assert_eq!(entry.reason.as_deref(), Some("custom exclude: **/*.opaque"));
+
+    let forced = Workspace::scan(
+        temp.path(),
+        policy,
+        BTreeMap::from([("payload.opaque".into(), Intent::ForceInclude)]),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let entry = forced
+        .view(2)
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == "payload.opaque")
+        .unwrap();
+    assert_eq!(entry.kind, "blocked");
+    assert_eq!(
+        entry.reason.as_deref(),
+        Some("binary or unsupported encoding")
+    );
+}

@@ -347,6 +347,8 @@ impl Workspace {
             let soft = compiled
                 .reason(&path, directory, &self.policy)
                 .or(ignored.clone());
+            let preliminary =
+                selection::evaluate(&path, hard.as_deref(), soft.as_deref(), &self.intents);
             if !directory && hard.is_none() {
                 let ext = extension(&path);
                 if [
@@ -362,6 +364,7 @@ impl Workspace {
                     "swift", "sh", "sql", "lock",
                 ]
                 .contains(&ext.as_str())
+                    && (soft.is_none() || preliminary.force_included)
                 {
                     match content::classify(&self.root_handle, &path) {
                         Ok(true) => {}
@@ -485,6 +488,27 @@ impl Workspace {
                 }
             }
         }
+        // The index and manifest retain canonical lexical path order. The view is
+        // presentation data, so expose a deterministic depth-first tree with
+        // directories before files at each sibling level.
+        let kinds: BTreeMap<String, bool> = entries
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.kind == "directory"))
+            .collect();
+        entries.sort_by_cached_key(|entry| {
+            let mut key = Vec::new();
+            let mut prefix = String::new();
+            for component in entry.path.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(component);
+                let directory_first = kinds.get(prefix.as_str()).copied().unwrap_or(false);
+                key.push((u8::from(!directory_first), component.to_owned()));
+            }
+            key
+        });
+
         let manifest = self.manifest();
         WorkspaceView {
             policy: self.policy.clone(),

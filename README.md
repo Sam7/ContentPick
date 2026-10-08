@@ -40,7 +40,7 @@ Example section (UTF-8 output, source line endings preserved):
 ````markdown
 ## src/main.rs
 
-```text
+```rust
 fn main() {}
 ```
 ````

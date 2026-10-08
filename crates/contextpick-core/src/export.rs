@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const MAX_FENCE_RUN: usize = 4096;
+const FENCE_WRITE_CHUNK: usize = 4096;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,14 +34,92 @@ fn verify_entry(root: &WorkspaceRoot, entry: &ManifestEntry) -> Result<File> {
             entry.path
         )));
     }
-    let opened = file.metadata()?;
-    if opened.len() != entry.size || modified_ns(&opened) != entry.modified_ns {
-        return Err(Error::Message(format!(
-            "{}: file changed since manifest",
-            entry.path
-        )));
-    }
     Ok(file)
+}
+
+fn language_tag(path: &str) -> &'static str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let extension = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    [
+        ("rs", "rust"),
+        ("ts", "typescript"),
+        ("tsx", "tsx"),
+        ("js", "javascript"),
+        ("mjs", "javascript"),
+        ("cjs", "javascript"),
+        ("jsx", "jsx"),
+        ("json", "json"),
+        ("md", "markdown"),
+        ("markdown", "markdown"),
+        ("toml", "toml"),
+        ("yaml", "yaml"),
+        ("yml", "yaml"),
+        ("css", "css"),
+        ("html", "html"),
+        ("htm", "html"),
+        ("xml", "xml"),
+        ("csv", "csv"),
+        ("py", "python"),
+        ("cs", "csharp"),
+        ("c", "c"),
+        ("h", "c"),
+        ("cpp", "cpp"),
+        ("cc", "cpp"),
+        ("cxx", "cpp"),
+        ("hpp", "cpp"),
+        ("hxx", "cpp"),
+        ("go", "go"),
+        ("java", "java"),
+        ("swift", "swift"),
+        ("sh", "bash"),
+        ("bash", "bash"),
+        ("sql", "sql"),
+    ]
+    .iter()
+    .find_map(|(candidate, tag)| candidate.eq_ignore_ascii_case(extension).then_some(*tag))
+    .unwrap_or("text")
+}
+
+fn write_counted<W: Write>(writer: &mut W, data: &[u8], total: &mut u64) -> Result<()> {
+    writer.write_all(data)?;
+    *total = total
+        .checked_add(data.len() as u64)
+        .ok_or_else(|| Error::Message("Markdown export byte count overflow".into()))?;
+    Ok(())
+}
+
+fn write_repeated<W: Write>(
+    writer: &mut W,
+    byte: u8,
+    mut count: usize,
+    cancel: &AtomicBool,
+    total: &mut u64,
+) -> Result<()> {
+    let block = [byte; FENCE_WRITE_CHUNK];
+    while count > 0 {
+        check_cancel(cancel)?;
+        let chunk = count.min(block.len());
+        write_counted(writer, &block[..chunk], total)?;
+        count -= chunk;
+    }
+    Ok(())
+}
+
+fn copy_with_cancel<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    cancel: &AtomicBool,
+    total: &mut u64,
+) -> Result<()> {
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check_cancel(cancel)?;
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        write_counted(writer, &buffer[..read], total)?;
+    }
 }
 
 fn update_run(bytes: &[u8], current: &mut usize, longest: &mut usize) {
@@ -269,26 +347,21 @@ pub fn export_to(
         .unwrap_or("workspace");
     let mut temp = tempfile::NamedTempFile::new_in(&parent)?;
     let mut bytes = 0u64;
-    macro_rules! emit {
-        ($data:expr) => {{
-            let data: Vec<u8> = ($data).to_vec();
-            temp.write_all(&data)?;
-            bytes += data.len() as u64;
-        }};
-    }
-    emit!(format!("# ContextPick export — {}\n\n", escaped_heading(root_name)).as_bytes());
+    write_counted(
+        &mut temp,
+        format!("# ContextPick export — {}\n\n", escaped_heading(root_name)).as_bytes(),
+        &mut bytes,
+    )?;
     for entry in &sorted {
         check_cancel(cancel)?;
         let mut source = verify_entry(root, entry)
             .map_err(|e| Error::Message(format!("{}: {e}", entry.path)))?;
         let (mut content, longest) = transcode(&mut source, cancel)
             .map_err(|e| Error::Message(format!("{}: {e}", entry.path)))?;
-        if longest >= MAX_FENCE_RUN {
-            return Err(Error::Message(format!(
-                "{}: backtick run exceeds export fence limit",
-                entry.path
-            )));
-        }
+        let fence_len = longest
+            .max(2)
+            .checked_add(1)
+            .ok_or_else(|| Error::Message("code fence is too long to represent".into()))?;
         let after = source.metadata()?;
         let path_after = content::open_safe(root, &entry.path)?.metadata()?;
         if after.len() != entry.size
@@ -301,20 +374,26 @@ pub fn export_to(
                 entry.path
             )));
         }
-        let fence = "`".repeat(longest.max(2) + 1);
-        emit!(format!("## {}\n\n{}text\n", escaped_heading(&entry.path), fence).as_bytes());
+        write_counted(
+            &mut temp,
+            format!("## {}\n\n", escaped_heading(&entry.path)).as_bytes(),
+            &mut bytes,
+        )?;
+        write_repeated(&mut temp, b'`', fence_len, cancel, &mut bytes)?;
+        write_counted(&mut temp, language_tag(&entry.path).as_bytes(), &mut bytes)?;
+        write_counted(&mut temp, b"\n", &mut bytes)?;
         let content_len = content.seek(SeekFrom::End(0))?;
         content.seek(SeekFrom::Start(content_len.saturating_sub(1)))?;
         let mut last = [0u8; 1];
         let ends_with_newline =
             content_len > 0 && content.read(&mut last)? == 1 && last[0] == b'\n';
         content.seek(SeekFrom::Start(0))?;
-        let copied = std::io::copy(&mut content, &mut temp)?;
-        bytes += copied;
+        copy_with_cancel(&mut content, &mut temp, cancel, &mut bytes)?;
         if !ends_with_newline {
-            emit!(b"\n");
+            write_counted(&mut temp, b"\n", &mut bytes)?;
         }
-        emit!(format!("{}\n\n", fence).as_bytes());
+        write_repeated(&mut temp, b'`', fence_len, cancel, &mut bytes)?;
+        write_counted(&mut temp, b"\n\n", &mut bytes)?;
     }
     check_cancel(cancel)?;
     temp.as_file_mut().sync_all()?;
@@ -331,4 +410,80 @@ pub fn export_to(
         files: sorted.len(),
         destination: destination_text,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_with_cancel, write_repeated};
+    use crate::Error;
+    use std::io::{self, Read};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct CancelAfterChunk<'a> {
+        cancel: &'a AtomicBool,
+        emitted: bool,
+    }
+
+    struct CancelOnWrite<'a> {
+        cancel: &'a AtomicBool,
+        output: Vec<u8>,
+    }
+
+    impl io::Write for CancelOnWrite<'_> {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(buffer);
+            self.cancel.store(true, Ordering::Relaxed);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for CancelAfterChunk<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.emitted {
+                return Ok(0);
+            }
+            let count = buffer.len().min(8192);
+            buffer[..count].fill(b'x');
+            self.emitted = true;
+            self.cancel.store(true, Ordering::Relaxed);
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn spool_copy_checks_cancellation_between_chunks() {
+        let cancel = AtomicBool::new(false);
+        let mut reader = CancelAfterChunk {
+            cancel: &cancel,
+            emitted: false,
+        };
+        let mut output = Vec::new();
+        let mut total = 0;
+
+        let error = copy_with_cancel(&mut reader, &mut output, &cancel, &mut total).unwrap_err();
+
+        assert!(matches!(error, Error::Message(message) if message == "export cancelled"));
+        assert_eq!(output, vec![b'x'; 8192]);
+        assert_eq!(total, 8192);
+    }
+
+    #[test]
+    fn long_fence_write_checks_cancellation_between_chunks() {
+        let cancel = AtomicBool::new(false);
+        let mut writer = CancelOnWrite {
+            cancel: &cancel,
+            output: Vec::new(),
+        };
+        let mut total = 0;
+
+        let error = write_repeated(&mut writer, b'`', 8192, &cancel, &mut total).unwrap_err();
+
+        assert!(matches!(error, Error::Message(message) if message == "export cancelled"));
+        assert_eq!(writer.output, vec![b'`'; 4096]);
+        assert_eq!(total, 4096);
+    }
 }

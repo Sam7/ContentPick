@@ -30,11 +30,22 @@ fn selected(workspace: &Workspace, path: &str) -> bool {
         .selected
 }
 
-fn git_check_ignored(root: &Path, path: &str) -> Option<bool> {
+fn require_git() {
+    let result = Command::new("git")
+        .arg("--version")
+        .output()
+        .expect("Git is a required prerequisite for Git parity fixture tests");
+    assert!(
+        result.status.success(),
+        "Git is a required prerequisite for Git parity fixture tests"
+    );
+}
+
+fn git_check_ignored(root: &Path, path: &str) -> bool {
     let result = Command::new("git")
         .args([
             "-C",
-            root.to_str()?,
+            root.to_str().expect("temporary fixture path must be UTF-8"),
             "-c",
             "core.excludesfile=",
             "check-ignore",
@@ -43,29 +54,44 @@ fn git_check_ignored(root: &Path, path: &str) -> Option<bool> {
             "--",
             path,
         ])
-        .status()
-        .ok()?;
-    Some(result.success())
+        .output()
+        .expect("Git is a required prerequisite for Git parity fixture tests");
+    match result.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        _ => panic!(
+            "git check-ignore failed for {path}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ),
+    }
 }
 
-fn git_check_ignored_including_config(root: &Path, path: &str) -> Option<bool> {
+fn git_check_ignored_including_config(root: &Path, path: &str) -> bool {
     let result = Command::new("git")
         .args([
             "-C",
-            root.to_str()?,
+            root.to_str().expect("temporary fixture path must be UTF-8"),
             "check-ignore",
             "--no-index",
             "--quiet",
             "--",
             path,
         ])
-        .status()
-        .ok()?;
-    Some(result.success())
+        .output()
+        .expect("Git is a required prerequisite for Git parity fixture tests");
+    match result.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        _ => panic!(
+            "git check-ignore failed for {path}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ),
+    }
 }
 
 #[test]
 fn gitignore_anchors_and_parent_negation_match_git_check_ignore() {
+    require_git();
     let temp = tempdir().unwrap();
     fs::create_dir_all(temp.path().join("nested/deeper")).unwrap();
     fs::write(
@@ -91,11 +117,12 @@ fn gitignore_anchors_and_parent_negation_match_git_check_ignore() {
 
     let git_init = Command::new("git")
         .args(["-C", temp.path().to_str().unwrap(), "init", "--quiet"])
-        .status();
-    if git_init.is_err() {
-        return;
-    }
-    assert!(git_init.unwrap().success());
+        .status()
+        .expect("Git is a required prerequisite for Git parity fixture tests");
+    assert!(
+        git_init.success(),
+        "git init must succeed for parity fixture"
+    );
 
     let workspace = scan(temp.path(), FilterPolicy::default());
     for path in [
@@ -110,7 +137,7 @@ fn gitignore_anchors_and_parent_negation_match_git_check_ignore() {
         "nested/drop.cache",
         "nested/deeper/drop.cache",
     ] {
-        let expected_ignored = git_check_ignored(temp.path(), path).unwrap();
+        let expected_ignored = git_check_ignored(temp.path(), path);
         assert_eq!(
             selected(&workspace, path),
             !expected_ignored,
@@ -121,6 +148,7 @@ fn gitignore_anchors_and_parent_negation_match_git_check_ignore() {
 
 #[test]
 fn ignore_files_and_git_global_excludes_are_disabled_by_default() {
+    require_git();
     // The core opts into .gitignore through its policy; `.ignore` and
     // Git's core.excludesfile remain disabled because there is no UI toggle.
     let temp = tempdir().unwrap();
@@ -131,25 +159,27 @@ fn ignore_files_and_git_global_excludes_are_disabled_by_default() {
 
     let git_init = Command::new("git")
         .args(["-C", temp.path().to_str().unwrap(), "init", "--quiet"])
-        .status();
-    if let Ok(status) = git_init {
-        assert!(status.success());
-        let config = Command::new("git")
-            .args([
-                "-C",
-                temp.path().to_str().unwrap(),
-                "config",
-                "core.excludesfile",
-            ])
-            .arg(temp.path().join("global-excludes"))
-            .status()
-            .unwrap();
-        assert!(config.success());
-        assert_eq!(
-            git_check_ignored_including_config(temp.path(), "from-global.txt"),
-            Some(true)
-        );
-    }
+        .status()
+        .expect("Git is a required prerequisite for Git parity fixture tests");
+    assert!(
+        git_init.success(),
+        "git init must succeed for parity fixture"
+    );
+    let config = Command::new("git")
+        .args([
+            "-C",
+            temp.path().to_str().unwrap(),
+            "config",
+            "core.excludesfile",
+        ])
+        .arg(temp.path().join("global-excludes"))
+        .status()
+        .expect("Git is a required prerequisite for Git parity fixture tests");
+    assert!(config.success());
+    assert!(git_check_ignored_including_config(
+        temp.path(),
+        "from-global.txt"
+    ));
 
     let workspace = scan(temp.path(), FilterPolicy::default());
     assert!(selected(&workspace, "from-ignore.txt"));

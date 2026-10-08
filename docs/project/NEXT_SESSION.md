@@ -1,14 +1,13 @@
 # Resume
 
-1. Read `AGENTS.md`, `STATUS.md`, and `docs/plans/active-m1.md`.
-2. Run `git status --short` and inspect recent commits before edits.
-3. Charter is `docs/PRODUCT_CHARTER.md`; do not duplicate it at root.
-4. Node is at `C:\Program Files\nodejs`; prepend it to process PATH if needed.
-5. MSVC now installed and Rust 1.99.0 under .tools. `. ./scripts/env.ps1` sets process paths; use MSVC for native builds.
-6. Native Windows picker/preview/copy/save demonstrated: 10 files / 615 bytes; ignored sentinel absent. See docs/testing evidence.
-7. Last core suite: 24 pass. Frontend before virtualisation: 12 component / 2 E2E pass. Browser fixture tests don't prove native behavior.
-8. Frontend Luna owns src/package files (virtualisation, policy hydration, footer). Test Luna owns contract_fixtures.rs and benchmark.rs.
-9. Root owns native/core integration: safe in-root export support + excluded output registry, long-fence bounds, persistence regression.
-10. WorkspaceRoot pins selected directory; never reopen roots ambiently. Refresh uses scan_pinned.
-11. Native dev session 64314 may still run with isolated CONTEXTPICK_CONFIG_DIR under .tools. HMR can interrupt smoke interactions.
-12. Full checks/review/checkpoint then IPC paging/progressive scan, remaining P0 gaps. No macOS/installer/signing evidence. MVP not complete.
+1. Read AGENTS.md, STATUS.md and `docs/plans/active-p0-hardening.md`; inspect git status/log before editing. Charter: `docs/PRODUCT_CHARTER.md`.
+2. Windows MSVC Build Tools installed with user authorization; Rust1.99 and Node24 available. `. ./scripts/env.ps1` changes only process environment. Use explicit MSVC toolchain for native work.
+3. Latest workspace suite: 39 Rust tests (36 core, 3 shell); 15 RTL and 3 browser E2E pass. Browser fixtures do not prove native filesystem behavior. Check STATUS for final clippy result.
+4. Native folder/preview/copy/save demonstrated on ten-file fixture (615 bytes before language-tag update). Recent root restored on restart; user-requested screenshot is in docs/testing. Native manual selection/filter/error journeys remain.
+5. WorkspaceRoot pins the selected directory. Never reopen its path ambiently. Refresh uses scan_pinned. Root owns native/core integration and commits.
+6. Next: safe in-root export with persistent hard exclusions; bounded IPC pages; remaining acceptance fixtures/native journeys; broader M2 review. Arbitrarily long fences and folder ordering are now fixed/tested.
+7. In-root design review: pin parent with single-component nofollow opens; reserve/persist output before writing; reserved temporary prefix; publish new in-root file via no-clobber hard link, never replacing an existing workspace path. Bind reservation to captured root/generation. Outside-root explicit overwrite remains supported. Implementation pending.
+8. Benchmark20k sources +100k ignored actual files: scan440–910ms, enumerate20,002; observed core peak working set12.8MiB. See performance evidence and limits; repeat after indexing changes.
+9. HMR session64314 ended. Vite45064 and last built native binary may run using .tools/smoke-config. Observe actual processes/ports before restarting. Avoid hot-reload rebuilds during native UI automation.
+10. Reuse Luna agents charter_contract/toolchain for focused implementation and Sol core_security_review for independent review, with disjoint ownership. No agents should be editing currently.
+11. No macOS, installer/signing or remote CI execution evidence. No public publishing authorized. Full P0 and release readiness remain incomplete; continue safe work autonomously.
