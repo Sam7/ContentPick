@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.10.1
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend typecheck, tests, lint, and production build
+        run: |
+          pnpm run typecheck
+          pnpm run test
+          pnpm run lint
+          pnpm run build
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install chromium
+
+      - name: End-to-end tests
+        run: pnpm run test:e2e
+
+      - name: Rust format
+        run: cargo fmt --all -- --check
+
+      - name: Rust workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Native application check
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: Native application build (no bundle)
+        working-directory: src-tauri
+        run: cargo build --locked

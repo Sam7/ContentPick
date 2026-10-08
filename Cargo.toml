@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/contextpick-core", "src-tauri"]
+default-members = ["crates/contextpick-core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
