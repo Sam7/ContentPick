@@ -56,11 +56,10 @@ impl Default for ScanLimits {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct FilterPolicy {
     pub gitignore: bool,
     pub include_extensions: Vec<String>,
-    pub exclude_extensions: Vec<String>,
     pub include_paths: Vec<String>,
     pub exclude_paths: Vec<String>,
 }
@@ -69,11 +68,42 @@ impl Default for FilterPolicy {
         Self {
             gitignore: true,
             include_extensions: vec![],
-            exclude_extensions: vec![],
             include_paths: vec![],
             exclude_paths: vec![],
         }
     }
+}
+
+impl FilterPolicy {
+    pub fn validate(&self) -> Result<()> {
+        CompiledPolicy::new(self).map(|_| ())
+    }
+}
+
+pub(crate) const FILE_EXTENSION_RULE_PREFIX: &str = "file-ext:";
+pub(crate) const LITERAL_GLOB_RULE_PREFIX: &str = "glob:";
+
+pub(crate) fn migrated_extension_path_rule(legacy_extension: &str) -> String {
+    let extension = legacy_extension
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    let mut rule = String::from(FILE_EXTENSION_RULE_PREFIX);
+    if extension.is_empty() {
+        rule.push_str("<none>");
+        return rule;
+    }
+
+    for byte in extension.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            rule.push(char::from(byte));
+        } else {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            rule.push('%');
+            rule.push(char::from(HEX[(byte >> 4) as usize]));
+            rule.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    rule
 }
 
 struct CompiledPolicy {
@@ -81,12 +111,13 @@ struct CompiledPolicy {
     include: GlobSet,
     exclude_rules: Vec<String>,
     exclude: GlobSet,
+    exclude_glob_rule_indices: Vec<usize>,
+    exclude_file_extensions: Vec<(usize, String)>,
 }
 impl CompiledPolicy {
     fn new(policy: &FilterPolicy) -> Result<Self> {
         let rule_lists = [
             ("include extension", &policy.include_extensions),
-            ("exclude extension", &policy.exclude_extensions),
             ("include path", &policy.include_paths),
             ("exclude path", &policy.exclude_paths),
         ];
@@ -118,33 +149,37 @@ impl CompiledPolicy {
             ));
         }
 
-        let compile = |kind: &str, rules: &[String]| -> Result<GlobSet> {
-            let mut builder = GlobSetBuilder::new();
-            for (index, rule) in rules.iter().enumerate() {
-                let glob = Glob::new(rule).map_err(|e| {
-                    Error::Message(format!(
-                        "invalid filter policy {kind} rule #{}: {e}",
-                        index + 1
-                    ))
-                })?;
-                builder.add(glob);
-            }
-            builder.build().map_err(|_| {
-                Error::Message(format!(
-                    "filter policy {kind} path rules are too complex to compile; simplify or remove rules"
-                ))
-            })
-        };
+        let include = compile_path_rules("include", &policy.include_paths, false)?;
+        let exclude = compile_path_rules("exclude", &policy.exclude_paths, true)?;
         Ok(Self {
             include_rules: policy.include_paths.clone(),
-            include: compile("include path", &policy.include_paths)?,
+            include: include.globs,
             exclude_rules: policy.exclude_paths.clone(),
-            exclude: compile("exclude path", &policy.exclude_paths)?,
+            exclude: exclude.globs,
+            exclude_glob_rule_indices: exclude.glob_rule_indices,
+            exclude_file_extensions: exclude.file_extensions,
         })
     }
     fn reason(&self, path: &str, directory: bool, policy: &FilterPolicy) -> Option<String> {
-        if let Some(index) = self.exclude.matches(path).last() {
-            return Some(format!("custom exclude: {}", self.exclude_rules[*index]));
+        let mut matched_exclude = self
+            .exclude
+            .matches(path)
+            .last()
+            .map(|glob_index| self.exclude_glob_rule_indices[*glob_index]);
+        if !directory {
+            let extension = extension(path);
+            if let Some((rule_index, _)) = self
+                .exclude_file_extensions
+                .iter()
+                .rev()
+                .find(|(_, rule_extension)| rule_extension.eq_ignore_ascii_case(&extension))
+            {
+                matched_exclude =
+                    Some(matched_exclude.map_or(*rule_index, |current| current.max(*rule_index)));
+            }
+        }
+        if let Some(index) = matched_exclude {
+            return Some(format!("custom exclude: {}", self.exclude_rules[index]));
         }
         if directory {
             return None;
@@ -153,18 +188,110 @@ impl CompiledPolicy {
             return Some("custom include: no matching path".into());
         }
         let extension = extension(path);
-        let matches = |rules: &[String]| {
-            rules
-                .iter()
-                .any(|r| r.trim_start_matches('.').eq_ignore_ascii_case(&extension))
-        };
-        if matches(&policy.exclude_extensions) {
-            return Some(format!("excluded extension: {extension}"));
-        }
-        if !policy.include_extensions.is_empty() && !matches(&policy.include_extensions) {
+        let include_matches = policy.include_extensions.iter().any(|rule| {
+            rule.trim_start_matches('.')
+                .eq_ignore_ascii_case(&extension)
+        });
+        if !policy.include_extensions.is_empty() && !include_matches {
             return Some(format!("extension not allowed: {extension}"));
         }
         None
+    }
+}
+
+struct CompiledPathRules {
+    globs: GlobSet,
+    glob_rule_indices: Vec<usize>,
+    file_extensions: Vec<(usize, String)>,
+}
+
+fn compile_path_rules(
+    kind: &str,
+    rules: &[String],
+    allow_file_extension_rules: bool,
+) -> Result<CompiledPathRules> {
+    let mut builder = GlobSetBuilder::new();
+    let mut glob_rule_indices = Vec::new();
+    let mut file_extensions = Vec::new();
+    for (index, rule) in rules.iter().enumerate() {
+        if allow_file_extension_rules
+            && let Some(encoded_extension) = rule.strip_prefix(FILE_EXTENSION_RULE_PREFIX)
+        {
+            let extension = decode_file_extension_rule(encoded_extension).map_err(|error| {
+                Error::Message(format!(
+                    "invalid filter policy exclude path rule #{}: {error}",
+                    index + 1
+                ))
+            })?;
+            file_extensions.push((index, extension));
+            continue;
+        }
+        let pattern = if allow_file_extension_rules {
+            rule.strip_prefix(LITERAL_GLOB_RULE_PREFIX).unwrap_or(rule)
+        } else {
+            rule
+        };
+        let glob = Glob::new(pattern).map_err(|e| {
+            Error::Message(format!(
+                "invalid filter policy {kind} path rule #{}: {e}",
+                index + 1
+            ))
+        })?;
+        builder.add(glob);
+        glob_rule_indices.push(index);
+    }
+    let set = builder.build().map_err(|_| {
+        Error::Message(format!(
+            "filter policy {kind} path rules are too complex to compile; simplify or remove rules"
+        ))
+    })?;
+    Ok(CompiledPathRules {
+        globs: set,
+        glob_rule_indices,
+        file_extensions,
+    })
+}
+
+fn decode_file_extension_rule(encoded: &str) -> std::result::Result<String, &'static str> {
+    if encoded == "<none>" {
+        return Ok(String::new());
+    }
+    if encoded.is_empty() {
+        return Err("use <none> for extensionless files");
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err("incomplete percent escape");
+            }
+            let high = decode_hex(bytes[index + 1]).ok_or("invalid percent escape")?;
+            let low = decode_hex(bytes[index + 2]).ok_or("invalid percent escape")?;
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            if !bytes[index].is_ascii_alphanumeric()
+                && !matches!(bytes[index], b'-' | b'_' | b'.' | b'~')
+            {
+                return Err(
+                    "characters outside the encoded rule alphabet must use percent escapes",
+                );
+            }
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| "percent escapes must form UTF-8 text")
+}
+
+fn decode_hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -186,6 +313,8 @@ struct IndexedEntry {
     modified_ns: u64,
     hard: Option<String>,
     soft: Option<String>,
+    git_ignore_matched: bool,
+    custom_excluded: bool,
     enumerated: bool,
 }
 
@@ -222,6 +351,7 @@ pub struct EntryView {
     pub size: u64,
     pub selected: bool,
     pub force_included: bool,
+    pub git_ignored: bool,
     pub reason: Option<String>,
     pub enumerated: bool,
     pub partial: bool,
@@ -344,7 +474,7 @@ impl Workspace {
             raw_entry_limit_reported: false,
             retained_text_limit_reported: false,
         };
-        workspace.scan_directory(&dir, "", &[], None, &compiled, cancel, 0)?;
+        workspace.scan_directory(&dir, "", &[], None, false, &compiled, cancel, 0)?;
         workspace.finalize_diagnostics();
         Arc::make_mut(&mut workspace.entries).sort_by(|a, b| a.path.cmp(&b.path));
         Ok(workspace)
@@ -438,6 +568,7 @@ impl Workspace {
         relative: &str,
         parents: &[Arc<Gitignore>],
         inherited_ignore: Option<String>,
+        inherited_git_ignored: bool,
         compiled: &CompiledPolicy,
         cancel: &AtomicBool,
         depth: usize,
@@ -732,11 +863,13 @@ impl Workspace {
                 hard = Some(reason.into());
             }
             let mut ignored = inherited_ignore.clone();
+            let mut git_ignored = inherited_git_ignored;
             if ignored.is_none() && self.policy.gitignore {
                 for matcher in &matchers {
                     let matched = matcher.matched(self.root.join(&path), directory);
                     if let Some(rule) = matched.inner() {
                         ignored = if matched.is_ignore() {
+                            git_ignored = true;
                             Some(format!(
                                 "gitignore {}: {}",
                                 rule.from()
@@ -745,14 +878,14 @@ impl Workspace {
                                 rule.original()
                             ))
                         } else {
+                            git_ignored = false;
                             None
                         };
                     }
                 }
             }
-            let soft = compiled
-                .reason(&path, directory, &self.policy)
-                .or(ignored.clone());
+            let custom_exclusion = compiled.reason(&path, directory, &self.policy);
+            let soft = custom_exclusion.clone().or(ignored.clone());
             let preliminary =
                 selection::evaluate(&path, hard.as_deref(), soft.as_deref(), &self.intents);
             if !directory && hard.is_none() {
@@ -817,11 +950,22 @@ impl Workspace {
                 modified_ns: stamp,
                 hard,
                 soft: soft.clone(),
+                git_ignore_matched: git_ignored,
+                custom_excluded: custom_exclusion.is_some(),
                 enumerated: !directory || complete,
             });
             if traverse {
-                let subtree_outcome =
-                    self.scan_directory(dir, &path, &matchers, soft, compiled, cancel, depth + 1)?;
+                let inherited_git_ignored = git_ignored && custom_exclusion.is_none();
+                let subtree_outcome = self.scan_directory(
+                    dir,
+                    &path,
+                    &matchers,
+                    soft,
+                    inherited_git_ignored,
+                    compiled,
+                    cancel,
+                    depth + 1,
+                )?;
                 if subtree_outcome != ScanOutcome::Complete {
                     Arc::make_mut(&mut self.entries)[entry_index].enumerated = false;
                     if subtree_outcome == ScanOutcome::Exhausted {
@@ -891,6 +1035,13 @@ impl Workspace {
                     size: e.size,
                     selected: d.selected,
                     force_included: d.force_included,
+                    git_ignored: e.git_ignore_matched
+                        && !e.custom_excluded
+                        && self.hard_reason(e).is_none()
+                        && !matches!(
+                            selection::effective_intent(&e.path, &self.intents),
+                            Some(Intent::Exclude | Intent::ForceExclude | Intent::ForceInclude)
+                        ),
                     reason: d.reason,
                     enumerated: e.enumerated,
                     partial: false,
@@ -1012,7 +1163,8 @@ fn truncate_diagnostic(message: &str) -> String {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::{
-        DIAGNOSTIC_BYTES_LIMIT, DIAGNOSTIC_LIMIT, FilterPolicy, ScanLimits, Workspace,
+        CompiledPolicy, DIAGNOSTIC_BYTES_LIMIT, DIAGNOSTIC_LIMIT, FilterPolicy, ScanLimits,
+        Workspace, decode_file_extension_rule, extension, migrated_extension_path_rule,
         truncate_diagnostic,
     };
     use crate::{WorkspaceRoot, selection::Intent};
@@ -1020,6 +1172,55 @@ mod diagnostic_tests {
         collections::{BTreeMap, BTreeSet},
         sync::atomic::AtomicBool,
     };
+
+    #[test]
+    fn migrated_extension_rules_preserve_legacy_extension_normalization() {
+        assert_eq!(extension("Makefile"), "");
+        assert_eq!(extension("trailing."), "");
+        assert_eq!(extension(".env"), "env");
+        assert_eq!(extension("nested/.hidden.Rs"), "rs");
+        assert_eq!(migrated_extension_path_rule(".rS"), "file-ext:rs");
+        assert_eq!(migrated_extension_path_rule(""), "file-ext:<none>");
+        assert_eq!(migrated_extension_path_rule("*?["), "file-ext:%2A%3F%5B");
+        assert_eq!(decode_file_extension_rule("%2A%3F%5B"), Ok("*?[".into()));
+        assert_eq!(
+            decode_file_extension_rule("%GG"),
+            Err("invalid percent escape")
+        );
+        assert_eq!(
+            decode_file_extension_rule(""),
+            Err("use <none> for extensionless files")
+        );
+    }
+
+    #[test]
+    fn encoded_extension_and_escaped_glob_rules_keep_literal_matches() {
+        let policy = FilterPolicy {
+            exclude_paths: vec![
+                "file-ext:%2A%3F%5B".into(),
+                "glob:glob:*.rs".into(),
+                "glob:file-ext:literal".into(),
+            ],
+            ..FilterPolicy::default()
+        };
+        let compiled = CompiledPolicy::new(&policy).unwrap();
+
+        assert_eq!(
+            compiled.reason("name.*?[", false, &policy).as_deref(),
+            Some("custom exclude: file-ext:%2A%3F%5B")
+        );
+        assert_eq!(
+            compiled.reason("glob:source.rs", false, &policy).as_deref(),
+            Some("custom exclude: glob:glob:*.rs")
+        );
+        assert_eq!(
+            compiled
+                .reason("file-ext:literal", false, &policy)
+                .as_deref(),
+            Some("custom exclude: glob:file-ext:literal")
+        );
+        assert_eq!(compiled.reason("source.rs", false, &policy), None);
+    }
 
     #[test]
     fn diagnostic_truncation_preserves_utf8_boundary_prefix_and_suffix() {
@@ -1072,6 +1273,97 @@ mod diagnostic_tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn git_ignore_classification_excludes_policy_intents_safety_and_unknown_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("ignored-dir")).unwrap();
+        std::fs::create_dir_all(temp.path().join("unavailable")).unwrap();
+        std::fs::write(
+            temp.path().join(".gitignore"),
+            "ignored-dir/\n*.log\n*.png\n",
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("unavailable/.gitignore"), "{malformed\n").unwrap();
+        for path in [
+            "ignored-dir/hidden.ts",
+            "ignored-dir/forced.ts",
+            "ignored-dir/user.ts",
+            "custom.log",
+            "user.log",
+            "forced.log",
+            "hard.png",
+            "unavailable/hidden.ts",
+            "visible.ts",
+        ] {
+            std::fs::write(temp.path().join(path), "source").unwrap();
+        }
+
+        let mut policy = FilterPolicy::default();
+        policy.exclude_paths.push("custom.log".into());
+        let intents = BTreeMap::from([
+            ("ignored-dir/forced.ts".into(), Intent::ForceInclude),
+            ("ignored-dir/user.ts".into(), Intent::Exclude),
+            ("user.log".into(), Intent::Exclude),
+            ("forced.log".into(), Intent::ForceInclude),
+        ]);
+        let workspace = Workspace::scan_pinned_with_limits(
+            WorkspaceRoot::open(temp.path()).unwrap(),
+            policy,
+            intents,
+            BTreeSet::from(["ignored-dir".into(), "unavailable".into()]),
+            BTreeSet::new(),
+            ScanLimits::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let entries = workspace.view(1).entries;
+        let classified = |path: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .unwrap_or_else(|| panic!("missing entry {path}"))
+                .git_ignored
+        };
+
+        assert!(
+            classified("ignored-dir"),
+            "lazy Git-ignored folder is classified"
+        );
+        assert!(
+            classified("ignored-dir/hidden.ts"),
+            "browsed ignored descendants inherit classification"
+        );
+        assert!(
+            !classified("ignored-dir/forced.ts"),
+            "force-included paths are not effectively ignored"
+        );
+        assert!(
+            !classified("ignored-dir/user.ts"),
+            "user exclusions are not Git-ignore results"
+        );
+        assert!(
+            !classified("custom.log"),
+            "custom rules take classification precedence"
+        );
+        assert!(
+            !classified("user.log"),
+            "manual exclusions are not Git-ignore results"
+        );
+        assert!(
+            !classified("forced.log"),
+            "force-included files are not ignored"
+        );
+        assert!(
+            !classified("hard.png"),
+            "hard safety blocks are not Git-ignore results"
+        );
+        assert!(
+            !classified("unavailable/hidden.ts"),
+            "unknown-rule failures are not Git-ignore results"
+        );
+        assert!(!classified("visible.ts"));
     }
 
     #[test]

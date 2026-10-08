@@ -36,6 +36,135 @@ fn prunes_ignored_subtree_but_keeps_explainable_placeholder() {
 }
 
 #[test]
+fn git_ignore_view_classification_tracks_intent_changes_without_rescanning() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(".gitignore"), "ignored.ts\n").unwrap();
+    std::fs::write(temp.path().join("ignored.ts"), "ignored source").unwrap();
+    let mut workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::from([("ignored.ts".into(), Intent::ForceInclude)]),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    let entry = |workspace: &Workspace| {
+        workspace
+            .view(1)
+            .entries
+            .into_iter()
+            .find(|entry| entry.path == "ignored.ts")
+            .unwrap()
+    };
+    assert!(entry(&workspace).selected);
+    assert!(!entry(&workspace).git_ignored);
+
+    workspace.intents.remove("ignored.ts");
+    assert!(!entry(&workspace).selected);
+    assert!(entry(&workspace).git_ignored);
+
+    workspace
+        .intents
+        .insert("ignored.ts".into(), Intent::Exclude);
+    assert_eq!(
+        entry(&workspace).reason.as_deref(),
+        Some("excluded by user")
+    );
+    assert!(!entry(&workspace).git_ignored);
+
+    workspace
+        .intents
+        .insert("ignored.ts".into(), Intent::Include);
+    assert!(
+        entry(&workspace).git_ignored,
+        "ordinary Include does not override Git-ignore"
+    );
+}
+
+#[test]
+fn git_ignore_view_classification_tracks_inherited_folder_intents_without_rescanning() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("dist/deep")).unwrap();
+    std::fs::write(temp.path().join(".gitignore"), "dist/\n").unwrap();
+    std::fs::write(temp.path().join("dist/deep/generated.ts"), "ignored source").unwrap();
+    let mut workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::from([("dist".into(), Intent::ForceInclude)]),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    let entry = |workspace: &Workspace, path: &str| {
+        workspace
+            .view(1)
+            .entries
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .unwrap()
+    };
+    assert!(entry(&workspace, "dist/deep/generated.ts").selected);
+    assert!(!entry(&workspace, "dist/deep/generated.ts").git_ignored);
+
+    workspace.intents.remove("dist");
+    assert!(!entry(&workspace, "dist/deep/generated.ts").selected);
+    assert!(entry(&workspace, "dist").git_ignored);
+    assert!(entry(&workspace, "dist/deep/generated.ts").git_ignored);
+
+    workspace
+        .intents
+        .insert("dist".into(), Intent::ForceExclude);
+    assert!(!entry(&workspace, "dist").git_ignored);
+    assert!(!entry(&workspace, "dist/deep/generated.ts").git_ignored);
+}
+
+#[test]
+fn newly_reserved_hard_output_is_removed_from_git_ignore_view_without_rescan() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(".gitignore"), "artifact.ts\n").unwrap();
+    std::fs::write(temp.path().join("artifact.ts"), "ignored source").unwrap();
+    let mut workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    assert!(
+        workspace
+            .view(1)
+            .entries
+            .iter()
+            .find(|entry| entry.path == "artifact.ts")
+            .unwrap()
+            .git_ignored
+    );
+    workspace.generated_outputs.insert("artifact.ts".into());
+    let artifact = workspace
+        .view(2)
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == "artifact.ts")
+        .unwrap();
+    assert_eq!(artifact.kind, "blocked");
+    assert!(!artifact.git_ignored);
+    workspace.generated_outputs.remove("artifact.ts");
+    assert!(
+        workspace
+            .view(3)
+            .entries
+            .iter()
+            .find(|entry| entry.path == "artifact.ts")
+            .unwrap()
+            .git_ignored
+    );
+}
+
+#[test]
 fn nested_gitignore_and_toggle_preserve_explicit_intent() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir(temp.path().join("src")).unwrap();

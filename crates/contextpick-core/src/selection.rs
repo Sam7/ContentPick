@@ -25,6 +25,14 @@ pub fn is_descendant(path: &str, ancestor: &str) -> bool {
             .is_some_and(|tail| tail.starts_with('/'))
 }
 
+pub fn effective_intent(path: &str, intents: &BTreeMap<String, Intent>) -> Option<Intent> {
+    intents
+        .iter()
+        .filter(|(key, _)| is_descendant(path, key))
+        .max_by_key(|(key, _)| key.len())
+        .map(|(_, value)| *value)
+}
+
 pub fn evaluate(
     path: &str,
     hard: Option<&str>,
@@ -39,11 +47,7 @@ pub fn evaluate(
     if let Some(reason) = hard {
         return rejected(reason);
     }
-    let intent = intents
-        .iter()
-        .filter(|(key, _)| is_descendant(path, key))
-        .max_by_key(|(key, _)| key.len())
-        .map(|(_, value)| value);
+    let intent = effective_intent(path, intents);
     match intent {
         Some(Intent::ForceExclude | Intent::Exclude) => rejected("excluded by user"),
         Some(Intent::ForceInclude) => Decision {

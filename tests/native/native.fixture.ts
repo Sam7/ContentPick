@@ -1,7 +1,7 @@
 import { test as base, expect } from '@playwright/test';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import { access, copyFile, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Browser, Page } from '@playwright/test';
@@ -10,6 +10,7 @@ import { processTreeForRoot, type ProcessSnapshotEntry } from './process-tree';
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(import.meta.dirname, '../..');
 const builtNativeExe = path.join(repoRoot, 'target', 'debug', 'contextpick.exe');
+const builtWebViewLoader = path.join(repoRoot, 'target', 'debug', 'WebView2Loader.dll');
 const tempRoot = await realpath(tmpdir());
 
 type NativeSession = {
@@ -18,6 +19,8 @@ type NativeSession = {
   startupMs: number;
   launch: () => Promise<Page>;
   stop: () => Promise<void>;
+  installLegacySettings: () => Promise<void>;
+  readSettings: () => Promise<Record<string, unknown>>;
   memoryReport: () => Promise<{ method: string; intervalMs: number; samples: number; peakWorkingSetBytes: number; peakProcessCount: number }>;
 };
 
@@ -291,15 +294,32 @@ export const test = base.extend<NativeFixtures>({
     try {
       if (process.platform === 'win32') {
         await Promise.all([mkdir(config), mkdir(root), mkdir(webviewProfile), mkdir(appDir)]);
-        await access(builtNativeExe);
+        await Promise.all([access(builtNativeExe), access(builtWebViewLoader)]);
         await copyFile(builtNativeExe, nativeExe);
+        await copyFile(builtWebViewLoader, path.join(appDir, 'WebView2Loader.dll'));
         if (nativeScale) await makeScaleWorkspace(root);
         else await makeSyntheticWorkspace(root);
-        const preferences = { version: 1, recentRoot: root, workspaces: {} };
+        const preferences = { version: 2, recentRoot: root, workspaces: {} };
         await writeFile(path.join(config, 'settings.json'), JSON.stringify(preferences), 'utf8');
         await launch();
       }
-      await runTest({ root, get page() { if (!page) throw new Error('Native page is not running.'); return page; }, get startupMs() { return startupMs; }, launch, stop, memoryReport: memorySampler.report });
+      const installLegacySettings = async () => {
+        await stop();
+        const legacy = {
+          version: 1,
+          recentRoot: root,
+          workspaces: {
+            [root]: {
+              policy: { gitignore: true, includeExtensions: [], excludeExtensions: ['.ts'], includePaths: [], excludePaths: [] },
+              intents: { 'README.md': 'exclude' },
+              generatedOutputs: [],
+            },
+          },
+        };
+        await writeFile(path.join(config, 'settings.json'), JSON.stringify(legacy), 'utf8');
+      };
+      const readSettings = async () => JSON.parse(await readFile(path.join(config, 'settings.json'), 'utf8')) as Record<string, unknown>;
+      await runTest({ root, get page() { if (!page) throw new Error('Native page is not running.'); return page; }, get startupMs() { return startupMs; }, launch, stop, installLegacySettings, readSettings, memoryReport: memorySampler.report });
     } finally {
       let stopFailure: string | undefined;
       try {

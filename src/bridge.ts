@@ -6,6 +6,7 @@ export type Entry = {
   size: number;
   selected: boolean;
   forceIncluded: boolean;
+  gitIgnored: boolean;
   reason: string | null;
   enumerated: boolean;
   partial: boolean;
@@ -37,7 +38,6 @@ export type SelectionIntent = 'include' | 'exclude' | 'forceInclude' | 'forceExc
 export type FilterPolicy = {
   gitignore: boolean;
   includeExtensions: string[];
-  excludeExtensions: string[];
   includePaths: string[];
   excludePaths: string[];
 };
@@ -79,21 +79,21 @@ const fixtureWorkspace: WorkspaceView = {
   root: '/workspace/patchwork',
   generation: 1,
   entries: [
-    { path: 'src', kind: 'directory', size: 0, selected: true, forceIncluded: false, reason: null, enumerated: true, partial: false },
-    { path: 'src/main.ts', kind: 'file', size: 1540, selected: true, forceIncluded: false, reason: null, enumerated: true, partial: false },
-    { path: 'src/main.generated.ts', kind: 'file', size: 512, selected: false, forceIncluded: false, reason: 'custom exclude (*.generated.ts)', enumerated: true, partial: false },
-    { path: 'src/components', kind: 'directory', size: 0, selected: true, forceIncluded: false, reason: null, enumerated: true, partial: false },
-    { path: 'src/components/Picker.tsx', kind: 'file', size: 1830, selected: true, forceIncluded: false, reason: null, enumerated: true, partial: false },
-    { path: 'assets', kind: 'directory', size: 0, selected: false, forceIncluded: false, reason: null, enumerated: true, partial: false },
-    { path: 'assets/logo.png', kind: 'file', size: 12_480, selected: false, forceIncluded: false, reason: 'Binary image', enumerated: true, partial: false },
-    { path: 'dist', kind: 'directory', size: 0, selected: false, forceIncluded: false, reason: '.gitignore (dist/)', enumerated: false, partial: false },
-    { path: 'README.md', kind: 'file', size: 923, selected: true, forceIncluded: false, reason: null, enumerated: true, partial: false },
+    { path: 'src', kind: 'directory', size: 0, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
+    { path: 'src/main.ts', kind: 'file', size: 1540, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
+    { path: 'src/main.generated.ts', kind: 'file', size: 512, selected: false, forceIncluded: false, gitIgnored: false, reason: 'custom exclude (*.generated.ts)', enumerated: true, partial: false },
+    { path: 'src/components', kind: 'directory', size: 0, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
+    { path: 'src/components/Picker.tsx', kind: 'file', size: 1830, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
+    { path: 'assets', kind: 'directory', size: 0, selected: false, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
+    { path: 'assets/logo.png', kind: 'file', size: 12_480, selected: false, forceIncluded: false, gitIgnored: false, reason: 'Binary image', enumerated: true, partial: false },
+    { path: 'dist', kind: 'directory', size: 0, selected: false, forceIncluded: false, gitIgnored: true, reason: '.gitignore (dist/)', enumerated: false, partial: false },
+    { path: 'README.md', kind: 'file', size: 923, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
   ],
   entryCount: 9,
   nextOffset: null,
   selectedCount: 3,
   estimatedBytes: 6240,
-  policy: { gitignore: true, includeExtensions: [], excludeExtensions: [], includePaths: [], excludePaths: [] },
+  policy: { gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] },
   incomplete: true,
   diagnostics: [],
 };
@@ -144,7 +144,7 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
         ...structuredClone(fixtureWorkspace),
         entries: [
           ...structuredClone(fixtureWorkspace.entries).map((entry) => entry.path === 'dist' ? { ...entry, enumerated: true } : entry),
-          { path: 'dist/report.md', kind: 'file', size: 404, selected: false, forceIncluded: false, reason: '.gitignore (dist/)', enumerated: true, partial: false },
+          { path: 'dist/report.md', kind: 'file', size: 404, selected: false, forceIncluded: false, gitIgnored: true, reason: '.gitignore (dist/)', enumerated: true, partial: false },
         ],
         entryCount: fixtureWorkspace.entryCount + 1,
         incomplete: false,

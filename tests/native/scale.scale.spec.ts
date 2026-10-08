@@ -14,6 +14,18 @@ test('native WebView2 scales to 20k source files, prunes 100k ignored files, and
   const timingsMs = [native.startupMs];
 
   await expect(summary).toHaveText('20004 items discovered', { timeout: 120_000 });
+  const countBeforeProjection = await page.locator('.metric-primary strong').textContent();
+  const tree = page.getByRole('tree', { name: 'Workspace files' });
+  const views = page.getByRole('navigation', { name: 'Workspace views' });
+  await views.getByRole('button', { name: 'Selected' }).click();
+  await expect(tree.getByText('src', { exact: true })).toBeVisible();
+  await expect(page.locator('.metric-primary strong')).toHaveText(countBeforeProjection ?? '');
+  await views.getByRole('button', { name: 'Ignored' }).click();
+  await expect(tree.getByRole('button', { name: 'Browse ignored files' })).toBeVisible();
+  await expect(views).toContainText('1 folders not browsed');
+  await expect(page.locator('.metric-primary strong')).toHaveText(countBeforeProjection ?? '');
+  await views.getByRole('button', { name: 'All' }).click();
+
   await expect(page.getByRole('button', { name: `Preview ${tailPath}` })).toHaveCount(0);
   await search.fill('source-19999.ts');
   const tail = page.getByRole('button', { name: `Preview ${tailPath}` });
@@ -95,7 +107,7 @@ test('native WebView2 scales to 20k source files, prunes 100k ignored files, and
   expect(memory.peakProcessCount, 'The sample must include the WebView2 descendants').toBeGreaterThan(1);
   expect(memory.peakWorkingSetBytes).toBeGreaterThan(0);
   const report = {
-    suite: 'M3.1 Windows WebView2 scale evidence',
+    suite: 'Windows WebView2 native scale evidence',
     generatedAt: new Date().toISOString(),
     host: { platform: platform(), release: release(), architecture: process.arch },
     fixture: { sourceFiles: 20_000, ignoredFiles: 100_000, discoveredEntries: 20_004, ignoredDirectory: 'ignored-scale' },

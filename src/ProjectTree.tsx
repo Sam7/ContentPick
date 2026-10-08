@@ -195,11 +195,13 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
   }, [actionOpen, position]);
   useLayoutEffect(() => {
     if (!actionOpen) return;
+    let anchorPosition: { top: number; left: number } | null = null;
     const place = () => {
       const trigger = triggerRef.current;
       const menu = popoverRef.current;
       if (!trigger || !menu) return;
       const anchor = trigger.getBoundingClientRect();
+      anchorPosition = { top: anchor.top, left: anchor.left };
       const width = menu.offsetWidth;
       const height = menu.offsetHeight;
       const margin = 8;
@@ -223,16 +225,22 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
         triggerRef.current?.focus({ preventScroll: true });
       }
     };
-    const closeOnViewportChange = () => onAction();
+    const closeOnScroll = () => {
+      const trigger = triggerRef.current;
+      if (!trigger || !anchorPosition) return onAction();
+      const current = trigger.getBoundingClientRect();
+      if (current.top !== anchorPosition.top || current.left !== anchorPosition.left) onAction();
+    };
+    const closeOnResize = () => onAction();
     document.addEventListener('pointerdown', closeOnOutside);
     document.addEventListener('keydown', closeOnKey);
-    document.addEventListener('scroll', closeOnViewportChange, true);
-    window.addEventListener('resize', closeOnViewportChange);
+    document.addEventListener('scroll', closeOnScroll, true);
+    window.addEventListener('resize', closeOnResize);
     return () => {
       document.removeEventListener('pointerdown', closeOnOutside);
       document.removeEventListener('keydown', closeOnKey);
-      document.removeEventListener('scroll', closeOnViewportChange, true);
-      window.removeEventListener('resize', closeOnViewportChange);
+      document.removeEventListener('scroll', closeOnScroll, true);
+      window.removeEventListener('resize', closeOnResize);
     };
   }, [actionOpen, onAction]);
   return <><div className={`tree-row ${entry.selected ? 'is-selected' : ''} ${entry.reason ? 'is-muted' : ''}`} role="treeitem" tabIndex={tabStop ? 0 : -1} aria-keyshortcuts="Shift+F10" aria-level={entry.path.split('/').length} aria-posinset={posInSet} aria-setsize={setSize} aria-checked={entry.partial ? 'mixed' : entry.selected} aria-expanded={isDirectory && !needsBrowse ? displayedExpanded : undefined} onKeyDownCapture={onKeyDown} onFocusCapture={onFocus}>

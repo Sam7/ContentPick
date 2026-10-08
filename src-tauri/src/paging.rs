@@ -109,6 +109,7 @@ mod tests {
                     size: 16,
                     selected: true,
                     force_included: false,
+                    git_ignored: false,
                     reason: None,
                     enumerated: true,
                     partial: false,

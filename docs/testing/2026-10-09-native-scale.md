@@ -26,3 +26,11 @@ The launches reuse the same synthetic workspace, OS cache and WebView2 profile; 
 - Virtual tree keyboard focus: [PNG](2026-10-09-native-scale-keyboard-focus.png)
 - Reconciled state after cancellation: [PNG](2026-10-09-native-scale-after-cancel.png)
 - Structured host and measurement record: [JSON](2026-10-09-native-scale.json)
+
+## M3.5 final UI build rerun — 2026-10-09
+
+After rebuilding the Tauri debug app with the final redesigned frontend and splitter, the actual Windows WebView2 20k/100k scenario passed again. Launch-to-ready was **5,397 / 2,153 / 2,005 ms**; sampled process-tree working set peaked at **612.8 MiB** across 8 processes and 15 successful samples. The method and limitations above still apply. Raw run: [initial M3.5 JSON](2026-10-09-m35-native-scale-initial.json). The three launch measurements describe repeated local debug runs and do not establish a general performance threshold.
+
+## M3.5 final review build rerun — 2026-10-09
+
+After the splitter, preview metadata, collapsed-pane geometry and contrast fixes, the actual Windows WebView2 20k source / 100k ignored fixture passed again. Launch-to-ready was **2,834 / 2,051 / 2,226 ms**; sampled process-tree working set peaked at **587 MiB**, across 8 processes and 14 successful samples. Raw report: [final M3.5 JSON](2026-10-09-m35-native-scale.json); the preceding accessibility build report is preserved as [pre-final-review JSON](2026-10-09-m35-native-scale-pre-final-review.json). Final native screenshots show the [tail-file preview](2026-10-09-m35-scale-tail-preview.png), [ignored subtree pruned](2026-10-09-m35-scale-ignored-pruned.png), [keyboard focus](2026-10-09-m35-scale-keyboard-focus.png) and [authoritative state after refresh cancellation](2026-10-09-m35-scale-after-cancel.png). Measurement conditions and limits above apply; these are local debug-build observations, not release thresholds.

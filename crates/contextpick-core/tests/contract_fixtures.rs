@@ -329,6 +329,70 @@ fn hidden_extensionless_and_env_text_files_follow_extension_filters_case_insensi
 }
 
 #[test]
+fn migrated_file_extension_path_rules_match_files_only_and_support_extensionless_names() {
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join("Makefile"), "text").unwrap();
+    fs::write(temp.path().join(".env"), "text").unwrap();
+    fs::write(temp.path().join("MiXeD.Rs"), "text").unwrap();
+    fs::write(temp.path().join(".hidden.rs"), "text").unwrap();
+    fs::create_dir(temp.path().join("vendor.rs")).unwrap();
+    fs::write(temp.path().join("vendor.rs/child.rs"), "text").unwrap();
+
+    let workspace = scan(
+        temp.path(),
+        FilterPolicy {
+            exclude_paths: vec!["file-ext:rs".into(), "file-ext:<none>".into()],
+            ..FilterPolicy::default()
+        },
+    );
+
+    assert!(!selected(&workspace, "Makefile"));
+    assert!(!selected(&workspace, "MiXeD.Rs"));
+    assert!(!selected(&workspace, ".hidden.rs"));
+    assert!(selected(&workspace, ".env"));
+    let view = workspace.view(0);
+    let directory = view
+        .entries
+        .iter()
+        .find(|entry| entry.path == "vendor.rs")
+        .unwrap();
+    assert_eq!(directory.kind, "directory");
+    assert!(
+        directory.enumerated,
+        "file-targeted rules must not prune same-named directories"
+    );
+    assert!(
+        view.entries
+            .iter()
+            .any(|entry| entry.path == "vendor.rs/child.rs")
+    );
+    assert!(!selected(&workspace, "vendor.rs/child.rs"));
+}
+
+#[test]
+fn more_specific_legacy_path_exclusion_keeps_its_explanation_after_migration() {
+    let temp = tempdir().unwrap();
+    fs::create_dir_all(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/generated.rs"), "generated").unwrap();
+
+    let workspace = scan(
+        temp.path(),
+        FilterPolicy {
+            exclude_paths: vec!["file-ext:rs".into(), "src/**".into()],
+            ..FilterPolicy::default()
+        },
+    );
+
+    let entry = workspace
+        .view(1)
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == "src/generated.rs")
+        .unwrap();
+    assert_eq!(entry.reason.as_deref(), Some("custom exclude: src/**"));
+}
+
+#[test]
 fn cancellation_and_invalid_roots_return_errors() {
     let missing = tempdir().unwrap().path().join("does-not-exist");
     assert!(

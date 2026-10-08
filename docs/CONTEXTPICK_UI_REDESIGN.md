@@ -1,6 +1,6 @@
 # ContextPick — approved desktop UI and brand
 
-> **Status:** Approved design contract; implementation has not started. Delivery is M3.5 in the [authoritative roadmap](project/ROADMAP.md).
+> **Status:** Approved design contract; M3.5 is verified locally on Windows. Delivery evidence and remaining platform/release gates are tracked in the [authoritative roadmap](project/ROADMAP.md).
 
 ## Authority and references
 
@@ -11,11 +11,11 @@
 - Approved logo reference: [`docs/design/Logo.png`](design/Logo.png).
 - Existing native baseline: [`docs/testing/2026-10-08-current-ui.jpg`](testing/2026-10-08-current-ui.jpg), 1200 × 800.
 
-## Audited starting point
+## Audited baseline before M3.5
 
 The current application already has a real folder picker and refresh, progressive IPC paging, a virtualised tree, filename/path search, tri-state selection, force-include/force-exclude actions, exclusion reasons, lazy browsing of ignored folders, bounded read-only preview, selected-file and export-byte estimates, Copy, Export, visible outcomes and persisted workspace policy/intents. These remain the existing domain behavior and are adapted into the approved layout.
 
-The native screenshot shows a website-like header and workspace row, marketing introduction, a separate estimate strip, a two-panel tree/preview work area, and an actions-only bottom dock. Filters currently open in a top-level panel. There are no All / Selected / Ignored views or Settings destination, no collapsible sidebar or preview, and the header still uses the old letter-C mark. The token field truthfully says `Unavailable`; no tokenizer exists. `excludeExtensions` is currently an active core policy, bridge field and persisted version-1 setting, so its removal requires migration.
+The audited native baseline had a website-like header and workspace row, marketing introduction, separate estimate strip, a two-panel tree/preview work area, and actions-only bottom dock. Filters opened in a top-level panel. It had no All / Selected / Ignored views, Settings destination, collapsible sidebar or new mark. The token field truthfully said `Unavailable`; no tokenizer existed. Version 1 persisted `excludeExtensions`, so removing it requires migration. M3.5 progress is recorded in STATUS and the roadmap.
 
 ## Product scope
 
@@ -61,7 +61,7 @@ Native title bar
 - Search only filters/reveals rows. It never changes selection. Switching views, collapsing panes, previewing a file, or resizing the window never changes saved intent.
 - File/folder checkboxes keep the existing tri-state and eligible-descendant semantics. Force include remains an explicit action and cannot bypass binary, link, root-containment or other hard safety checks. Reasons remain available without relying on color alone.
 - Filters contain Respect `.gitignore`, Include Extensions, ordered include/exclude path rules, validation and Reset filters to defaults. Empty Include Extensions means no extension allowlist. Keep extensionless and dotfile behavior explicit. Filter reset never clears manual selection intent.
-- Preview stays read-only and bounded. It identifies the file, relative path, size and inclusion state, and reports truncated, binary, unreadable, deleted and empty states clearly. Preview contents never determine export contents.
+- Preview stays read-only and bounded. It identifies the file, relative path, size and inclusion state, and reports truncated, binary, unreadable, deleted and empty states clearly. An accessible splitter supports pointer and keyboard resizing within bounds; collapse/restore preserves the current preview and selection. Long paths are visually limited to three header lines while the full path remains in the text and hover title, so the code viewport stays available. Preview contents never determine export contents.
 - Footer metrics come from the real workspace state. The selected count and bytes retain their approximate/incomplete labels. Copy and Export use the same effective selection, report actual outcomes, and remain unavailable when there is nothing safe to export.
 - Compare actual native screenshots with the supplied reference at 1536 × 1024 and 1200 × 800, plus the supported minimum window size. Verify keyboard use, focus visibility, accessible labels, contrast, high-DPI scaling, long paths and independent scrolling. Keep the restrained teal/green palette and compact row density; no full-window scrolling or hover-only critical action.
 
@@ -76,12 +76,12 @@ Native title bar
 
 The current version-1 settings serialize `excludeExtensions`; this is real user state, not dead code. The implementation must:
 
-1. Convert each saved extension exclusion into one or more equivalent visible exclude-path rules, preserving current exact-extension and ASCII case-insensitive matching, dotfile and extensionless behavior. Escape literal glob characters; do not turn a literal extension into a wildcard.
-2. Preserve all other workspace settings, include-extension/path rules, manual intents, generated-output reservations and recent root. Keep existing user-authored path-rule order; append or safely deduplicate generated migration rules.
-3. Validate the complete migrated policy with the same core compiler before publishing it. Use the existing bounded settings backup and atomic save path; migration is idempotent. After success, version the new schema and remove the active `excludeExtensions` field from runtime and saved settings.
-4. If any legacy value cannot be represented exactly or the backup/validation/save fails, preserve the original file, do not save defaults or a partial conversion, and show an actionable recovery error. Never silently drop or continue applying a hidden exclude-extension policy.
+1. Convert each saved extension exclusion to a visible file-targeted rule in `excludePaths`: `file-ext:rs` matches `.rs` files regardless of ASCII case; `file-ext:<none>` matches extensionless/trailing-dot files; reserved punctuation is percent-encoded (for example, `file-ext:%2A%3F%5B`). These selectors do not prune same-named directories and never interpret extension characters as glob operators.
+2. Preserve all other workspace settings, include-extension/path rules, manual intents, generated-output reservations and recent root. Put migrated selectors before the legacy `excludePaths` while preserving those paths' relative order; this retains version-1 path-rule explanation precedence. Escape legacy path rules that start with reserved `file-ext:` or `glob:` by adding one `glob:` prefix; the compiler removes exactly one escape prefix and interprets the original glob.
+3. Validate the complete migrated policy with the same core compiler before publishing it. Create the bounded recovery backup before atomic save; migration is idempotent. Successful migration writes settings version 2, whose active policy and storage have no `excludeExtensions` field.
+4. If any legacy value cannot be represented exactly, or backup/validation/save fails, preserve the original file and backup, block saving defaults or a partial conversion, and show an actionable recovery error. Recognizable damaged v1 markers (including escaped keys and malformed version encodings) must also fail closed. Never silently drop or continue applying a hidden exclude-extension policy.
 
-Acceptance fixtures cover v1 absent/single/multiple exclusions; root and nested files; mixed-case extensions; dotfiles and `<none>`; literal glob metacharacters; overlap with existing path rules; corrupt/unrepresentable settings; backup failure; restart; and repeated migration. If an exact mapping cannot be demonstrated for a legacy value, migration remains blocked for that profile until explicit recovery rather than weakening its behavior.
+Acceptance fixtures cover v1 absent/single/multiple exclusions; root and nested files; mixed-case extensions; dotfiles and `<none>`; literal glob metacharacters and reserved-prefix collisions; overlap/explanation precedence with existing path rules; corrupt, truncated and unrepresentable settings; failed backup and failed migration save; restart; and repeated migration. If an exact mapping cannot be demonstrated for a legacy value, migration remains blocked for that profile until explicit recovery rather than weakening its behavior.
 
 ## Engineering and evidence
 
