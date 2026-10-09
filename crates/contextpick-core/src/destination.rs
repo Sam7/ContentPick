@@ -10,6 +10,18 @@ use std::{
 
 pub const TEMP_PREFIX: &str = ".contextpick-export-";
 
+/// Return whether a path belongs to the reserved export-temporary namespace.
+/// The workspace scanner hard-excludes every path beneath this prefix, so
+/// filesystem events for those paths cannot change the indexed source set.
+pub fn is_export_temporary_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .starts_with(TEMP_PREFIX)
+    })
+}
+
 pub struct Destination {
     root: WorkspaceRoot,
     parent: Dir,

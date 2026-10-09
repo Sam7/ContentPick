@@ -387,11 +387,14 @@ test('bounded scan diagnostics remain scrollable without collapsing the file tre
     };
     const testWindow = window as typeof window & {
       isTauri: boolean;
-      __TAURI_INTERNALS__: { invoke: (command: string) => Promise<unknown> };
+      __TAURI_INTERNALS__: { invoke: (command: string) => Promise<unknown>; transformCallback: () => number };
     };
     testWindow.isTauri = true;
     testWindow.__TAURI_INTERNALS__ = {
-      invoke: () => Promise.resolve(workspace),
+      invoke: (command) => command === 'get_watch_status'
+        ? Promise.resolve(null)
+        : command === 'plugin:event|listen' ? Promise.resolve(1) : Promise.resolve(workspace),
+      transformCallback: () => 1,
     };
   });
   await page.setViewportSize({ width: 720, height: 520 });
@@ -567,26 +570,33 @@ test('keeps pending-operation status and cancellation error above the footer at 
       policy: { gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] },
       incomplete: false, diagnostics: [],
     };
+    const watchHealth = {
+      root: workspace.root, epoch: 1, revision: 0, state: 'watching', message: null,
+    };
     const longCancelError = `Cannot cancel C:/synthetic/${'unbroken-path-segment'.repeat(32)}`;
     const testWindow = window as typeof window & {
       isTauri: boolean;
-      __TAURI_INTERNALS__: { invoke: (command: string) => Promise<unknown> };
+      __TAURI_INTERNALS__: { invoke: (command: string) => Promise<unknown>; transformCallback: () => number };
     };
     testWindow.isTauri = true;
     testWindow.__TAURI_INTERNALS__ = {
       invoke: (command) => {
+        if (command === 'plugin:event|listen') return Promise.resolve(1);
+        if (command === 'get_watch_status') return Promise.resolve(watchHealth);
         if (command === 'restore_workspace') return Promise.resolve(null);
         if (command === 'choose_workspace') return Promise.resolve(workspace);
         if (command === 'export_markdown') return new Promise(() => undefined);
         if (command === 'cancel_operation') return Promise.reject(new Error(longCancelError));
         return Promise.resolve(workspace);
       },
+      transformCallback: () => 1,
     };
   });
 
   await page.setViewportSize({ width: 1200, height: 800 });
   await page.goto('/');
   await page.getByRole('button', { name: 'Open folder' }).click();
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Export Markdown' }).click();
   await page.getByRole('button', { name: 'Cancel operation' }).click();
   const status = page.getByRole('status');

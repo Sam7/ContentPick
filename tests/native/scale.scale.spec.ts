@@ -1,5 +1,5 @@
 import { platform, release } from 'node:os';
-import { unlink, writeFile } from 'node:fs/promises';
+import { rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from './native.fixture';
 
@@ -11,14 +11,22 @@ test('native WebView2 scales to 20k source files, prunes 100k ignored files, and
   const page = native.page;
   const search = page.getByRole('textbox', { name: 'Search files' });
   const summary = page.locator('.panel-heading p').first();
+  const tokenMetric = page.locator('.token-metric strong');
   const timingsMs = [native.startupMs];
 
   await expect(summary).toHaveText('20004 items discovered', { timeout: 120_000 });
+  const tokenStatusAtNativeReady = await tokenMetric.textContent();
+  expect(tokenStatusAtNativeReady, 'the 20k-file estimate must still be running when native readiness is reported').toBe('Calculating…');
+  const tokenWaitStartedAt = Date.now();
   const countBeforeProjection = await page.locator('.metric-primary strong').textContent();
   const tree = page.getByRole('tree', { name: 'Workspace files' });
   const views = page.getByRole('navigation', { name: 'Workspace views' });
+  const responsiveActionStartedAt = Date.now();
   await views.getByRole('button', { name: 'Selected' }).click();
   await expect(tree.getByText('src', { exact: true })).toBeVisible();
+  expect(await tokenMetric.textContent(), 'the count should remain active while the Selected view responds').toBe('Calculating…');
+  const responsiveActionMs = Date.now() - responsiveActionStartedAt;
+  expect(responsiveActionMs).toBeLessThan(5_000);
   await expect(page.locator('.metric-primary strong')).toHaveText(countBeforeProjection ?? '');
   await views.getByRole('button', { name: 'Ignored' }).click();
   await expect(tree.getByRole('button', { name: 'Browse ignored files' })).toBeVisible();
@@ -37,6 +45,54 @@ test('native WebView2 scales to 20k source files, prunes 100k ignored files, and
   await expect(page.getByRole('button', { name: 'Preview ignored-scale/ignored-99999.ts' })).toHaveCount(0);
   await expect(summary).toHaveText('20004 items discovered');
   await page.screenshot({ path: testInfo.outputPath('native-scale-ignored-pruned.png'), fullPage: true });
+
+  await expect(tokenMetric).toHaveText(/^≈ [\d,]+$/, { timeout: 120_000 });
+  const tokenReadyWaitAfterNativeMs = Date.now() - tokenWaitStartedAt;
+  const tokenGeneration = Number(await page.locator('.workbench').getAttribute('data-workspace-generation'));
+  const tokenCacheProbe = await page.evaluate(async ({ generation, requestId }) => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<{
+        files: number; reusedFiles: number; computedFiles: number; tokenizerId: string;
+      }> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    return internals.invoke('estimate_tokens', { generation, requestId });
+  }, { generation: tokenGeneration, requestId: `${Date.now() + 60_000}:1` });
+  expect(tokenCacheProbe.files).toBeGreaterThanOrEqual(20_000);
+  expect(tokenCacheProbe.reusedFiles).toBe(tokenCacheProbe.files);
+  expect(tokenCacheProbe.computedFiles).toBe(0);
+  expect(tokenCacheProbe.tokenizerId).toBe('o200k_base');
+
+  const churnDirectory = path.join(native.root, 'ignored-scale');
+  const churnFiles = Array.from({ length: 64 }, (_, index) => path.join(churnDirectory, `watcher-churn-${index}.ts`));
+  const churnGeneration = Number(await page.locator('.workbench').getAttribute('data-workspace-generation'));
+  const watcherChurnStartedAt = Date.now();
+  await Promise.all(churnFiles.map((file, index) => writeFile(file, `export const churn${index} = ${index};\n`, 'utf8')));
+  await Promise.all(churnFiles.map((file, index) => writeFile(file, `export const churn${index} = ${index + 1};\n`, 'utf8')));
+  const renamedChurnFile = path.join(churnDirectory, 'watcher-churn-renamed.ts');
+  await rename(churnFiles[0], renamedChurnFile);
+  await Promise.all(churnFiles.slice(1).map((file) => unlink(file)));
+  await unlink(renamedChurnFile);
+  await writeFile(path.join(native.root, '.gitignore'), '/.gitignore\n/ignored-scale/\n/never-used/\n', 'utf8');
+  await expect.poll(async () => Number(await page.locator('.workbench').getAttribute('data-workspace-generation')), { timeout: 120_000 }).toBeGreaterThan(churnGeneration);
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 120_000 });
+  await expect(summary).toHaveText('20004 items discovered');
+  await expect(tokenMetric).toHaveText(/^≈ [\d,]+$/, { timeout: 120_000 });
+  const watcherChurnElapsedMs = Date.now() - watcherChurnStartedAt;
+  const churnGenerationAfter = Number(await page.locator('.workbench').getAttribute('data-workspace-generation'));
+  const churnCacheProbe = await page.evaluate(async ({ generation, requestId }) => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<{
+        files: number; reusedFiles: number; computedFiles: number; tokenizerId: string;
+      }> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    return internals.invoke('estimate_tokens', { generation, requestId });
+  }, { generation: churnGenerationAfter, requestId: `${Date.now() + 60_000}:2` });
+  expect(churnCacheProbe.files).toBe(tokenCacheProbe.files);
+  expect(churnCacheProbe.reusedFiles).toBe(churnCacheProbe.files);
+  expect(churnCacheProbe.computedFiles).toBe(0);
+  expect(churnCacheProbe.tokenizerId).toBe('o200k_base');
 
   await search.clear();
   const selectedCount = page.locator('.metric-primary strong');
@@ -81,16 +137,19 @@ test('native WebView2 scales to 20k source files, prunes 100k ignored files, and
   await cancel.click();
   await expect(cancel).toHaveCount(0, { timeout: 120_000 });
   await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Copy context' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Copy context' })).toBeDisabled();
+  await expect(tokenMetric).toHaveText('Stale');
   await expect(page.locator('.workspace-path')).toHaveCount(1);
   await expect(page.locator('.workspace-path')).toContainText(path.basename(native.root));
-  await expect(summary).toHaveText('20004 items discovered', { timeout: 120_000 });
   await expect(page.getByRole('status')).toContainText('Cancellation requested.');
-  await expect(summary).toHaveText('20004 items discovered');
+  await unlink(cancellationMarker);
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByRole('button', { name: 'Copy context' })).toBeEnabled();
+  await expect(summary).toHaveText('20004 items discovered', { timeout: 120_000 });
   await search.fill('zz-refresh-cancel-marker.ts');
   await expect(page.getByRole('button', { name: 'Preview zz-refresh-cancel-marker.ts' })).toHaveCount(0);
   await search.clear();
-  await unlink(cancellationMarker);
   await search.fill('source-19999.ts');
   await expect(page.getByRole('button', { name: `Preview ${tailPath}` })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('native-scale-after-cancel.png'), fullPage: true });
@@ -111,6 +170,28 @@ test('native WebView2 scales to 20k source files, prunes 100k ignored files, and
     generatedAt: new Date().toISOString(),
     host: { platform: platform(), release: release(), architecture: process.arch },
     fixture: { sourceFiles: 20_000, ignoredFiles: 100_000, discoveredEntries: 20_004, ignoredDirectory: 'ignored-scale' },
+    tokenEstimate: {
+      model: tokenCacheProbe.tokenizerId,
+      selectedFiles: tokenCacheProbe.files,
+      computedFilesOnWarmProbe: tokenCacheProbe.computedFiles,
+      reusedFilesOnWarmProbe: tokenCacheProbe.reusedFiles,
+      waitAfterNativeReadyMs: tokenReadyWaitAfterNativeMs,
+      responsiveActionMs,
+      statusDuringNativeReadinessAction: tokenStatusAtNativeReady,
+      statusAtNativeReady: tokenStatusAtNativeReady,
+      limitations: 'The wait is measured from Playwright attaching after native workspace readiness, not from the first token read. The direct probe runs after the UI estimate and measures warm-cache reuse.'
+    },
+    watcherChurn: {
+      createdAndModifiedInIgnored100kTree: churnFiles.length,
+      renamedAndDeleted: true,
+      updatedGitignore: true,
+      elapsedMs: watcherChurnElapsedMs,
+      workspaceGenerationBefore: churnGeneration,
+      workspaceGenerationAfter: churnGenerationAfter,
+      selectedFiles: churnCacheProbe.files,
+      computedFilesAfterChurn: churnCacheProbe.computedFiles,
+      reusedFilesAfterChurn: churnCacheProbe.reusedFiles,
+    },
     launchToReadyMs: timingsMs,
     processTreeMemory: { ...memory, peakWorkingSetMiB: Number((memory.peakWorkingSetBytes / 1024 / 1024).toFixed(1)) },
     limitations: [

@@ -1,4 +1,13 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+
+export type WatchHealth = {
+  root: string;
+  epoch: number;
+  revision: number;
+  state: 'watching' | 'stale' | 'unavailable';
+  message: string | null;
+};
 
 export type Entry = {
   path: string;
@@ -44,8 +53,31 @@ export type FilterPolicy = {
 
 export type Preview = { text: string; truncated: boolean };
 export type ExportResult = { bytes: number; files: number; destination: string };
+export type SensitiveWarning = {
+  path: string;
+  category: 'environmentFile' | 'pemMaterial' | 'privateKey' | 'credentialFile';
+};
+export type SensitiveWarningSummary = { total: number; omitted: number; warnings: SensitiveWarning[] };
+export type OutputResponse = ExportResult | null | {
+  confirmationRequired: true;
+  ticket: string;
+  summary: SensitiveWarningSummary;
+};
+export type TokenEstimate = {
+  requestId: string;
+  generation: number;
+  tokens: number;
+  files: number;
+  reusedFiles: number;
+  computedFiles: number;
+  tokenizerId: string;
+};
 
 export type ContextPickBridge = {
+  get_watch_status(): Promise<WatchHealth | null>;
+  on_watch_status(handler: (health: WatchHealth) => void): Promise<() => void>;
+  on_window_focus(handler: () => void): Promise<() => void>;
+  request_focus_reconcile(root: string): Promise<WatchHealth | null>;
   restore_workspace(): Promise<WorkspaceView | null>;
   choose_workspace(): Promise<WorkspaceView | null>;
   refresh_workspace(): Promise<WorkspaceView>;
@@ -55,12 +87,20 @@ export type ContextPickBridge = {
   set_policy(args: { policy: FilterPolicy }): Promise<WorkspaceView>;
   workspace_page(args: { generation: number; offset: number }): Promise<WorkspacePage>;
   preview_file(args: { path: string }): Promise<Preview>;
-  export_markdown(): Promise<ExportResult | null>;
-  copy_markdown(): Promise<ExportResult | null>;
+  estimate_tokens(args: { generation: number; requestId: string }): Promise<TokenEstimate>;
+  cancel_token_estimate(args: { generation: number; requestId: string }): Promise<void>;
+  export_markdown(): Promise<OutputResponse>;
+  copy_markdown(): Promise<OutputResponse>;
+  confirm_sensitive_output(args: { ticket: string }): Promise<ExportResult | null>;
+  cancel_sensitive_output(args: { ticket: string }): Promise<boolean>;
   cancel_operation(): Promise<WorkspaceView | null>;
 };
 
 const nativeBridge: ContextPickBridge = {
+  get_watch_status: () => invoke('get_watch_status'),
+  on_watch_status: async (handler) => listen<WatchHealth>('watch-status', (event) => handler(event.payload)),
+  on_window_focus: async (handler) => listen<void>('window-focus', handler),
+  request_focus_reconcile: (root) => invoke('request_focus_reconcile', { root }),
   restore_workspace: () => invoke('restore_workspace'),
   choose_workspace: () => invoke('choose_workspace'),
   refresh_workspace: () => invoke('refresh_workspace'),
@@ -70,8 +110,12 @@ const nativeBridge: ContextPickBridge = {
   set_policy: (args) => invoke('set_policy', args),
   workspace_page: (args) => invoke('workspace_page', args),
   preview_file: (args) => invoke('preview_file', args),
+  estimate_tokens: (args) => invoke('estimate_tokens', args),
+  cancel_token_estimate: (args) => invoke('cancel_token_estimate', args),
   export_markdown: () => invoke('export_markdown'),
   copy_markdown: () => invoke('copy_markdown'),
+  confirm_sensitive_output: (args) => invoke('confirm_sensitive_output', args),
+  cancel_sensitive_output: (args) => invoke('cancel_sensitive_output', args),
   cancel_operation: () => invoke('cancel_operation'),
 };
 
@@ -122,7 +166,18 @@ export type BrowserBridgeOptions = { cancelPicker?: boolean; failExport?: boolea
 
 /** Static, synthetic responses for UI development. This deliberately contains no selection/filter policy. */
 export function createBrowserBridge(options: BrowserBridgeOptions = {}): ContextPickBridge {
+  const watchHealth: WatchHealth = {
+    root: fixtureWorkspace.root,
+    epoch: 1,
+    revision: 1,
+    state: 'watching',
+    message: null,
+  };
   return {
+    get_watch_status: async () => watchHealth,
+    on_watch_status: async () => () => {},
+    on_window_focus: async () => () => {},
+    request_focus_reconcile: async () => null,
     restore_workspace: async () => null,
     choose_workspace: async () => options.cancelPicker ? null : structuredClone(fixtureWorkspace),
     refresh_workspace: async () => structuredClone(fixtureWorkspace),
@@ -138,6 +193,16 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
       if (options.failPreview) throw new Error('Preview could not be read.');
       return fixturePreviews[path] ?? { text: '', truncated: false };
     },
+    estimate_tokens: async ({ generation, requestId }) => ({
+      requestId,
+      generation,
+      tokens: 1_234,
+      files: fixtureWorkspace.selectedCount,
+      reusedFiles: 0,
+      computedFiles: fixtureWorkspace.selectedCount,
+      tokenizerId: 'o200k_base',
+    }),
+    cancel_token_estimate: async () => {},
     browse_ignored: async ({ path }) => {
       if (path !== 'dist') return structuredClone(fixtureWorkspace);
       return {
@@ -155,6 +220,8 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
       return { destination: '/workspace/patchwork/context.md', bytes: 6240, files: 3 };
     },
     copy_markdown: async () => ({ destination: 'clipboard', bytes: 6240, files: 3 }),
+    confirm_sensitive_output: async () => ({ destination: 'clipboard', bytes: 6240, files: 3 }),
+    cancel_sensitive_output: async () => true,
     cancel_operation: async () => structuredClone(fixtureWorkspace),
   };
 }

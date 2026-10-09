@@ -36,6 +36,109 @@ fn prunes_ignored_subtree_but_keeps_explainable_placeholder() {
 }
 
 #[test]
+fn renaming_a_file_does_not_transfer_its_exact_path_intent() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/original.rs"), "fn original() {}\n").unwrap();
+    let intents = BTreeMap::from([("src/original.rs".into(), Intent::ForceExclude)]);
+    let original = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        intents,
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        !original
+            .view(1)
+            .entries
+            .iter()
+            .find(|entry| entry.path == "src/original.rs")
+            .unwrap()
+            .selected
+    );
+
+    std::fs::rename(
+        temp.path().join("src/original.rs"),
+        temp.path().join("src/renamed.rs"),
+    )
+    .unwrap();
+    let rescanned = Workspace::scan_pinned_with_outputs(
+        original.root_handle.clone(),
+        original.policy.clone(),
+        original.intents.clone(),
+        original.browsed.clone(),
+        original.generated_outputs.clone(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let view = rescanned.view(2);
+
+    assert!(
+        !view
+            .entries
+            .iter()
+            .any(|entry| entry.path == "src/original.rs")
+    );
+    assert!(
+        view.entries
+            .iter()
+            .find(|entry| entry.path == "src/renamed.rs")
+            .unwrap()
+            .selected,
+        "the new path follows normal policy instead of inheriting the old exact-path override"
+    );
+    assert_eq!(
+        rescanned.intents.get("src/original.rs"),
+        Some(&Intent::ForceExclude),
+        "the path-based saved intent remains attached to the path the user chose"
+    );
+}
+
+#[test]
+fn rescan_rebuilds_gitignore_classification_after_rule_edits() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    std::fs::write(
+        temp.path().join("src/generated.ts"),
+        "export const generated = true;\n",
+    )
+    .unwrap();
+    let original = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let generated = |workspace: &Workspace| {
+        workspace
+            .view(1)
+            .entries
+            .into_iter()
+            .find(|entry| entry.path == "src/generated.ts")
+            .unwrap()
+    };
+    assert!(generated(&original).selected);
+
+    std::fs::write(temp.path().join(".gitignore"), "/src/generated.ts\n").unwrap();
+    let rescanned = Workspace::scan_pinned_with_outputs(
+        original.root_handle.clone(),
+        original.policy.clone(),
+        original.intents.clone(),
+        original.browsed.clone(),
+        original.generated_outputs.clone(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    assert!(!generated(&rescanned).selected);
+    assert!(generated(&rescanned).git_ignored);
+}
+
+#[test]
 fn git_ignore_view_classification_tracks_intent_changes_without_rescanning() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join(".gitignore"), "ignored.ts\n").unwrap();

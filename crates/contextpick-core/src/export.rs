@@ -39,7 +39,16 @@ fn verify_entry(root: &WorkspaceRoot, entry: &ManifestEntry) -> Result<File> {
     Ok(file)
 }
 
-fn language_tag(path: &str) -> &'static str {
+/// Revalidate a frozen manifest using metadata only, without reading file bodies.
+pub fn validate_manifest(root: &WorkspaceRoot, manifest: &[ManifestEntry]) -> Result<()> {
+    root.validate_anchor()?;
+    for entry in manifest {
+        drop(verify_entry(root, entry)?);
+    }
+    Ok(())
+}
+
+pub(crate) fn language_tag(path: &str) -> &'static str {
     let name = path.rsplit('/').next().unwrap_or(path);
     let extension = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
     [
@@ -138,123 +147,31 @@ fn update_run(bytes: &[u8], current: &mut usize, longest: &mut usize) {
 // Decode one source into a disk-backed UTF-8 spool, validating all input while
 // retaining only a small read buffer. The spool also lets us choose a fence
 // longer than every backtick run before writing the Markdown section.
-fn transcode(source: &mut File, cancel: &AtomicBool) -> Result<(File, usize)> {
-    source.seek(SeekFrom::Start(0))?;
-    let mut prefix = [0u8; 3];
-    let mut got = 0;
-    while got < prefix.len() {
-        let n = source.read(&mut prefix[got..])?;
-        if n == 0 {
-            break;
-        }
-        got += n;
-    }
-    let (encoding, skip) = if got >= 3 && prefix[..3] == [0xef, 0xbb, 0xbf] {
-        (0, 3)
-    } else if got >= 2 && prefix[..2] == [0xff, 0xfe] {
-        (1, 2)
-    } else if got >= 2 && prefix[..2] == [0xfe, 0xff] {
-        (2, 2)
-    } else {
-        (0, 0)
-    };
-    source.seek(SeekFrom::Start(skip as u64))?;
+fn transcode_with_read_hook(
+    source: &mut File,
+    cancel: &AtomicBool,
+    after_payload_read: &mut impl FnMut(),
+) -> Result<(File, usize)> {
     let mut spool = tempfile::tempfile()?;
     let mut longest = 0usize;
     let mut run = 0usize;
-    let mut buf = [0u8; 8192];
-    if encoding == 0 {
-        let mut carry = Vec::new();
-        loop {
-            check_cancel(cancel)?;
-            let n = source.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            carry.extend_from_slice(&buf[..n]);
-            match std::str::from_utf8(&carry) {
-                Ok(s) => {
-                    if s.contains('\0') {
-                        return Err(Error::Message("binary NUL character".into()));
-                    }
-                    update_run(s.as_bytes(), &mut run, &mut longest);
-                    spool.write_all(s.as_bytes())?;
-                    carry.clear();
-                }
-                Err(e) => {
-                    let valid = e.valid_up_to();
-                    if valid > 0 {
-                        if carry[..valid].contains(&0) {
-                            return Err(Error::Message("binary NUL character".into()));
-                        }
-                        update_run(&carry[..valid], &mut run, &mut longest);
-                        spool.write_all(&carry[..valid])?;
-                        carry.drain(..valid);
-                    }
-                    if e.error_len().is_some() || carry.len() > 3 {
-                        return Err(Error::Message("invalid UTF-8 content".into()));
-                    }
-                }
-            }
-        }
-        if !carry.is_empty() {
-            return Err(Error::Message("incomplete UTF-8 content".into()));
-        }
-    } else {
-        let little = encoding == 1;
-        let mut carry = Vec::new();
-        let mut high: Option<u16> = None;
-        loop {
-            check_cancel(cancel)?;
-            let n = source.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            carry.extend_from_slice(&buf[..n]);
-            if carry.len() % 2 != 0 {
-                let last = carry.pop().unwrap();
-                carry.push(last);
-            }
-            let usable = carry.len() & !1;
-            let mut words: Vec<u16> = carry[..usable]
-                .chunks_exact(2)
-                .map(|p| {
-                    if little {
-                        u16::from_le_bytes([p[0], p[1]])
-                    } else {
-                        u16::from_be_bytes([p[0], p[1]])
-                    }
-                })
-                .collect();
-            carry.drain(..usable);
-            if let Some(h) = high.take() {
-                words.insert(0, h);
-            }
-            if words.last().is_some_and(|w| (0xd800..=0xdbff).contains(w)) {
-                high = words.pop();
-            }
-            let mut text = String::new();
-            for decoded in char::decode_utf16(words) {
-                match decoded {
-                    Ok(c) => text.push(c),
-                    Err(_) => return Err(Error::Message("invalid UTF-16 content".into())),
-                }
-            }
-            if text.contains('\0') {
-                return Err(Error::Message("binary NUL character".into()));
-            }
+    content::visit_decoded_text(
+        source,
+        cancel,
+        "export cancelled",
+        None,
+        after_payload_read,
+        &mut |text| {
             update_run(text.as_bytes(), &mut run, &mut longest);
             spool.write_all(text.as_bytes())?;
-        }
-        if !carry.is_empty() || high.is_some() {
-            return Err(Error::Message("incomplete UTF-16 content".into()));
-        }
-    }
+            Ok(())
+        },
+    )?;
     spool.seek(SeekFrom::Start(0))?;
     Ok((spool, longest))
 }
 
-fn escaped_heading(s: &str) -> String {
+pub(crate) fn escaped_heading(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
         match c {
@@ -309,6 +226,16 @@ pub fn export_prepared(
     destination: Destination,
     cancel: &AtomicBool,
 ) -> Result<ExportResult> {
+    export_prepared_with_read_hook(root, manifest, destination, cancel, &mut || {})
+}
+
+fn export_prepared_with_read_hook(
+    root: &WorkspaceRoot,
+    manifest: &[ManifestEntry],
+    destination: Destination,
+    cancel: &AtomicBool,
+    after_source_read: &mut impl FnMut(),
+) -> Result<ExportResult> {
     if manifest.is_empty() {
         return Err(Error::Message("cannot export an empty manifest".into()));
     }
@@ -349,8 +276,9 @@ pub fn export_prepared(
         check_cancel(cancel)?;
         let mut source = verify_entry(root, entry)
             .map_err(|e| Error::Message(format!("{}: {e}", entry.path)))?;
-        let (mut content, longest) = transcode(&mut source, cancel)
-            .map_err(|e| Error::Message(format!("{}: {e}", entry.path)))?;
+        let (mut content, longest) =
+            transcode_with_read_hook(&mut source, cancel, after_source_read)
+                .map_err(|e| Error::Message(format!("{}: {e}", entry.path)))?;
         let fence_len = longest
             .max(2)
             .checked_add(1)
@@ -405,10 +333,57 @@ pub fn export_prepared(
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_with_cancel, write_repeated};
-    use crate::Error;
+    use super::{copy_with_cancel, export_prepared_with_read_hook, write_repeated};
+    use crate::{Error, ManifestEntry, WorkspaceRoot, destination::Destination, modified_ns};
     use std::io::{self, Read};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tempfile::tempdir;
+
+    #[test]
+    fn export_rejects_source_mutated_during_read_without_publishing_partial_output() {
+        let temp = tempdir().unwrap();
+        let root = WorkspaceRoot::open(temp.path()).unwrap();
+        let source_path = temp.path().join("file.txt");
+        let original = vec![b'a'; 24 * 1024];
+        let changed = vec![b'b'; original.len() + 1];
+        std::fs::write(&source_path, &original).unwrap();
+        let metadata = std::fs::metadata(&source_path).unwrap();
+        let manifest = [ManifestEntry {
+            path: "file.txt".into(),
+            size: metadata.len(),
+            modified_ns: modified_ns(&metadata),
+        }];
+        let destination_path = temp.path().join("context.md");
+        let destination = Destination::prepare(&root, &destination_path, false).unwrap();
+        let mut mutated = false;
+
+        let error = export_prepared_with_read_hook(
+            &root,
+            &manifest,
+            destination,
+            &AtomicBool::new(false),
+            &mut || {
+                if !mutated {
+                    mutated = true;
+                    std::fs::write(&source_path, &changed).unwrap();
+                }
+            },
+        )
+        .expect_err("a source changed during its read must be rejected");
+
+        assert!(mutated, "the source read hook must run during export");
+        assert!(error.to_string().contains("file changed during export"));
+        assert!(
+            !destination_path.exists(),
+            "partial output must not publish"
+        );
+        let remaining = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, [std::ffi::OsString::from("file.txt")]);
+        assert_eq!(std::fs::read(&source_path).unwrap(), changed);
+    }
 
     struct CancelAfterChunk<'a> {
         cancel: &'a AtomicBool,

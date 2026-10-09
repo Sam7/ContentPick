@@ -16,8 +16,8 @@ use std::{
     },
 };
 
-const ENTRY_LIMIT: usize = 200_000;
-const INDEX_TEXT_BYTES_LIMIT: usize = 16 * 1024 * 1024;
+pub(crate) const ENTRY_LIMIT: usize = 200_000;
+pub(crate) const INDEX_TEXT_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const DIAGNOSTIC_LIMIT: usize = 64;
 const DIAGNOSTIC_BYTES_LIMIT: usize = 16 * 1024;
 const DIAGNOSTIC_MESSAGE_BYTES_LIMIT: usize = 1024;
@@ -983,9 +983,7 @@ impl Workspace {
 
     fn generated_reason(&self, path: &str) -> Option<&'static str> {
         (self.generated_outputs.contains(path)
-            || path
-                .split('/')
-                .any(|name| name.starts_with(crate::destination::TEMP_PREFIX)))
+            || crate::destination::is_export_temporary_path(Path::new(path)))
         .then_some("generated output is excluded from source context")
     }
 

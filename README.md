@@ -43,7 +43,7 @@ The harness starts its own app with disposable synthetic sources, settings and W
 
 ## Current behavior
 
-Choose a folder; eligible files are selected by default. Expand directories, preview a file, change selection, inspect filter reasons, then Copy context or Export Markdown. Force include is an explicit menu action; it cannot bypass binary or link guards. Ignored folders are placeholders until you explicitly browse them. Refresh after source changes; watching and tokenization are not implemented yet.
+Choose a folder; eligible files are selected by default. Expand directories, preview a file, change selection, inspect filter reasons, then Copy context or Export Markdown. Force include is an explicit menu action; it cannot bypass binary or link guards. Ignored folders are placeholders until you explicitly browse them. The native app watches the active workspace and automatically reconciles after observed changes settle. Copy and Export stay disabled while the snapshot is stale; manual Refresh remains available if watching or a scan fails. The footer shows a cached, approximate local `o200k_base` token estimate for the selected files.
 
 Settings and path-bound intentions are stored in the OS application config directory. Hidden files are visible; `.gitignore` is enabled by default. `.ignore`, parent/global excludes and Git metadata traversal are disabled by documented policy. Gitignore is not a secret scanner. Previews are capped at 256 KiB UTF-8 output; clipboard at 8 MiB. UTF-8/BOM UTF-16 are supported; invalid/binary content makes an export fail explicitly. Sources are never edited. New exports inside the workspace are persistently excluded from source context. Existing workspace paths cannot be overwritten; choose a new filename. Outside the workspace, replacing an existing file requires confirmation. Publication requires filesystem hard-link support when creating a new output and fails safely if unavailable.
 
@@ -61,4 +61,4 @@ fn main() {}
 ```
 ````
 
-Native Windows evidence and exact limitations: [status](docs/project/STATUS.md), [smoke record](docs/testing/2026-10-08-native-smoke.md). No installer or public release is claimed.
+Native Windows evidence and exact limitations: [status](docs/project/STATUS.md), smoke record (local ignored artifact: `docs/testing/2026-10-08-native-smoke.md`). No installer or public release is claimed.

@@ -18,11 +18,15 @@ type NativeSession = {
   page: Page;
   startupMs: number;
   launch: () => Promise<Page>;
+  deactivate: () => Promise<NativeWindowState>;
+  activate: () => Promise<NativeWindowState>;
   stop: () => Promise<void>;
   installLegacySettings: () => Promise<void>;
   readSettings: () => Promise<Record<string, unknown>>;
   memoryReport: () => Promise<{ method: string; intervalMs: number; samples: number; peakWorkingSetBytes: number; peakProcessCount: number }>;
 };
+
+type NativeWindowState = { minimized: boolean; foregroundWindow: number; targetWindow: number };
 
 const processTreeMemoryMethod = 'Windows CIM snapshots scheduled once per second; descendants require a matching parent PID and non-earlier creation time, and the launched root PID, path and creation time are pinned. WorkingSetSize is summed for that tree; overlapping queries are skipped. Cleanup validates each PID, creation time and executable path through an opened process handle before termination.';
 type ObservedProcess = { processId: number; creationTicks: string; executablePath: string };
@@ -116,6 +120,46 @@ async function waitForCdp(port: number, child: ChildProcess): Promise<void> {
     throw new Error(`Timed out waiting for the app's loopback WebView2 endpoint: ${String(lastError ?? '')}`);
   };
   await Promise.race([readiness(), spawnError]);
+}
+
+async function setNativeWindowActivation(processId: number, executablePath: string, activate: boolean): Promise<NativeWindowState> {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$process = Get-Process -Id ([int]$env:CONTEXTPICK_TEST_PROCESS_ID)
+$expectedPath = [System.IO.Path]::GetFullPath($env:CONTEXTPICK_TEST_EXECUTABLE)
+if ([System.IO.Path]::GetFullPath($process.Path) -ine $expectedPath) { throw 'Native test process path changed.' }
+$window = $process.MainWindowHandle
+if ($window -eq [IntPtr]::Zero) { throw 'Native test window handle is unavailable.' }
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ContextPickTestWindow {
+    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}
+'@
+if ($env:CONTEXTPICK_TEST_ACTIVATE -eq 'true') {
+  [void][ContextPickTestWindow]::ShowWindowAsync($window, 9)
+  [void][ContextPickTestWindow]::SetForegroundWindow($window)
+} else {
+  [void][ContextPickTestWindow]::ShowWindowAsync($window, 6)
+}
+Start-Sleep -Milliseconds 100
+[pscustomobject]@{ minimized = [ContextPickTestWindow]::IsIconic($window); foregroundWindow = [ContextPickTestWindow]::GetForegroundWindow().ToInt64(); targetWindow = $window.ToInt64() } | ConvertTo-Json -Compress
+`;
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    timeout: 10_000,
+    env: {
+      ...process.env,
+      CONTEXTPICK_TEST_PROCESS_ID: String(processId),
+      CONTEXTPICK_TEST_EXECUTABLE: executablePath,
+      CONTEXTPICK_TEST_ACTIVATE: String(activate),
+    },
+  });
+  return JSON.parse(stdout.trim()) as NativeWindowState;
 }
 
 async function stopTree(child: ChildProcess, observedProcesses: ObservedProcess[], expectedExecutablePath: string): Promise<void> {
@@ -291,6 +335,11 @@ export const test = base.extend<NativeFixtures>({
       return page;
     };
 
+    const changeWindowActivation = async (activate: boolean) => {
+      if (!child?.pid) throw new Error('Native test process is not running.');
+      return setNativeWindowActivation(child.pid, nativeExe, activate);
+    };
+
     try {
       if (process.platform === 'win32') {
         await Promise.all([mkdir(config), mkdir(root), mkdir(webviewProfile), mkdir(appDir)]);
@@ -319,7 +368,7 @@ export const test = base.extend<NativeFixtures>({
         await writeFile(path.join(config, 'settings.json'), JSON.stringify(legacy), 'utf8');
       };
       const readSettings = async () => JSON.parse(await readFile(path.join(config, 'settings.json'), 'utf8')) as Record<string, unknown>;
-      await runTest({ root, get page() { if (!page) throw new Error('Native page is not running.'); return page; }, get startupMs() { return startupMs; }, launch, stop, installLegacySettings, readSettings, memoryReport: memorySampler.report });
+      await runTest({ root, get page() { if (!page) throw new Error('Native page is not running.'); return page; }, get startupMs() { return startupMs; }, launch, deactivate: () => changeWindowActivation(false), activate: () => changeWindowActivation(true), stop, installLegacySettings, readSettings, memoryReport: memorySampler.report });
     } finally {
       let stopFailure: string | undefined;
       try {

@@ -1,11 +1,14 @@
 use crate::{Error, Result, WorkspaceRoot};
 use serde::Serialize;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SAMPLE_LIMIT: usize = 16 * 1024;
 const PREVIEW_SOURCE_LIMIT: usize = 16 * 1024 * 1024;
+pub(crate) const DECODE_CHUNK_BYTES: usize = 8192;
+pub(crate) const MAX_DECODED_TEXT_CHUNK_BYTES: usize = DECODE_CHUNK_BYTES * 3 / 2 + 4;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +122,166 @@ pub fn open_safe(root: &WorkspaceRoot, path: &str) -> Result<File> {
     Ok(dir.open(&rel)?.into_std())
 }
 
+pub(crate) fn visit_decoded_text<R: Read + Seek>(
+    source: &mut R,
+    cancel: &AtomicBool,
+    cancel_message: &str,
+    max_input_bytes: Option<u64>,
+    after_read: &mut impl FnMut(),
+    visit: &mut impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    let check_cancel = || {
+        if cancel.load(Ordering::Relaxed) {
+            Err(Error::Message(cancel_message.into()))
+        } else {
+            Ok(())
+        }
+    };
+
+    check_cancel()?;
+    source.seek(SeekFrom::Start(0))?;
+    let mut prefix = [0u8; 3];
+    let mut got = 0;
+    while got < prefix.len() {
+        check_cancel()?;
+        let read = source.read(&mut prefix[got..])?;
+        if read == 0 {
+            break;
+        }
+        got += read;
+        if max_input_bytes.is_some_and(|limit| got as u64 > limit) {
+            return Err(Error::Message(
+                "file exceeds token estimate input limit".into(),
+            ));
+        }
+    }
+    let (encoding, skip) = if got >= 3 && prefix[..3] == [0xef, 0xbb, 0xbf] {
+        (0, 3)
+    } else if got >= 2 && prefix[..2] == [0xff, 0xfe] {
+        (1, 2)
+    } else if got >= 2 && prefix[..2] == [0xfe, 0xff] {
+        (2, 2)
+    } else {
+        (0, 0)
+    };
+    if max_input_bytes.is_some_and(|limit| skip as u64 > limit) {
+        return Err(Error::Message(
+            "file exceeds token estimate input limit".into(),
+        ));
+    }
+    source.seek(SeekFrom::Start(skip as u64))?;
+
+    let mut total_read = 0u64;
+    let mut buffer = [0u8; DECODE_CHUNK_BYTES];
+    if encoding == 0 {
+        let mut carry = Vec::with_capacity(buffer.len() + 3);
+        loop {
+            check_cancel()?;
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total_read = total_read
+                .checked_add(read as u64)
+                .ok_or_else(|| Error::Message("file byte count overflow".into()))?;
+            if max_input_bytes.is_some_and(|limit| total_read.saturating_add(skip as u64) > limit) {
+                return Err(Error::Message(
+                    "file exceeds token estimate input limit".into(),
+                ));
+            }
+            after_read();
+            carry.extend_from_slice(&buffer[..read]);
+            match std::str::from_utf8(&carry) {
+                Ok(text) => {
+                    if text.contains('\0') {
+                        return Err(Error::Message("binary NUL character".into()));
+                    }
+                    visit(text)?;
+                    carry.clear();
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    if valid > 0 {
+                        let text = std::str::from_utf8(&carry[..valid])
+                            .map_err(|_| Error::Message("invalid UTF-8 content".into()))?;
+                        if text.contains('\0') {
+                            return Err(Error::Message("binary NUL character".into()));
+                        }
+                        visit(text)?;
+                        carry.drain(..valid);
+                    }
+                    if error.error_len().is_some() || carry.len() > 3 {
+                        return Err(Error::Message("invalid UTF-8 content".into()));
+                    }
+                }
+            }
+        }
+        if !carry.is_empty() {
+            return Err(Error::Message("incomplete UTF-8 content".into()));
+        }
+    } else {
+        let little_endian = encoding == 1;
+        let mut carry = Vec::with_capacity(buffer.len() + 1);
+        let mut high_surrogate: Option<u16> = None;
+        loop {
+            check_cancel()?;
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total_read = total_read
+                .checked_add(read as u64)
+                .ok_or_else(|| Error::Message("file byte count overflow".into()))?;
+            if max_input_bytes.is_some_and(|limit| total_read.saturating_add(skip as u64) > limit) {
+                return Err(Error::Message(
+                    "file exceeds token estimate input limit".into(),
+                ));
+            }
+            after_read();
+            carry.extend_from_slice(&buffer[..read]);
+            let usable = carry.len() & !1;
+            let mut words: Vec<u16> = carry[..usable]
+                .chunks_exact(2)
+                .map(|pair| {
+                    if little_endian {
+                        u16::from_le_bytes([pair[0], pair[1]])
+                    } else {
+                        u16::from_be_bytes([pair[0], pair[1]])
+                    }
+                })
+                .collect();
+            carry.drain(..usable);
+            if let Some(high) = high_surrogate.take() {
+                words.insert(0, high);
+            }
+            if words
+                .last()
+                .is_some_and(|word| (0xd800..=0xdbff).contains(word))
+            {
+                high_surrogate = words.pop();
+            }
+            let mut text = String::with_capacity(words.len().saturating_mul(2));
+            for decoded in char::decode_utf16(words) {
+                match decoded {
+                    Ok(character) => text.push(character),
+                    Err(_) => return Err(Error::Message("invalid UTF-16 content".into())),
+                }
+            }
+            if text.contains('\0') {
+                return Err(Error::Message("binary NUL character".into()));
+            }
+            if !text.is_empty() {
+                visit(&text)?;
+            }
+        }
+        if !carry.is_empty() || high_surrogate.is_some() {
+            return Err(Error::Message("incomplete UTF-16 content".into()));
+        }
+    }
+    check_cancel()?;
+    Ok(())
+}
+
 fn decode_bytes(bytes: &[u8], tolerate_incomplete_tail: bool) -> Result<String> {
     if let Some(body) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
         return decode_utf8(body, tolerate_incomplete_tail);
@@ -219,4 +382,105 @@ pub fn preview(root: &WorkspaceRoot, path: &str, cap: usize) -> Result<Preview> 
         truncated: truncated || end < decoded.len(),
         text,
     })
+}
+
+#[cfg(test)]
+mod streaming_decode_tests {
+    use super::visit_decoded_text;
+    use crate::Result;
+    use std::io::{self, Cursor, Read, Seek, SeekFrom};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct ShortRead {
+        inner: Cursor<Vec<u8>>,
+        max_read: usize,
+    }
+
+    impl ShortRead {
+        fn new(bytes: Vec<u8>, max_read: usize) -> Self {
+            Self {
+                inner: Cursor::new(bytes),
+                max_read,
+            }
+        }
+    }
+
+    impl Read for ShortRead {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let length = buffer.len().min(self.max_read);
+            self.inner.read(&mut buffer[..length])
+        }
+    }
+
+    impl Seek for ShortRead {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+
+    fn decode_short_reads(bytes: Vec<u8>, max_read: usize) -> Result<String> {
+        let mut source = ShortRead::new(bytes, max_read);
+        let cancelled = AtomicBool::new(false);
+        let mut decoded = String::new();
+        visit_decoded_text(
+            &mut source,
+            &cancelled,
+            "cancelled",
+            None,
+            &mut || {},
+            &mut |chunk| {
+                decoded.push_str(chunk);
+                Ok(())
+            },
+        )?;
+        Ok(decoded)
+    }
+
+    #[test]
+    fn strips_utf8_bom_and_decodes_multibyte_characters_across_single_byte_reads() {
+        let mut bytes = vec![0xef, 0xbb, 0xbf];
+        bytes.extend_from_slice("naïve 🧪".as_bytes());
+
+        assert_eq!(decode_short_reads(bytes, 1).unwrap(), "naïve 🧪");
+    }
+
+    #[test]
+    fn decodes_big_endian_utf16_with_odd_read_boundaries_and_split_surrogate_pairs() {
+        let mut bytes = vec![0xfe, 0xff];
+        for word in "A🧪B".encode_utf16() {
+            bytes.extend_from_slice(&word.to_be_bytes());
+        }
+
+        assert_eq!(decode_short_reads(bytes, 1).unwrap(), "A🧪B");
+    }
+
+    #[test]
+    fn rejects_lone_surrogates_and_incomplete_utf16_code_units() {
+        assert!(decode_short_reads(vec![0xff, 0xfe, 0x00, 0xdc], 1).is_err());
+        assert!(decode_short_reads(vec![0xff, 0xfe, 0x41], 1).is_err());
+        assert!(decode_short_reads(vec![0xff, 0xfe, 0x00, 0xd8], 1).is_err());
+    }
+
+    #[test]
+    fn cancellation_during_utf16_streaming_returns_an_error() {
+        let mut source = ShortRead::new(vec![0xff, 0xfe, 0x41, 0x00, 0x42, 0x00], 1);
+        let cancelled = AtomicBool::new(false);
+        let mut decoded = String::new();
+        let result = visit_decoded_text(
+            &mut source,
+            &cancelled,
+            "cancelled",
+            None,
+            &mut || {
+                cancelled.store(true, Ordering::Relaxed);
+            },
+            &mut |chunk| {
+                decoded.push_str(chunk);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(decoded.is_empty());
+    }
 }

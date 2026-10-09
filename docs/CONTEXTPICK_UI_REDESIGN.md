@@ -9,7 +9,7 @@
 - This document supplies the approved visual and interaction details for UX-04, UX-05, BR-01 and the FL-02 extension-policy change. It does not add a second requirements matrix or override domain safety rules.
 - Approved desktop reference: [`docs/design/design-draft.png`](design/design-draft.png), 1536 × 1024.
 - Approved logo reference: [`docs/design/Logo.png`](design/Logo.png).
-- Existing native baseline: [`docs/testing/2026-10-08-current-ui.jpg`](testing/2026-10-08-current-ui.jpg), 1200 × 800.
+- Existing native baseline: `docs/testing/2026-10-08-current-ui.jpg` (local ignored artifact: `docs/testing/2026-10-08-current-ui.jpg`), 1200 × 800.
 
 ## Audited baseline before M3.5
 

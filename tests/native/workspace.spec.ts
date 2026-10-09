@@ -1,6 +1,79 @@
 import { test, expect } from './native.fixture';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+
+async function setClipboard(text: string): Promise<void> {
+  const encoded = Buffer.from(text, 'utf8').toString('base64');
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$value=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')); Set-Clipboard -Value $value`], { windowsHide: true, timeout: 10_000 });
+}
+
+async function readClipboard(): Promise<string> {
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Clipboard -Raw'], { windowsHide: true, timeout: 10_000 });
+  return stdout.replace(/[\r\n]+$/, '');
+}
+
+async function completeNativeDialog(title: string, text?: string, confirmKeys = '{ENTER}'): Promise<void> {
+  const titleBase64 = Buffer.from(title, 'utf8').toString('base64');
+  const escapedText = Array.from(text ?? '', (character) => '+^%~(){}[]'.includes(character) ? `{${character}}` : character).join('');
+  const sendBase64 = Buffer.from(escapedText, 'utf8').toString('base64');
+  const confirmBase64 = Buffer.from(confirmKeys, 'utf8').toString('base64');
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class ContextPickNativeDialog {
+  public delegate bool EnumChildProc(IntPtr window, IntPtr parameter);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc callback, IntPtr parameter);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+}
+'@
+$expected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${titleBase64}'))
+$send = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${sendBase64}'))
+$confirmation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${confirmBase64}'))
+$deadline = [DateTime]::UtcNow.AddSeconds(12)
+$actual = ''
+do {
+  $window = [ContextPickNativeDialog]::GetForegroundWindow()
+  $buffer = [Text.StringBuilder]::new(512)
+  [void][ContextPickNativeDialog]::GetWindowText($window, $buffer, $buffer.Capacity)
+  $actual = $buffer.ToString()
+  if ($actual.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -ge 0) { break }
+  Start-Sleep -Milliseconds 100
+} while ([DateTime]::UtcNow -lt $deadline)
+if ($actual.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "Expected native dialog '$expected'; active window was '$actual'." }
+if ($send.Length -gt 0) {
+  [Windows.Forms.SendKeys]::SendWait('^a')
+  [Windows.Forms.SendKeys]::SendWait($send)
+}
+if ($confirmation -eq 'UIA:OK') {
+  $controls = [System.Collections.Generic.List[object]]::new()
+  $callback = [ContextPickNativeDialog+EnumChildProc] {
+    param($child, $parameter)
+    $childBuffer = [Text.StringBuilder]::new(256)
+    [void][ContextPickNativeDialog]::GetWindowText($child, $childBuffer, $childBuffer.Capacity)
+    $label = $childBuffer.ToString()
+    if ($label.Length -gt 0) { $controls.Add([pscustomobject]@{ Handle = $child; Label = $label }) }
+    return $true
+  }
+  [void][ContextPickNativeDialog]::EnumChildWindows($window, $callback, [IntPtr]::Zero)
+  $button = $controls | Where-Object { $_.Label -eq 'OK' } | Select-Object -First 1
+  if ($null -eq $button) { throw "The '$expected' dialog buttons were: $($controls.Label -join ', ')." }
+  [void][ContextPickNativeDialog]::SendMessage($button.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+} else {
+  [Windows.Forms.SendKeys]::SendWait($confirmation)
+}
+`;
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 20_000 });
+}
 
 test('native restore, paging, ignore policy, manual override, copy, and restart use the real workspace', async ({ native }) => {
   let page = native.page;
@@ -59,6 +132,396 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await page.getByRole('textbox', { name: 'Search files' }).clear();
   await page.getByRole('button', { name: 'Expand src', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Preview dist/deep/generated.ts' })).toHaveCount(0);
+});
+
+test('native sensitive-file confirmation gates copy and export and rejects stale selection tickets', async ({ native }) => {
+  const { page, root } = native;
+  const marker = `SYNTHETIC_CONTEXT_PICK_${Date.now()}`;
+  const sensitiveFile = path.join(root, '.env.local');
+  const outputFile = path.join(path.dirname(root), 'confirmed-context.md');
+  const cancelledOutput = path.join(path.dirname(root), 'cancelled-context.md');
+  const sentinelClipboard = 'CONTEXT_PICK_CLIPBOARD_MUST_REMAIN_UNCHANGED';
+  await writeFile(sensitiveFile, `${marker}=test-only\n`, 'utf8');
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.metric-primary strong')).toHaveText('603');
+  await expect(page.getByRole('button', { name: 'Preview .env.local' })).toBeVisible();
+
+  await page.setViewportSize({ width: 720, height: 520 });
+  await setClipboard(sentinelClipboard);
+  await page.getByRole('button', { name: 'Copy context' }).click();
+  let dialog = page.getByRole('alertdialog', { name: 'Potentially sensitive files' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('.env.local')).toBeVisible();
+  await expect(dialog.getByText('Environment file')).toBeVisible();
+  await expect(dialog.getByText(/file contents are not scanned/i)).toBeVisible();
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m54-sensitive-confirmation-720x520.png') });
+  await dialog.getByRole('button', { name: 'Cancel Copy' }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await readClipboard()).toBe(sentinelClipboard);
+
+  await page.getByRole('button', { name: 'Copy context' }).click();
+  dialog = page.getByRole('alertdialog', { name: 'Potentially sensitive files' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Confirm Copy' }).click();
+  await expect(page.getByRole('status')).toContainText('Copied · 603 files', { timeout: 30_000 });
+  expect(await readClipboard()).toContain(`${marker}=test-only`);
+
+  await page.getByRole('button', { name: 'Export Markdown' }).click();
+  dialog = page.getByRole('alertdialog', { name: 'Potentially sensitive files' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel Export' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(async () => {
+    try { await access(cancelledOutput); return true; } catch { return false; }
+  }).toBe(false);
+
+  await writeFile(outputFile, 'PREVIOUS_EXPORT_MUST_SURVIVE_UNTIL_OVERWRITE_CONFIRMATION\n', 'utf8');
+  await page.getByRole('button', { name: 'Export Markdown' }).click();
+  dialog = page.getByRole('alertdialog', { name: 'Potentially sensitive files' });
+  await expect(dialog).toBeVisible();
+  expect(await readFile(outputFile, 'utf8')).toContain('PREVIOUS_EXPORT');
+  await dialog.getByRole('button', { name: 'Confirm Export' }).click();
+  await completeNativeDialog('Save', outputFile);
+  await completeNativeDialog('Confirm Save As', undefined, '%y');
+  await completeNativeDialog('Confirm overwrite', undefined, 'UIA:OK');
+  await expect(page.getByRole('button', { name: 'Cancel operation' })).toHaveCount(0, { timeout: 30_000 });
+  const exported = await readFile(outputFile, 'utf8');
+  expect(exported).toContain(`${marker}=test-only`);
+  expect(exported).not.toContain('PREVIOUS_EXPORT');
+  await expect(page.getByRole('status')).toContainText('Export ready · 603 files', { timeout: 30_000 });
+
+  const staleClipboard = 'CONTEXT_PICK_STALE_TICKET_MUST_NOT_COPY';
+  await setClipboard(staleClipboard);
+  await page.getByRole('button', { name: 'Copy context' }).click();
+  dialog = page.getByRole('alertdialog', { name: 'Potentially sensitive files' });
+  await expect(dialog).toBeVisible();
+  await page.evaluate(async () => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    await internals.invoke('set_intent', { path: 'README.md', intent: 'exclude' });
+  });
+  await dialog.getByRole('button', { name: 'Confirm Copy' }).click();
+  await expect(page.getByRole('alert')).toContainText(/expired or was superseded|changed/i);
+  expect(await readClipboard()).toBe(staleClipboard);
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('.metric-primary strong')).toHaveText('602');
+
+  await page.getByRole('button', { name: 'Copy context' }).click();
+  dialog = page.getByRole('alertdialog', { name: 'Potentially sensitive files' });
+  await expect(dialog).toBeVisible();
+  await writeFile(path.join(root, 'watcher-change-during-confirmation.ts'), 'export const changed = true;\n', 'utf8');
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 20_000 });
+  expect(await readClipboard()).toBe(staleClipboard);
+});
+
+test('native watcher marks changes stale and automatically reconciles create and delete', async ({ native }) => {
+  const { page, root } = native;
+  const watchedPath = path.join(root, 'src', 'watcher-check.ts');
+  const search = page.getByRole('textbox', { name: 'Search files' });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+
+  await writeFile(watchedPath, 'export const watched = true;\n', 'utf8');
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('status')).toContainText('Workspace files changed');
+  await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeDisabled();
+  await search.fill('watcher-check.ts');
+  await expect(page.getByRole('button', { name: 'Preview src/watcher-check.ts' })).toHaveCount(0);
+
+  await expect(page.getByRole('button', { name: 'Preview src/watcher-check.ts' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
+
+  await unlink(watchedPath);
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('button', { name: 'Preview src/watcher-check.ts' })).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+});
+
+test('native token estimates retotal selections, reuse unchanged files, and invalidate only edits', async ({ native }) => {
+  const { root } = native;
+  let page = native.page;
+  const tokenCount = () => page.locator('.token-metric strong');
+  const selectedCount = () => page.locator('.metric-primary strong');
+  const generation = () => page.locator('.workbench');
+  const readEstimate = (requestId: string) => page.evaluate(async (id) => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<{
+        tokens: number; files: number; reusedFiles: number; computedFiles: number; tokenizerId: string;
+      }> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    const currentGeneration = Number(document.querySelector('.workbench')?.getAttribute('data-workspace-generation'));
+    return internals.invoke('estimate_tokens', { generation: currentGeneration, requestId: id });
+  }, requestId);
+  const readyCount = async () => {
+    await expect(tokenCount()).toHaveText(/^≈ [\d,]+$/, { timeout: 120_000 });
+    return Number((await tokenCount().textContent())?.replace(/[^\d]/g, ''));
+  };
+  const cacheProof = async (sequence: number, files: number, computedFiles: number) => {
+    const estimate = await readEstimate(`${Date.now() + 60_000}:${sequence}`);
+    expect(estimate.files).toBe(files);
+    expect(estimate.computedFiles).toBe(computedFiles);
+    expect(estimate.reusedFiles).toBe(files - computedFiles);
+    expect(estimate.tokenizerId).toBe('o200k_base');
+    return estimate.tokens;
+  };
+
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(page.locator('.token-metric small')).toHaveText('o200k_base · approximate');
+  const initialTokens = await readyCount();
+  const initialGeneration = Number(await generation().getAttribute('data-workspace-generation'));
+  await cacheProof(1, 602, 0);
+
+  await page.getByRole('checkbox', { name: 'Select README.md' }).click();
+  await expect(selectedCount()).toHaveText('601');
+  await expect.poll(async () => Number(await generation().getAttribute('data-workspace-generation'))).toBeGreaterThan(initialGeneration);
+  await readyCount();
+  const withoutReadme = await cacheProof(2, 601, 0);
+  expect(withoutReadme).toBeLessThan(initialTokens);
+
+  const addedPath = path.join(root, 'token-cache.md');
+  await writeFile(addedPath, '# Cache fixture\n\nFirst version.\n', 'utf8');
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(selectedCount()).toHaveText('602');
+  const afterAddition = await readyCount();
+  expect(afterAddition).toBeGreaterThan(withoutReadme);
+  await cacheProof(3, 602, 0);
+
+  await writeFile(addedPath, '# Cache fixture changed\n\nA longer second version.\n', 'utf8');
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 30_000 });
+  const afterEdit = await readyCount();
+  expect(afterEdit).toBeGreaterThan(afterAddition);
+  await cacheProof(4, 602, 0);
+
+  await page.evaluate(async () => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    await internals.invoke('debug_fail_watcher');
+  });
+  await expect(page.getByText('Watcher unavailable', { exact: true })).toBeVisible();
+  await expect(tokenCount()).toHaveText('Stale');
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  const beforeRestart = await readyCount();
+  await cacheProof(5, 602, 0);
+
+  await native.stop();
+  page = await native.launch();
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(page.locator('.token-metric small')).toHaveText('o200k_base · approximate');
+  const afterRestart = await readyCount();
+  expect(afterRestart).toBe(beforeRestart);
+  await cacheProof(6, 602, 0);
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m45-token-estimate-native.png') });
+});
+
+test('native window focus regain revalidates the active workspace exactly once', async ({ native }) => {
+  const { page, deactivate, activate } = native;
+  const workbench = page.getByRole('region', { name: 'Project files and preview' });
+  const initialGeneration = Number(await workbench.getAttribute('data-workspace-generation'));
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+
+  const minimized = await deactivate();
+  expect(minimized.minimized).toBe(true);
+  const restored = await activate();
+  expect(restored.minimized).toBe(false);
+  await page.bringToFront();
+
+  await expect.poll(async () => Number(await workbench.getAttribute('data-workspace-generation'))).toBe(initialGeneration + 1);
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m4-3-focus-recovered.png') });
+});
+
+test('native watcher automatically reconciles a burst of edits, rename intent, and gitignore changes', async ({ native }) => {
+  const { page, root } = native;
+  const selected = page.locator('.metric-primary strong');
+  const search = page.getByRole('textbox', { name: 'Search files' });
+  const createdPath = path.join(root, 'src', 'watcher-created.ts');
+  const deletedPath = path.join(root, 'src', 'file-0599.ts');
+  await search.fill('main.rs');
+  const mainFile = page.getByRole('checkbox', { name: 'Select src/main.rs' });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(mainFile).toBeChecked();
+
+  // Persist an exact-path exclusion before moving the file; it must not follow the rename.
+  // Selection changes are committed by the native workspace command, so wait on its observable projection.
+  await mainFile.click();
+  await expect(mainFile).not.toBeChecked();
+  await expect(selected).toHaveText('601');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  await writeFile(createdPath, 'export const createdDuringBurst = true;\n', 'utf8');
+  await writeFile(path.join(root, 'src', 'main.rs'), 'fn main() { println!("modified before rename"); }\n', 'utf8');
+  await unlink(deletedPath);
+  await rename(path.join(root, 'src', 'main.rs'), path.join(root, 'src', 'renamed.rs'));
+  await writeFile(path.join(root, '.gitignore'), '/.gitignore\n/dist/\n/src/file-0000.ts\n', 'utf8');
+
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('button', { name: 'Copy context' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeDisabled();
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m4-2-watcher-stale.png') });
+
+  // No manual Refresh: require the watcher-driven reconciliation to reach a fresh snapshot.
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 15_000 });
+  await search.fill('renamed.rs');
+  const renamedFile = page.getByRole('checkbox', { name: 'Select src/renamed.rs' });
+  await expect(renamedFile).toBeVisible({ timeout: 10_000 });
+  await expect(renamedFile).toBeChecked();
+  await page.getByRole('button', { name: 'Preview src/renamed.rs' }).click();
+  await expect(page.getByText('modified before rename')).toBeVisible();
+  await search.fill('watcher-created.ts');
+  await expect(page.getByRole('checkbox', { name: 'Select src/watcher-created.ts' })).toBeChecked();
+  await search.fill('file-0599.ts');
+  await expect(page.getByRole('button', { name: 'Preview src/file-0599.ts' })).toHaveCount(0);
+  await search.fill('renamed.rs');
+  await expect(page.getByRole('button', { name: 'Copy context' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m4-2-watcher-fresh.png') });
+  await search.clear();
+  await expect(selected).toHaveText('601');
+
+  const views = page.getByRole('navigation', { name: 'Workspace views' });
+  await expect(views.getByRole('button', { name: 'Ignored' })).toContainText('2 known files');
+  await views.getByRole('button', { name: 'Ignored' }).click();
+  await search.fill('.gitignore');
+  await expect(page.getByRole('button', { name: 'Preview .gitignore' })).toBeVisible();
+  await search.fill('file-0000.ts');
+  await expect(page.getByRole('button', { name: 'Preview src/file-0000.ts' })).toBeVisible();
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+});
+
+test('native copy stays pending while a selected source changes, then fails safely and reconciles', async ({ native }) => {
+  const { page, root } = native;
+  const search = page.getByRole('textbox', { name: 'Search files' });
+  await search.fill('main.rs');
+  await expect(page.getByRole('button', { name: 'Preview src/main.rs' })).toBeVisible();
+  const internals = page.evaluate(async () => {
+    const bridge = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    if (!bridge) throw new Error('Native Tauri command bridge is unavailable.');
+    await bridge.invoke('debug_arm_copy_barrier');
+  });
+  await internals;
+
+  try {
+    await page.getByRole('button', { name: 'Copy context' }).click();
+    await expect.poll(async () => page.evaluate(async () => {
+      const bridge = (window as Window & {
+        __TAURI_INTERNALS__?: { invoke: (command: string) => Promise<boolean> };
+      }).__TAURI_INTERNALS__;
+      if (!bridge) throw new Error('Native Tauri command bridge is unavailable.');
+      return bridge.invoke('debug_copy_barrier_status');
+    })).toBe(true);
+
+    await writeFile(path.join(root, 'src', 'main.rs'), 'fn main() { println!("changed during copy"); }\n', 'utf8');
+    await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('button', { name: 'Cancel operation' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copy context' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Preview src/main.rs' })).toBeVisible();
+    await page.waitForTimeout(700);
+    await expect(page.getByText('Files changed', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Cancel operation' })).toBeVisible();
+
+    await page.evaluate(() => {
+      const samples: string[] = [];
+      const timer = window.setInterval(() => {
+        const alert = document.querySelector('[role="alert"]')?.textContent?.trim();
+        const status = document.querySelector('.live-region')?.textContent?.trim();
+        if (alert) samples.push(`alert:${alert}`);
+        if (status?.includes('Copied')) samples.push(`status:${status}`);
+      }, 10);
+      Object.assign(window, { __copyOutcomeSamples: samples, __copyOutcomeTimer: timer });
+    });
+    await page.evaluate(async () => {
+      const bridge = (window as Window & {
+        __TAURI_INTERNALS__?: { invoke: (command: string) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      if (!bridge) throw new Error('Native Tauri command bridge is unavailable.');
+      await bridge.invoke('debug_release_copy_barrier');
+    });
+    await expect.poll(() => page.evaluate(() => (window as Window & { __copyOutcomeSamples?: string[] }).__copyOutcomeSamples ?? []))
+      .toContainEqual(expect.stringMatching(/^alert:.*(changed|modified|source)/i));
+    await expect(page.locator('.live-region')).not.toContainText('Copied');
+    expect(await page.evaluate(() => (window as Window & { __copyOutcomeSamples?: string[] }).__copyOutcomeSamples ?? []))
+      .not.toEqual(expect.arrayContaining([expect.stringMatching(/^status:.*Copied/)]));
+    await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('button', { name: 'Preview src/main.rs' }).click();
+    await expect(page.getByText('changed during copy')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copy context' })).toBeEnabled();
+  } finally {
+    await page.evaluate(async () => {
+      const timer = (window as Window & { __copyOutcomeTimer?: number }).__copyOutcomeTimer;
+      if (timer !== undefined) window.clearInterval(timer);
+      const bridge = (window as Window & {
+        __TAURI_INTERNALS__?: { invoke: (command: string) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      if (bridge) await bridge.invoke('debug_release_copy_barrier').catch(() => undefined);
+    }).catch(() => undefined);
+  }
+});
+
+test('native root switch detaches the old watcher and watches only the new workspace', async ({ native }) => {
+  const { page, root } = native;
+  const nextRoot = path.join(path.dirname(root), 'workspace-switched');
+  await mkdir(nextRoot, { recursive: true });
+  await writeFile(path.join(nextRoot, 'NEXT.md'), '# Switched workspace\n', 'utf8');
+
+  await page.evaluate(async (newRoot) => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string, args?: Record<string, string>) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    await internals.invoke('debug_choose_workspace', { path: newRoot });
+  }, nextRoot);
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.locator('.workspace-path')).toContainText(path.basename(nextRoot));
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview NEXT.md' })).toBeVisible();
+
+  await writeFile(path.join(root, 'src', 'old-root-change.ts'), 'export const oldRoot = true;\n', 'utf8');
+  await page.waitForTimeout(500);
+  await expect(page.getByText('Files changed', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+
+  await writeFile(path.join(nextRoot, 'new-root-change.ts'), 'export const newRoot = true;\n', 'utf8');
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Preview new-root-change.ts' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+});
+
+test('native watcher failure reports unavailable and manual refresh recovers', async ({ native }) => {
+  const { page } = native;
+  await page.evaluate(async () => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    await internals.invoke('debug_fail_watcher');
+  });
+
+  await expect(page.getByText('Watcher unavailable', { exact: true })).toBeVisible();
+  await expect(page.getByRole('status')).toContainText('Synthetic watcher failure');
+  await expect(page.getByRole('button', { name: 'Copy context' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
 });
 
 test('native startup migrates version-1 extension exclusions into visible path rules', async ({ native }) => {
@@ -144,7 +607,10 @@ test('native preview collapses accessibly and restores long-path content without
   const absolutePath = path.join(native.root, 'src', segmentA, segmentB, 'long-preview.ts');
   await mkdir(path.dirname(absolutePath), { recursive: true });
   await writeFile(absolutePath, 'export const longPath = true;\n', 'utf8');
-  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await page.getByRole('textbox', { name: 'Search files' }).fill(relativePath);
+  await expect(page.getByRole('button', { name: `Preview src/${segmentA}/${segmentB}/long-preview.ts` })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
 
   await page.setViewportSize({ width: 1536, height: 1024 });
   const splitter = page.getByRole('separator', { name: 'File preview' });
@@ -331,14 +797,17 @@ test('native preview collapses accessibly and restores long-path content without
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-720x520.png') });
 });
 
-test('native copy reports a deleted selected source and never reports success', async ({ native }) => {
+test('native watcher reconciles a deleted source before allowing copy again', async ({ native }) => {
   const page = native.page;
   await page.getByRole('textbox', { name: 'Search files' }).fill('main.rs');
   await expect(page.getByRole('button', { name: 'Preview src/main.rs' })).toBeVisible();
   await unlink(path.join(native.root, 'src', 'main.rs'));
-  await page.getByRole('button', { name: 'Copy context' }).click();
-  await expect(page.getByRole('alert')).toContainText('main.rs');
+  await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('button', { name: 'Copy context' })).toBeDisabled();
   await expect(page.locator('.live-region')).not.toContainText('Copied');
-  await expect(page.getByRole('alert')).toBeVisible();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-6-native-copy-error.png') });
+  await expect(page.getByRole('button', { name: 'Preview src/main.rs' })).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(page.locator('.metric-primary strong')).toHaveText('601');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m4-1-deleted-source-reconciled.png') });
 });

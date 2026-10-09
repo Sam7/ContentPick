@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent } from 'react';
-import type { ContextPickBridge, Entry, ExportResult, FilterPolicy, Preview, SelectionIntent, WorkspacePage, WorkspaceView } from './bridge';
+import type { ContextPickBridge, Entry, ExportResult, FilterPolicy, Preview, SelectionIntent, SensitiveWarningSummary, TokenEstimate, WatchHealth, WorkspacePage, WorkspaceView } from './bridge';
 import { ProjectTree } from './ProjectTree';
 import { WorkspaceToolbar } from './WorkspaceToolbar';
 import { WorkspaceSidebar } from './WorkspaceSidebar';
@@ -9,6 +9,22 @@ import { projectEntries, type WorkspaceFileView } from './workspaceViews';
 import './app.css';
 
 type AppProps = { bridge: ContextPickBridge; fixtureMode?: boolean };
+type TokenEstimateDisplay = {
+  root: string;
+  generation: number;
+  selectedCount: number;
+  requestId: string;
+  state: 'calculating' | 'unavailable' | 'ready';
+  estimate?: TokenEstimate;
+};
+type SensitivePrompt = {
+  ticket: string;
+  kind: 'copy' | 'export';
+  summary: SensitiveWarningSummary;
+  root: string;
+  generation: number;
+  trigger: HTMLElement | null;
+};
 const DEFAULT_FILTER_POLICY: FilterPolicy = {
   gitignore: true,
   includeExtensions: [],
@@ -44,6 +60,22 @@ function exportSummary(result: ExportResult, copied: boolean): string {
   return `${action} · ${result.files} files · ${formatBytes(result.bytes)}${destination}`;
 }
 
+function isOutputStatus(status: string): boolean {
+  return status.startsWith('Copied ·')
+    || status.startsWith('Export ready ·')
+    || status === 'Copy cancelled.'
+    || status === 'Export cancelled.';
+}
+
+function withWatcherStatus(status: string, nextWatchMessage: string, previousWatchMessage: string | null): string {
+  if (!isOutputStatus(status)) return nextWatchMessage;
+  const previousSuffix = previousWatchMessage ? ` · ${previousWatchMessage}` : '';
+  const baseStatus = previousSuffix && status.endsWith(previousSuffix)
+    ? status.slice(0, -previousSuffix.length)
+    : status;
+  return `${baseStatus} · ${nextWatchMessage}`;
+}
+
 function validateInitialWorkspace(view: WorkspaceView): void {
   if (!Number.isSafeInteger(view.entryCount) || view.entryCount < 0 || !Array.isArray(view.entries) || view.entries.length > view.entryCount) {
     throw new Error('Workspace page metadata is invalid.');
@@ -70,6 +102,7 @@ function validateWorkspacePage(initial: WorkspaceView, page: WorkspacePage, expe
 
 export function App({ bridge, fixtureMode = false }: AppProps) {
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
+  const [tokenEstimate, setTokenEstimate] = useState<TokenEstimateDisplay | null>(null);
   const [preview, setPreview] = useState<{ path: string; content: Preview } | null>(null);
   const [previewCollapsed, setPreviewCollapsed] = useState(false);
   const [previewWidth, setPreviewWidth] = useState(32);
@@ -85,17 +118,302 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const [policy, setPolicy] = useState<FilterPolicy>(DEFAULT_FILTER_POLICY);
   const [policyDrafts, setPolicyDrafts] = useState(() => draftsFromPolicy(policy));
   const policyDirty = useRef(false);
-  const [busy, setBusy] = useState<string | null>('restore');
-  const [status, setStatus] = useState('');
+  const [busy, setBusyState] = useState<string | null>('restore');
+  const busyOperation = useRef<string | null>('restore');
+  const setBusy = useCallback((value: string | null) => {
+    busyOperation.current = value;
+    setBusyState(value);
+  }, []);
+  const [status, setStatusState] = useState('');
+  const statusText = useRef('');
+  const watcherStatus = useRef<string | null>(null);
+  const setStatus = useCallback((value: string) => {
+    statusText.current = value;
+    setStatusState(value);
+  }, []);
   const [error, setError] = useState('');
   const [workspaceStale, setWorkspaceStale] = useState(false);
+  const [watchHealth, setWatchHealth] = useState<WatchHealth | null>(null);
+  const [watchStatusUnavailable, setWatchStatusUnavailable] = useState(false);
+  const watchStatusUnavailableRef = useRef(false);
+  const [watchListenerUnavailable, setWatchListenerUnavailable] = useState(false);
+  const [watchSubscriptionAttempt, setWatchSubscriptionAttempt] = useState(0);
   const [actionPath, setActionPath] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [sensitivePrompt, setSensitivePrompt] = useState<SensitivePrompt | null>(null);
+  const sensitivePromptRef = useRef<SensitivePrompt | null>(null);
+  const sensitiveDialogRef = useRef<HTMLDivElement>(null);
+  const sensitiveCancelRef = useRef<HTMLButtonElement>(null);
+  const sensitiveConfirmRef = useRef<HTMLButtonElement>(null);
+  const cancelOperationButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingOutputFocusReturn = useRef<HTMLElement | null>(null);
+  const estimateRoot = workspace?.root;
+  const estimateGeneration = workspace?.generation;
+  const estimateSelectedCount = workspace?.selectedCount;
   const workspaceRequestId = useRef(0);
+  const tokenEstimateSequence = useRef(0);
+  const activeTokenEstimateRequest = useRef<string | null>(null);
   const previewRequestId = useRef(0);
   const busyRequestId = useRef(0);
   const cancellationEpoch = useRef(0);
   const restorePromise = useRef<Promise<WorkspaceView | null> | null>(null);
+  const watchEpoch = useRef(0);
+  const watchHealthRevision = useRef(0);
+  const watchRevision = useRef(0);
+  const dirtyWatchRevision = useRef(0);
+  const watchHealthRef = useRef<WatchHealth | null>(null);
+  const watchListenerUnavailableRef = useRef(false);
+  const activeRoot = useRef<string | null>(null);
+  const pendingFocusReconcileRoot = useRef<string | null>(null);
+  const focusReconcileRequest = useRef<(root: string) => void>(() => {});
+  const autoRefreshAttempt = useRef({ epoch: 0, revision: 0 });
+  const refreshRequest = useRef<() => void>(() => {});
+  const watcherVerified = fixtureMode || Boolean(
+    workspace
+    && !workspaceStale
+    && !watchStatusUnavailable
+    && !watchListenerUnavailable
+    && watchHealth?.root === workspace.root
+    && watchHealth.state === 'watching',
+  );
+
+  const setSensitivePromptState = useCallback((prompt: SensitivePrompt | null) => {
+    sensitivePromptRef.current = prompt;
+    setSensitivePrompt(prompt);
+  }, []);
+
+  const closeSensitivePrompt = useCallback((cancelTicket: boolean) => {
+    const prompt = sensitivePromptRef.current;
+    if (!prompt) return;
+    setSensitivePromptState(null);
+    if (cancelTicket) void bridge.cancel_sensitive_output({ ticket: prompt.ticket }).catch(() => {});
+    prompt.trigger?.focus();
+  }, [bridge, setSensitivePromptState]);
+
+  const sensitiveSnapshotCurrent = useCallback((prompt: SensitivePrompt) => {
+    if (!workspace || workspace.root !== prompt.root || workspace.generation !== prompt.generation || workspaceStale) return false;
+    if (fixtureMode) return true;
+    const health = watchHealthRef.current;
+    return !watchStatusUnavailableRef.current
+      && !watchListenerUnavailableRef.current
+      && health?.root === prompt.root
+      && health.state === 'watching';
+  }, [fixtureMode, workspace, workspaceStale]);
+
+  useLayoutEffect(() => {
+    if (sensitivePrompt) sensitiveCancelRef.current?.focus();
+  }, [sensitivePrompt]);
+
+  useLayoutEffect(() => {
+    const trigger = pendingOutputFocusReturn.current;
+    if (!trigger) return;
+    if (busy === 'copy' || busy === 'export') {
+      cancelOperationButtonRef.current?.focus();
+    } else if (busy === null) {
+      if (trigger.isConnected && !(trigger instanceof HTMLButtonElement && trigger.disabled)) trigger.focus();
+      pendingOutputFocusReturn.current = null;
+    }
+  }, [busy]);
+
+  useEffect(() => {
+    const prompt = sensitivePromptRef.current;
+    if (prompt && !sensitiveSnapshotCurrent(prompt)) closeSensitivePrompt(true);
+  }, [closeSensitivePrompt, sensitiveSnapshotCurrent]);
+
+  useEffect(() => () => {
+    const prompt = sensitivePromptRef.current;
+    if (prompt) void bridge.cancel_sensitive_output({ ticket: prompt.ticket }).catch(() => {});
+  }, [bridge]);
+
+  const updateWatchHealth = useCallback((health: WatchHealth, listenerVerified = false) => {
+    if (health.root !== activeRoot.current || health.epoch < watchEpoch.current) return;
+    if (health.epoch === watchEpoch.current && health.revision <= watchHealthRevision.current) {
+      if (listenerVerified && watchHealthRef.current?.root === health.root && watchHealthRef.current.state === health.state) {
+        watchListenerUnavailableRef.current = false;
+        setWatchListenerUnavailable(false);
+        watchStatusUnavailableRef.current = false;
+        setWatchStatusUnavailable(false);
+        setWorkspaceStale(health.state !== 'watching');
+      }
+      return;
+    }
+    watchEpoch.current = health.epoch;
+    watchHealthRevision.current = health.revision;
+    watchRevision.current += 1;
+    if (health.state !== 'watching') dirtyWatchRevision.current += 1;
+    watchHealthRef.current = health;
+    setWatchHealth(health);
+    watchStatusUnavailableRef.current = false;
+    setWatchStatusUnavailable(false);
+    if (listenerVerified) {
+      watchListenerUnavailableRef.current = false;
+      setWatchListenerUnavailable(false);
+    }
+    setWorkspaceStale(health.state !== 'watching' || watchListenerUnavailableRef.current);
+    const nextWatchMessage = health.message ?? (health.state === 'watching' ? 'Watching workspace files.' : health.state === 'stale' ? 'Files changed. Refresh before continuing.' : 'Watcher unavailable. Refresh before continuing.');
+    const previousWatchMessage = watcherStatus.current;
+    watcherStatus.current = nextWatchMessage;
+    if (busyOperation.current === null) {
+      if (health.state === 'watching') {
+        if (isOutputStatus(statusText.current) && previousWatchMessage) {
+          const suffix = ` · ${previousWatchMessage}`;
+          if (statusText.current.endsWith(suffix)) setStatus(statusText.current.slice(0, -suffix.length));
+        } else if (statusText.current === previousWatchMessage) {
+          setStatus('');
+        }
+      } else if (isOutputStatus(statusText.current)) {
+        setStatus(withWatcherStatus(statusText.current, nextWatchMessage, previousWatchMessage));
+      } else {
+        setStatus(nextWatchMessage);
+      }
+    }
+  }, [setStatus]);
+
+  useEffect(() => {
+    const root = workspace?.root ?? null;
+    activeRoot.current = root;
+    if (fixtureMode || !root) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    if (watchHealthRef.current?.root !== root && !watchListenerUnavailableRef.current) {
+      watchListenerUnavailableRef.current = true;
+      setWatchListenerUnavailable(true);
+      setWorkspaceStale(true);
+    }
+    const markStatusUnavailable = () => {
+      if (!active) return;
+      watchStatusUnavailableRef.current = true;
+      setWatchStatusUnavailable(true);
+      setWorkspaceStale(true);
+      setStatus('Workspace status unavailable. Refresh before continuing.');
+    };
+    const markListenerUnavailable = () => {
+      if (!active) return;
+      watchListenerUnavailableRef.current = true;
+      setWatchListenerUnavailable(true);
+      markStatusUnavailable();
+    };
+    void bridge.on_watch_status((health) => { if (active) updateWatchHealth(health, true); }).then((dispose) => {
+      if (!active) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+      watchListenerUnavailableRef.current = false;
+      setWatchListenerUnavailable(false);
+      return bridge.get_watch_status().then((health) => {
+        if (!active) return;
+        if (health) updateWatchHealth(health);
+        else markStatusUnavailable();
+      }).catch(markStatusUnavailable);
+    }).catch(markListenerUnavailable);
+    return () => { active = false; unlisten?.(); };
+  }, [bridge, fixtureMode, setStatus, updateWatchHealth, watchSubscriptionAttempt, workspace?.root]);
+
+  useEffect(() => {
+    const root = workspace?.root;
+    if (fixtureMode || !root) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    const reconcileFocus = () => {
+      if (!active || activeRoot.current !== root) return;
+      setWorkspaceStale(true);
+      if (!isOutputStatus(statusText.current)) setStatus('Revalidating workspace after focus…');
+      void bridge.request_focus_reconcile(root).then((health) => {
+        if (!active || activeRoot.current !== root) return;
+        if (health) {
+          watchStatusUnavailableRef.current = false;
+          setWatchStatusUnavailable(false);
+          updateWatchHealth(health);
+        } else {
+          watchStatusUnavailableRef.current = true;
+          setWatchStatusUnavailable(true);
+          setWorkspaceStale(true);
+          const message = 'Workspace status unavailable. Refresh before continuing.';
+          const previousWatchMessage = watcherStatus.current;
+          watcherStatus.current = message;
+          setStatus(withWatcherStatus(statusText.current, message, previousWatchMessage));
+        }
+      }).catch((cause: unknown) => {
+        if (!active || activeRoot.current !== root) return;
+        watchStatusUnavailableRef.current = true;
+        setWatchStatusUnavailable(true);
+        setWorkspaceStale(true);
+        setError(errorMessage(cause, 'Workspace status could not be verified.'));
+        const message = 'Workspace status unavailable. Refresh before continuing.';
+        const previousWatchMessage = watcherStatus.current;
+        watcherStatus.current = message;
+        setStatus(withWatcherStatus(statusText.current, message, previousWatchMessage));
+      });
+    };
+    const requestFocusReconcile = (requestedRoot: string) => {
+      if (requestedRoot === root) reconcileFocus();
+    };
+    focusReconcileRequest.current = requestFocusReconcile;
+    const handleFocus = () => {
+      if (!active || activeRoot.current !== root) return;
+      if (busyOperation.current === 'copy' || busyOperation.current === 'export') {
+        pendingFocusReconcileRoot.current = root;
+        setWorkspaceStale(true);
+        if (!isOutputStatus(statusText.current)) setStatus('Workspace revalidation pending until output finishes…');
+        return;
+      }
+      reconcileFocus();
+    };
+    void bridge.on_window_focus(handleFocus).then((dispose) => {
+      if (!active) dispose();
+      else unlisten = dispose;
+    }).catch(() => {
+      if (!active || activeRoot.current !== root) return;
+      setWorkspaceStale(true);
+      watchStatusUnavailableRef.current = true;
+      setWatchStatusUnavailable(true);
+      setStatus('Window focus recovery is unavailable. Refresh before continuing.');
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+      if (focusReconcileRequest.current === requestFocusReconcile) focusReconcileRequest.current = () => {};
+    };
+  }, [bridge, fixtureMode, setStatus, updateWatchHealth, workspace?.root]);
+
+  useEffect(() => {
+    if (busy === 'copy' || busy === 'export') return;
+    const root = pendingFocusReconcileRoot.current;
+    if (!root) return;
+    pendingFocusReconcileRoot.current = null;
+    focusReconcileRequest.current(root);
+  }, [busy]);
+
+  useEffect(() => {
+    if (!estimateRoot || estimateGeneration === undefined || estimateSelectedCount === undefined) return;
+    const root = estimateRoot;
+    const generation = estimateGeneration;
+    const selectedCount = estimateSelectedCount;
+    const watcherIsStale = !fixtureMode && !watcherVerified;
+    if (watcherIsStale) return;
+    if (selectedCount === 0) return;
+
+    const requestId = `${Date.now()}:${++tokenEstimateSequence.current}`;
+    activeTokenEstimateRequest.current = requestId;
+    setTokenEstimate({ root, generation, selectedCount, requestId, state: 'calculating' });
+    void bridge.estimate_tokens({ generation, requestId }).then((estimate) => {
+      if (activeTokenEstimateRequest.current !== requestId) return;
+      if (estimate.requestId !== requestId || estimate.generation !== generation) {
+        setTokenEstimate({ root, generation, selectedCount, requestId, state: 'unavailable' });
+        return;
+      }
+      setTokenEstimate({ root, generation, selectedCount, requestId, state: 'ready', estimate });
+    }).catch(() => {
+      if (activeTokenEstimateRequest.current !== requestId) return;
+      setTokenEstimate({ root, generation, selectedCount, requestId, state: 'unavailable' });
+    });
+
+    return () => {
+      if (activeTokenEstimateRequest.current === requestId) activeTokenEstimateRequest.current = null;
+      void bridge.cancel_token_estimate({ generation, requestId }).catch(() => {});
+    };
+  }, [bridge, estimateGeneration, estimateRoot, estimateSelectedCount, fixtureMode, watcherVerified]);
 
   useLayoutEffect(() => {
     if (previewCollapsed && focusPreviewToggleAfterCollapse.current) {
@@ -108,7 +426,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     validateInitialWorkspace(initial);
     let loaded = initial.entries.length;
     let nextOffset = initial.nextOffset;
-    setStatus(nextOffset === null ? '' : `${loaded} of ${initial.entryCount} items loaded`);
+    if (!isOutputStatus(statusText.current)) setStatus(nextOffset === null ? '' : `${loaded} of ${initial.entryCount} items loaded`);
     while (nextOffset !== null) {
       const page = await bridge.workspace_page({ generation: initial.generation, offset: nextOffset });
       if (!isCurrent()) return;
@@ -118,9 +436,9 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
         : current);
       loaded += page.entries.length;
       nextOffset = page.nextOffset;
-      setStatus(nextOffset === null ? '' : `${loaded} of ${initial.entryCount} items loaded`);
+      if (!isOutputStatus(statusText.current)) setStatus(nextOffset === null ? '' : `${loaded} of ${initial.entryCount} items loaded`);
     }
-  }, [bridge]);
+  }, [bridge, setStatus]);
 
   async function runWorkspaceCommand<T extends WorkspaceView | null>(
     name: string,
@@ -130,16 +448,57 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   ) {
     const requestId = ++busyRequestId.current;
     const requestEpoch = cancellationEpoch.current;
+    const startingWatchRevision = watchRevision.current;
+    const startingDirtyWatchRevision = dirtyWatchRevision.current;
+    let statusUnavailableAfterRefresh = false;
     const stillCurrent = () => cancellationEpoch.current === requestEpoch && isCurrent();
     setBusy(name);
     setCancelling(false);
     setError('');
-    setStatus('');
+    if (name !== 'refresh' || !isOutputStatus(statusText.current)) {
+      setStatus('');
+    } else if (watcherStatus.current) {
+      const suffix = ` · ${watcherStatus.current}`;
+      if (statusText.current.endsWith(suffix)) setStatus(statusText.current.slice(0, -suffix.length));
+    }
     try {
       const result = await action();
       if (!stillCurrent()) return;
       if (result) validateInitialWorkspace(result);
+      if (result && name === 'refresh' && !fixtureMode) {
+        const health = await bridge.get_watch_status().catch(() => null);
+        if (!stillCurrent()) return;
+        if (health) {
+          watchStatusUnavailableRef.current = false;
+          setWatchStatusUnavailable(false);
+          updateWatchHealth(health);
+        }
+        else {
+          statusUnavailableAfterRefresh = true;
+          setWorkspaceStale(true);
+          watchStatusUnavailableRef.current = true;
+          setWatchStatusUnavailable(true);
+          setStatus('Watcher status unavailable. Refresh before continuing.');
+        }
+      }
       onInitial(result);
+      if (statusUnavailableAfterRefresh) setWorkspaceStale(true);
+      if (result && watchRevision.current !== startingWatchRevision) {
+        const health = watchHealthRef.current;
+        setWorkspaceStale(statusUnavailableAfterRefresh || watchListenerUnavailableRef.current || Boolean(health && health.root === result.root && health.state !== 'watching'));
+      }
+      if (result && name !== 'refresh' && dirtyWatchRevision.current !== startingDirtyWatchRevision && watchHealthRef.current?.root === result.root) {
+        const currentHealth = watchHealthRef.current;
+        const staleHealth: WatchHealth = currentHealth.state === 'unavailable' ? currentHealth : {
+          ...currentHealth,
+          state: 'stale',
+          message: 'Files changed during this operation. Refresh again to reconcile.',
+        };
+        watchHealthRef.current = staleHealth;
+        setWatchHealth(staleHealth);
+        setWorkspaceStale(true);
+        setStatus(staleHealth.message ?? 'Watcher unavailable. Refresh before continuing.');
+      }
       if (result) await loadWorkspacePages(result, stillCurrent);
     } catch (cause) {
       if (stillCurrent()) setError(errorMessage(cause, 'The request could not be completed.'));
@@ -193,9 +552,9 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       active = false;
       if (workspaceRequestId.current === requestId) workspaceRequestId.current += 1;
     };
-  }, [bridge, loadWorkspacePages]);
+  }, [bridge, loadWorkspacePages, setBusy]);
 
-  async function runCommand<T>(name: string, action: () => Promise<T>, onSuccess: (result: T) => void, isCurrent: () => boolean = () => true) {
+  async function runCommand<T>(name: string, action: () => Promise<T>, onSuccess: (result: T) => void, isCurrent: () => boolean = () => true, onDiscard?: (result: T) => void) {
     const requestId = ++busyRequestId.current;
     const requestEpoch = cancellationEpoch.current;
     setBusy(name);
@@ -205,6 +564,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     try {
       const result = await action();
       if (cancellationEpoch.current === requestEpoch && isCurrent()) onSuccess(result);
+      else onDiscard?.(result);
     } catch (cause) {
       if (cancellationEpoch.current === requestEpoch && isCurrent()) setError(errorMessage(cause, 'The request could not be completed.'));
     } finally {
@@ -221,6 +581,13 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       policyDirty.current = false;
     }
     if (rootChanged) {
+      activeRoot.current = result.root;
+      watchHealthRef.current = null;
+      setWatchHealth(null);
+      watchListenerUnavailableRef.current = !fixtureMode;
+      setWatchListenerUnavailable(!fixtureMode);
+      watchStatusUnavailableRef.current = !fixtureMode;
+      setWatchStatusUnavailable(!fixtureMode);
       setExpanded(new Set());
       setQuery('');
       setFileView('all');
@@ -231,7 +598,8 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       setPreview(null);
     }
     setWorkspace(result);
-    setWorkspaceStale(false);
+    const health = watchHealthRef.current;
+    setWorkspaceStale((rootChanged && !fixtureMode) || watchStatusUnavailableRef.current || watchListenerUnavailableRef.current || (health?.root === result.root && health.state !== 'watching'));
   }
 
   function openWorkspace() {
@@ -246,9 +614,39 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   }
 
   function refresh() {
+    const health = watchHealthRef.current;
+    if (health?.state === 'stale') {
+      autoRefreshAttempt.current = { epoch: health.epoch, revision: health.revision };
+    }
+    if (watchListenerUnavailableRef.current) setWatchSubscriptionAttempt((attempt) => attempt + 1);
     const requestId = ++workspaceRequestId.current;
     void runWorkspaceCommand('refresh', () => bridge.refresh_workspace(), commitWorkspace, () => requestId === workspaceRequestId.current);
   }
+
+  useEffect(() => {
+    refreshRequest.current = refresh;
+  });
+
+  useEffect(() => {
+    const health = watchHealth;
+    const root = workspace?.root;
+    if (fixtureMode || !health || !root || health.root !== root || health.state !== 'stale') return;
+    if (autoRefreshAttempt.current.epoch !== health.epoch) {
+      autoRefreshAttempt.current = { epoch: health.epoch, revision: 0 };
+    }
+    if (health.revision <= autoRefreshAttempt.current.revision || busy !== null || cancelling) return;
+
+    const epoch = health.epoch;
+    const timer = window.setTimeout(() => {
+      const latest = watchHealthRef.current;
+      if (latest?.root !== root || latest.epoch !== epoch || latest.state !== 'stale') return;
+      const attempted = autoRefreshAttempt.current;
+      if (attempted.epoch === latest.epoch && attempted.revision >= latest.revision) return;
+      autoRefreshAttempt.current = { epoch: latest.epoch, revision: latest.revision };
+      refreshRequest.current();
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [busy, cancelling, fixtureMode, watchHealth, workspace?.root]);
 
   function browseIgnored(path: string) {
     if (workspaceStale || cancelling) return;
@@ -307,9 +705,65 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
 
   function exportContent(copied: boolean) {
     if (!workspace || workspaceStale || cancelling) return;
-    void runCommand(copied ? 'copy' : 'export', () => copied ? bridge.copy_markdown() : bridge.export_markdown(), (result) => {
-      if (result) setStatus(exportSummary(result, copied));
+    const kind = copied ? 'copy' : 'export';
+    const root = workspace.root;
+    const generation = workspace.generation;
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    void runCommand(kind, () => copied ? bridge.copy_markdown() : bridge.export_markdown(), (result) => {
+      if (result && 'confirmationRequired' in result && result.confirmationRequired) {
+        const prompt: SensitivePrompt = { ticket: result.ticket, kind, summary: result.summary, root, generation, trigger };
+        if (sensitiveSnapshotCurrent(prompt)) {
+          setSensitivePromptState(prompt);
+        } else {
+          void bridge.cancel_sensitive_output({ ticket: result.ticket }).catch(() => {});
+          setError('Workspace changed before confirmation. Refresh and start again.');
+        }
+      } else if (result && !('confirmationRequired' in result) && workspace?.root === root && workspace.generation === generation) {
+        setStatus(exportSummary(result, copied));
+      }
+    }, () => true, (result) => {
+      if (result && 'confirmationRequired' in result && result.confirmationRequired) {
+        void bridge.cancel_sensitive_output({ ticket: result.ticket }).catch(() => {});
+      }
     });
+  }
+
+  function confirmSensitiveOutput() {
+    const prompt = sensitivePromptRef.current;
+    if (!prompt) return;
+    if (!sensitiveSnapshotCurrent(prompt)) {
+      closeSensitivePrompt(true);
+      setError('Workspace changed before confirmation. Refresh and start again.');
+      return;
+    }
+    pendingOutputFocusReturn.current = prompt.trigger;
+    closeSensitivePrompt(false);
+    void runCommand(prompt.kind, () => bridge.confirm_sensitive_output({ ticket: prompt.ticket }), (result) => {
+      if (result && workspace?.root === prompt.root && workspace.generation === prompt.generation) {
+        setStatus(exportSummary(result, prompt.kind === 'copy'));
+      } else if (result === null && workspace?.root === prompt.root && workspace.generation === prompt.generation) {
+        setStatus(prompt.kind === 'export' ? 'Export cancelled.' : 'Copy cancelled.');
+      }
+    });
+  }
+
+  function handleSensitiveDialogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSensitivePrompt(true);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const cancel = sensitiveCancelRef.current;
+    const confirm = sensitiveConfirmRef.current;
+    if (!cancel || !confirm) return;
+    if (event.shiftKey && document.activeElement === cancel) {
+      event.preventDefault();
+      confirm.focus();
+    } else if (!event.shiftKey && document.activeElement === confirm) {
+      event.preventDefault();
+      cancel.focus();
+    }
   }
 
   async function cancelOperation() {
@@ -429,6 +883,32 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const previewEntry = workspace?.entries.find((entry) => entry.path === preview?.path && entry.kind === 'file') ?? null;
   const previewSizeLabel = previewEntry ? `Size: ${new Intl.NumberFormat('en-US').format(previewEntry.size)} bytes` : 'Size unavailable';
   const previewInclusionLabel = previewEntry ? (previewEntry.selected ? 'Included' : 'Not included') : 'Inclusion unavailable';
+  const tokenEstimateStale = Boolean(workspace && !watcherVerified);
+  const tokenEstimateMatches = Boolean(workspace && tokenEstimate
+    && tokenEstimate.root === workspace.root
+    && tokenEstimate.generation === workspace.generation
+    && tokenEstimate.selectedCount === workspace.selectedCount);
+  const tokenEstimateStatus = !workspace
+    ? 'unavailable'
+    : tokenEstimateStale
+      ? 'stale'
+      : workspace.selectedCount === 0
+        ? 'ready'
+        : !tokenEstimateMatches
+          ? 'calculating'
+          : tokenEstimate?.state ?? 'calculating';
+  const tokenEstimateLabel = tokenEstimateStatus === 'ready'
+    ? `≈ ${new Intl.NumberFormat('en-US').format(workspace?.selectedCount === 0 ? 0 : tokenEstimate?.estimate?.tokens ?? 0)}`
+    : tokenEstimateStatus === 'calculating' ? 'Calculating…'
+      : tokenEstimateStatus === 'stale' ? 'Stale' : 'Unavailable';
+  const tokenEstimateDetail = tokenEstimateStatus === 'ready'
+    ? `${tokenEstimate?.estimate?.tokenizerId ?? 'o200k_base'} · approximate`
+    : 'Token estimate';
+  const tokenEstimateTitle = tokenEstimateStatus === 'stale'
+    ? 'Token count is hidden until the workspace watcher is current.'
+    : tokenEstimateStatus === 'unavailable'
+      ? 'A selected file could not be safely counted.'
+      : 'Approximate local o200k_base count; file sections are counted independently.';
 
   return (
     <main className="app-shell">
@@ -442,7 +922,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
 
       {fixtureMode && <div className="fixture-banner" role="note"><span>Browser fixture mode</span><span>Sample responses · no files are read</span></div>}
 
-      <section className={`workbench${workspace ? ' has-workspace' : ''}${workspace && !sidebarCollapsed ? ' has-sidebar' : ''}${workspace && sidebarCollapsed ? ' sidebar-collapsed' : ''}${previewCollapsed ? ' preview-collapsed' : ''}`} style={workspace ? { '--preview-width': `${previewWidth}%` } as CSSProperties : undefined} aria-label="Project files and preview">
+        <section className={`workbench${workspace ? ' has-workspace' : ''}${workspace && !sidebarCollapsed ? ' has-sidebar' : ''}${workspace && sidebarCollapsed ? ' sidebar-collapsed' : ''}${previewCollapsed ? ' preview-collapsed' : ''}`} data-workspace-generation={workspace?.generation} style={workspace ? { '--preview-width': `${previewWidth}%` } as CSSProperties : undefined} aria-label="Project files and preview">
         {workspace && <WorkspaceSidebar
           collapsed={sidebarCollapsed}
           view={fileView}
@@ -476,7 +956,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
           onSubmit={submitPolicy}
         />}</WorkspaceSidebar>}
         <section className="panel file-panel" aria-label="Project files">
-          <div className="panel-heading"><div><h2>{settingsOpen ? 'Settings' : fileView === 'selected' ? 'Selected files' : fileView === 'ignored' ? 'Git-ignored files' : 'Project files'}</h2><p>{workspace ? indexLoading ? `${workspace.entries.length} of ${workspace.entryCount} items loaded` : `${workspace.entryCount} items discovered` : 'Open a folder to get started'}</p></div><div className="scan-statuses">{workspace && !settingsOpen && <><span className="refresh-badge" title="Automatic file watching is not available yet. Refresh after changing files.">↻ Manual refresh</span></>}{workspace?.incomplete && <span className="scan-badge"><span className="scan-dot" /> Partial scan</span>}</div></div>
+          <div className="panel-heading"><div><h2>{settingsOpen ? 'Settings' : fileView === 'selected' ? 'Selected files' : fileView === 'ignored' ? 'Git-ignored files' : 'Project files'}</h2><p>{workspace ? indexLoading ? `${workspace.entries.length} of ${workspace.entryCount} items loaded` : `${workspace.entryCount} items discovered` : 'Open a folder to get started'}</p></div><div className="scan-statuses">{workspace && !settingsOpen && <><span className="refresh-badge" title={busy === 'refresh' ? 'Revalidating workspace files.' : watchStatusUnavailable || watchListenerUnavailable ? 'Watcher status or notifications could not be verified. Refresh before continuing.' : watchHealth?.root === workspace.root ? watchHealth.message ?? (watchHealth.state === 'watching' ? 'Watching workspace files.' : watchHealth.state === 'stale' ? 'Files changed. Refresh to update the workspace.' : 'Watcher unavailable. Refresh manually to update the workspace.') : 'Automatic file watching is unavailable in this browser fixture. Refresh after changing files.'}>{busy === 'refresh' ? 'Updating' : watchStatusUnavailable || watchListenerUnavailable ? 'Status unavailable' : watchHealth?.root === workspace.root ? watchHealth.state === 'watching' ? 'Watching' : watchHealth.state === 'stale' ? 'Files changed' : 'Watcher unavailable' : 'Manual refresh'}</span></>}{workspace?.incomplete && <span className="scan-badge"><span className="scan-dot" /> Partial scan</span>}</div></div>
           {workspace ? settingsOpen ? <section className="settings-content" aria-label="Settings">
             <div className="settings-icon" aria-hidden="true">⚙</div>
             <h3>Local workspace settings</h3>
@@ -527,22 +1007,50 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
 
       <div className="bottom-dock">
         <div className="dock-notices">
-          <div className="live-region" aria-live="polite" role="status">{status || (busy ? `${busy === 'preview' ? 'Loading preview' : 'Working'}…` : '')}</div>
+          <div className="live-region" aria-live="polite" role="status">{status || (busy === 'refresh' ? 'Updating workspace…' : workspaceStale ? watchHealth?.message ?? (watchHealth?.state === 'unavailable' ? 'Watcher unavailable. Refresh before continuing.' : 'Files changed. Refresh before continuing.') : watchHealth?.root === workspace?.root && watchHealth?.state === 'watching' ? 'Watching workspace files.' : '') || (busy ? `${busy === 'preview' ? 'Loading preview' : 'Working'}…` : '')}</div>
           {error && <div className="error-toast" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
         </div>
         <footer className="export-bar">
           <div className="footer-metrics" role="group" aria-label="Selection estimates">
             <div className="metric metric-primary"><span className="metric-icon" aria-hidden="true">✳</span><span><strong>{workspace ? workspace.selectedCount : '—'}</strong><small>Selected files</small></span></div>
             <div className="metric"><span className="metric-icon" aria-hidden="true">↗</span><span><strong>{workspace ? `≈ ${formatBytes(workspace.estimatedBytes)}` : '—'}</strong><small>Estimated export size</small></span></div>
-            <div className="metric token-metric"><span className="metric-icon" aria-hidden="true">▤</span><span><strong>Unavailable</strong><small>Token estimate</small></span><span className="info-tip" title="A local tokenizer is not available yet." aria-label="A local tokenizer is not available yet">i</span></div>
+            <div className="metric token-metric" aria-live="polite" aria-atomic="true"><span className="metric-icon" aria-hidden="true">▤</span><span><strong>{tokenEstimateLabel}</strong><small>{tokenEstimateDetail}</small></span><button className="info-tip" type="button" title={tokenEstimateTitle} aria-label={tokenEstimateTitle}>i</button></div>
           </div>
           <div className="export-actions">
-            {['restore', 'open', 'refresh', 'browse', 'export', 'copy'].includes(busy ?? '') && <button className="button button-secondary cancel-button" onClick={cancelOperation} disabled={cancelling}>{cancelling ? 'Cancelling…' : 'Cancel operation'}</button>}
-            <button className="button button-secondary" onClick={() => exportContent(true)} disabled={!workspace || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}><span aria-hidden="true">▢</span> Copy context</button>
-            <button className="button button-primary export-button" onClick={() => exportContent(false)} disabled={!workspace || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}>{busy === 'export' ? 'Preparing…' : 'Export Markdown'} <span aria-hidden="true">→</span></button>
+            {['restore', 'open', 'refresh', 'browse', 'export', 'copy'].includes(busy ?? '') && <button ref={cancelOperationButtonRef} className="button button-secondary cancel-button" onClick={cancelOperation} disabled={cancelling}>{cancelling ? 'Cancelling…' : 'Cancel operation'}</button>}
+            <button className="button button-secondary" onClick={() => exportContent(true)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}><span aria-hidden="true">▢</span> Copy context</button>
+            <button className="button button-primary export-button" onClick={() => exportContent(false)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}>{busy === 'export' ? 'Preparing…' : 'Export Markdown'} <span aria-hidden="true">→</span></button>
           </div>
         </footer>
       </div>
+
+      {sensitivePrompt && <div className="sensitive-backdrop">
+        <div
+          className="sensitive-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="sensitive-dialog-title"
+          aria-describedby="sensitive-dialog-description"
+          ref={sensitiveDialogRef}
+          onKeyDown={handleSensitiveDialogKeyDown}
+        >
+          <span className="sensitive-dialog-icon" aria-hidden="true">!</span>
+          <h2 id="sensitive-dialog-title">Potentially sensitive files</h2>
+          <p id="sensitive-dialog-description">{sensitivePrompt.summary.total} selected files have names commonly used for sensitive material.</p>
+          <ul className="sensitive-warning-list">
+            {sensitivePrompt.summary.warnings.map((warning) => <li key={`${warning.path}:${warning.category}`}>
+              <code>{warning.path}</code>
+              <span>{warning.category === 'environmentFile' ? 'Environment file' : warning.category === 'pemMaterial' ? 'PEM material' : warning.category === 'privateKey' ? 'Private key' : 'Credential file'}</span>
+            </li>)}
+          </ul>
+          {sensitivePrompt.summary.omitted > 0 && <p className="sensitive-omission">{sensitivePrompt.summary.omitted} more flagged files will also be included.</p>}
+          <p className="sensitive-disclaimer">Warnings use filenames only. File contents are not scanned, and names do not prove a file contains a secret.</p>
+          <div className="sensitive-dialog-actions">
+            <button ref={sensitiveCancelRef} className="button button-secondary" onClick={() => closeSensitivePrompt(true)}>{sensitivePrompt.kind === 'copy' ? 'Cancel Copy' : 'Cancel Export'}</button>
+            <button ref={sensitiveConfirmRef} className="button button-primary" onClick={confirmSensitiveOutput}>{sensitivePrompt.kind === 'copy' ? 'Confirm Copy' : 'Confirm Export'}</button>
+          </div>
+        </div>
+      </div>}
     </main>
   );
 }

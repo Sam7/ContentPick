@@ -37,4 +37,9 @@ impl WorkspaceRoot {
         }
         Ok(())
     }
+
+    /// Compares pinned physical root identity without reopening either path.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.identity.as_ref() == other.identity.as_ref()
+    }
 }

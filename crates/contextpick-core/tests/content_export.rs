@@ -1,4 +1,6 @@
-use contextpick_core::{ManifestEntry, WorkspaceRoot, content, export, modified_ns};
+use contextpick_core::{
+    ManifestEntry, WorkspaceRoot, content, destination::Destination, export, modified_ns,
+};
 use std::fs;
 use std::sync::atomic::AtomicBool;
 use tempfile::tempdir;
@@ -268,6 +270,55 @@ fn export_rejects_changed_deleted_invalid_duplicate_empty_and_source_destination
         .is_err()
     );
     assert!(!destination.exists());
+}
+
+#[test]
+fn export_rejects_a_source_changed_after_freezing_the_manifest_without_publishing_partial_output() {
+    let tmp = tempdir().unwrap();
+    let root = WorkspaceRoot::open(tmp.path()).unwrap();
+    let source_path = tmp.path().join("file.txt");
+    fs::write(&source_path, b"manifest version").unwrap();
+    let manifest = [entry(tmp.path(), "file.txt")];
+    let destination_path = tmp.path().join("context.md");
+    let destination = Destination::prepare(&root, &destination_path, false).unwrap();
+
+    fs::write(&source_path, b"changed after the manifest was captured").unwrap();
+
+    let error = export::export_prepared(&root, &manifest, destination, &AtomicBool::new(false))
+        .expect_err("a changed frozen source must be rejected");
+    assert!(error.to_string().contains("file changed since manifest"));
+    assert!(
+        !destination_path.exists(),
+        "partial output must not be published"
+    );
+    let remaining = fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, [std::ffi::OsString::from("file.txt")]);
+    assert_eq!(
+        fs::read(&source_path).unwrap(),
+        b"changed after the manifest was captured"
+    );
+}
+
+#[test]
+fn export_rejects_a_deleted_frozen_source_without_publishing_or_leaving_temporary_files() {
+    let tmp = tempdir().unwrap();
+    let root = WorkspaceRoot::open(tmp.path()).unwrap();
+    let source_path = tmp.path().join("file.txt");
+    fs::write(&source_path, b"manifest version").unwrap();
+    let manifest = [entry(tmp.path(), "file.txt")];
+    let destination_path = tmp.path().join("context.md");
+    let destination = Destination::prepare(&root, &destination_path, false).unwrap();
+
+    fs::remove_file(&source_path).unwrap();
+
+    assert!(
+        export::export_prepared(&root, &manifest, destination, &AtomicBool::new(false)).is_err()
+    );
+    assert!(!destination_path.exists());
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
 }
 
 #[test]
