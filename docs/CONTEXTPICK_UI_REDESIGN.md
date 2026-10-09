@@ -8,7 +8,7 @@
 - [`docs/project/ROADMAP.md`](project/ROADMAP.md) is the single implementation checklist, with dependencies, acceptance criteria and verification for each slice.
 - This document supplies the approved visual and interaction details for UX-04, UX-05, BR-01 and the FL-02 extension-policy change. It does not add a second requirements matrix or override domain safety rules.
 - Approved desktop reference: [`docs/design/design-draft.png`](design/design-draft.png), 1536 × 1024.
-- Approved logo reference: [`docs/design/Logo.png`](design/Logo.png).
+- Current supplied logo source: [`docs/design/ContextPickLogo.svg`](design/ContextPickLogo.svg); the original approved raster reference remains [`docs/design/Logo.png`](design/Logo.png).
 - Existing native baseline: `docs/testing/2026-10-08-current-ui.jpg` (local ignored artifact: `docs/testing/2026-10-08-current-ui.jpg`), 1200 × 800.
 
 ## Audited baseline before M3.5
@@ -67,10 +67,10 @@ Native title bar
 
 ## Brand artwork contract
 
-- Reconstruct the approved folder/C/checkmark mark as genuine, editable SVG paths/shapes. Preserve its teal/green geometry, rounded folder, generous white negative space and visible tick. Do not embed a raster image in SVG or trace the raster into a lumpy contour.
-- Provide an icon-only mark and horizontal ContextPick lockup from one maintained vector source. Generate the existing Tauri/Windows/macOS icon assets from that source; do not maintain hand-edited duplicate marks.
-- Check 16, 24, 32, 48, 64 and 128 px renderings on light and dark backgrounds. Use a simplified small-size variant only if it preserves the same recognizable mark. Review the header, title-bar/taskbar and installer assets together against `docs/design/Logo.png`.
-- Use a documented, permissively licensed font or paths for the wordmark. Do not redistribute proprietary font files.
+- Use the supplied `docs/design/ContextPickLogo.svg` as the current editable vector artwork for the toolbar lockup and derive application icon artwork from its icon group. Do not redraw or maintain a competing active mark.
+- Generate the existing Tauri/Windows/macOS icon assets from that source; do not maintain hand-edited duplicate marks. Preserve the former `contextpick-brand.svg` source as inactive historical artwork with its existing font attribution.
+- Check 16, 24, 32, 48, 64 and 128 px renderings on light and dark backgrounds. Use a simplified small-size variant only if it preserves the same recognizable mark. Review the header, title-bar/taskbar and installer assets together against the supplied vector and original `docs/design/Logo.png` reference.
+- Do not embed raster imagery or font software in the supplied vector artwork.
 
 ## Safe removal of persisted Exclude Extensions
 

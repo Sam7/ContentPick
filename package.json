@@ -21,6 +21,7 @@
     "test:native:scale": "playwright test --config playwright.native.scale.config.ts"
   },
   "dependencies": {
+    "@tabler/icons-react": "^3.49.0",
     "@tanstack/react-virtual": "^3.14.13",
     "@tauri-apps/api": "^2.12.1",
     "react": "^19.3.0",

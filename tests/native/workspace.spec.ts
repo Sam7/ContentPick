@@ -92,6 +92,9 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await page.getByRole('checkbox', { name: 'Select README.md' }).click();
   await expect(selected).toHaveText('601');
   await page.getByRole('button', { name: 'Filters' }).click();
+  await native.resizeWindow(1536, 1024);
+  await expect(page.getByRole('form', { name: 'Filter settings' })).toBeVisible();
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filters.png') });
   const gitignore = page.getByRole('checkbox', { name: 'Respect .gitignore' });
   await gitignore.uncheck();
   await page.getByRole('button', { name: 'Apply filters' }).click();
@@ -108,7 +111,9 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await search.fill('generated.ts');
   const ignoredFile = page.getByRole('button', { name: 'Preview dist/deep/generated.ts' });
   await expect(ignoredFile).toBeVisible();
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-ignored-browsed.png') });
   await page.getByRole('button', { name: 'More actions for dist/deep/generated.ts' }).click();
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-row-actions.png') });
   await page.getByRole('button', { name: 'Force include' }).click();
   await expect(page.getByText('Override')).toBeVisible();
   await expect(selected).toHaveText('602');
@@ -144,6 +149,17 @@ test('native selection profiles load and persist across restart', async ({ nativ
   await expect(page.getByText('export const value599 = 599;')).toBeVisible();
 
   await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('.token-metric strong')).not.toHaveText('Calculating...', { timeout: 10_000 });
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-settings.png') });
+  await native.resizeWindow(720, 520);
+  await expect(page.locator('.export-bar')).toBeInViewport();
+  const settingsHeadingBounds = await page.locator('.file-panel .panel-heading > div:first-child').boundingBox();
+  const settingsBodyBounds = await page.locator('.settings-icon').boundingBox();
+  expect(settingsHeadingBounds).not.toBeNull();
+  expect(settingsBodyBounds).not.toBeNull();
+  expect(Math.abs(settingsHeadingBounds!.x - settingsBodyBounds!.x)).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-settings-720x520.png') });
+  await native.resizeWindow(1536, 1024);
   await page.getByRole('textbox', { name: 'New profile name' }).fill('Baseline');
   await page.getByRole('button', { name: 'Save as profile' }).click();
   await expect(page.locator('.profile-active strong')).toHaveText('Baseline');
@@ -595,16 +611,16 @@ test('native startup migrates version-1 extension exclusions into visible path r
   await expect(filters).toBeVisible();
   expect(await filters.evaluate((form) => form.closest('aside') !== null)).toBe(true);
   await expect(page.getByRole('heading', { name: 'Project files' })).toBeVisible();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-4-native-filters.png') });
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-migrated.png') });
   await page.setViewportSize({ width: 720, height: 520 });
   await expect(filters).toBeVisible();
   await expect(page.locator('.export-bar')).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-4-native-filters-720x520.png') });
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-720x520.png') });
   const apply = filters.getByRole('button', { name: 'Apply filters' });
   await apply.scrollIntoViewIfNeeded();
   await expect(apply).toBeInViewport();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-4-native-filters-720x520-scrolled.png') });
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-720x520-scrolled.png') });
 
   const settings = await native.readSettings();
   expect(settings.version).toBe(3);
@@ -623,12 +639,12 @@ test('native sidebar projections remain truthful and usable at standard and mini
 
   await page.setViewportSize({ width: 1536, height: 1024 });
   await expect(selectedCount).toHaveText('602');
-  await screenshot('2026-10-09-m35-3-native-sidebar-all-open.png');
+  await screenshot('2026-10-10-design-review-workspace-all.png');
 
   await views.getByRole('button', { name: 'Selected' }).click();
   await expect(selectedCount).toHaveText('602');
   await page.getByRole('button', { name: 'Expand src', exact: true }).click();
-  await screenshot('2026-10-09-m35-3-native-sidebar-selected.png');
+  await screenshot('2026-10-10-design-review-selected.png');
   const search = page.getByRole('textbox', { name: 'Search files' });
   await search.fill('main.rs');
   await expect(page.getByRole('button', { name: 'Preview src/main.rs' })).toBeVisible();
@@ -638,22 +654,138 @@ test('native sidebar projections remain truthful and usable at standard and mini
   await expect(page.getByRole('button', { name: 'Browse ignored files' })).toBeVisible();
   await expect(views).toContainText('1 folders not browsed');
   await expect(selectedCount).toHaveText('602');
-  await screenshot('2026-10-09-m35-3-native-sidebar-ignored-open.png');
+  await screenshot('2026-10-10-design-review-ignored.png');
 
   const collapse = page.getByRole('button', { name: 'Collapse sidebar' });
   await collapse.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('button', { name: 'Expand sidebar' })).toBeFocused();
-  await screenshot('2026-10-09-m35-3-native-sidebar-ignored-collapsed.png');
+  await screenshot('2026-10-10-design-review-sidebar-collapsed.png');
 
   await page.setViewportSize({ width: 720, height: 520 });
   await expect(page.locator('.export-bar')).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
-  await screenshot('2026-10-09-m35-3-native-sidebar-minimum-collapsed.png');
+  await screenshot('2026-10-10-design-review-sidebar-collapsed-720x520.png');
   await page.getByRole('button', { name: 'Expand sidebar' }).click();
   await expect(page.getByRole('button', { name: 'Collapse sidebar' })).toBeVisible();
-  await screenshot('2026-10-09-m35-3-native-sidebar-minimum-open.png');
+  await screenshot('2026-10-10-design-review-sidebar-open-720x520.png');
   await expect(selectedCount).toHaveText('602');
+});
+
+test('native workspace layout adapts when the app window is resized', async ({ native }) => {
+  const { page } = native;
+  const search = page.getByRole('textbox', { name: 'Search files' });
+  await search.fill('file-0599.ts');
+  const file = page.getByRole('button', { name: 'Preview src/file-0599.ts' });
+  await expect(file).toBeVisible();
+  await file.click();
+  await expect(page.getByText('export const value599 = 599;')).toBeVisible();
+  await search.clear();
+  await expect(page.locator('.workspace-actions .ui-icon')).toHaveCount(2);
+  await expect(page.locator('.sidebar-icon .ui-icon')).toHaveCount(5);
+  await expect(page.locator('.file-glyph .ui-icon').first()).toBeVisible();
+
+  for (const { width, height } of [
+    { width: 1536, height: 1024 },
+    { width: 1200, height: 800 },
+    { width: 960, height: 640 },
+    { width: 720, height: 520 },
+  ]) {
+    await native.resizeWindow(width, height);
+    await expect.poll(() => page.evaluate((targetWidth) => Math.abs(window.innerWidth - targetWidth), width)).toBeLessThan(60);
+    const layout = await page.evaluate(() => {
+      const rect = (selector: string) => {
+        const element = document.querySelector(selector);
+        if (!element) throw new Error(`Missing layout element: ${selector}`);
+        const { left, right, top, bottom, width, height } = element.getBoundingClientRect();
+        return { left, right, top, bottom, width, height };
+      };
+      const style = (selector: string) => {
+        const element = document.querySelector(selector);
+        if (!element) throw new Error(`Missing styled element: ${selector}`);
+        return getComputedStyle(element);
+      };
+      const estimateValue = document.querySelector('.metric:nth-child(2) strong');
+      if (!estimateValue) throw new Error('Missing estimated export size.');
+      const sidebarElement = document.querySelector('.workspace-sidebar');
+      const handleElement = document.querySelector('.preview-splitter');
+      if (!sidebarElement || !handleElement) throw new Error('Missing sidebar or preview splitter.');
+      const estimateValueStyle = getComputedStyle(estimateValue);
+      const estimateValueLines = estimateValue.getBoundingClientRect().height / Number.parseFloat(estimateValueStyle.lineHeight);
+      const distName = Array.from(document.querySelectorAll('.entry-name')).find((element) => element.textContent === 'dist');
+      if (!distName) throw new Error('Missing visible ignored-folder name.');
+      const gitignoreName = Array.from(document.querySelectorAll('.entry-name')).find((element) => element.textContent === '.gitignore');
+      if (!gitignoreName) throw new Error('Missing visible gitignore filename.');
+      return {
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        documentWidth: document.documentElement.scrollWidth,
+        documentHeight: document.documentElement.scrollHeight,
+        shell: rect('.app-shell'),
+        logo: rect('.brand-lockup'),
+        fileHeadingContent: rect('.file-panel .panel-heading > div:first-child'),
+        fileSearch: rect('.search-box'),
+        sidebar: rect('.workspace-sidebar'),
+        sidebarOverflow: sidebarElement.scrollHeight - sidebarElement.clientHeight,
+        workbench: rect('.workbench'),
+        tree: rect('.file-panel'),
+        treeHeading: rect('.file-panel .panel-heading'),
+        preview: rect('.preview-panel'),
+        previewTitle: rect('.preview-title'),
+        previewCard: rect('.code-preview'),
+        splitter: rect('.preview-splitter'),
+        splitterGripWidth: Number.parseFloat(getComputedStyle(handleElement, '::before').width),
+        footer: rect('.export-bar'),
+        metrics: rect('.footer-metrics'),
+        actions: rect('.export-actions'),
+        estimateValueLines,
+        distNameClipped: distName.scrollWidth > distName.clientWidth,
+        gitignoreNameClipped: gitignoreName.scrollWidth > gitignoreName.clientWidth,
+        browseButton: rect('.browse-ignored'),
+        browseIcon: rect('.browse-ignored .ui-icon'),
+        browseLabelVisible: style('.browse-ignored-label').display !== 'none',
+        browseAccessibleName: document.querySelector('.browse-ignored')?.getAttribute('aria-label'),
+        shellRadius: style('.panel').borderRadius,
+        sidebarRadius: style('.workspace-sidebar').borderRadius,
+        footerRadius: style('.export-bar').borderRadius,
+      };
+    });
+
+    expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth);
+    expect(layout.documentHeight).toBeLessThanOrEqual(layout.viewportHeight);
+    expect(Math.abs(layout.logo.left - layout.sidebar.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(layout.fileHeadingContent.left - layout.fileSearch.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(layout.previewTitle.left - layout.previewCard.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(layout.footer.left - layout.sidebar.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(layout.footer.right - layout.preview.right)).toBeLessThanOrEqual(1);
+    expect(layout.workbench.bottom).toBeLessThanOrEqual(layout.footer.top);
+    expect(layout.metrics.right).toBeLessThanOrEqual(layout.actions.left);
+    expect(layout.metrics.left).toBeGreaterThanOrEqual(layout.footer.left);
+    expect(layout.actions.right).toBeLessThanOrEqual(layout.footer.right);
+    expect(layout.estimateValueLines).toBeLessThanOrEqual(1.1);
+    expect(layout.distNameClipped).toBe(false);
+    if (width <= 760) expect(layout.gitignoreNameClipped).toBe(false);
+    expect(layout.browseButton.height).toBeLessThanOrEqual(34);
+    expect(Math.abs((layout.browseIcon.top + layout.browseIcon.bottom) / 2 - (layout.browseButton.top + layout.browseButton.bottom) / 2)).toBeLessThanOrEqual(1);
+    expect(layout.browseAccessibleName).toBe('Browse ignored files');
+    if (width <= 840) expect(layout.browseLabelVisible).toBe(false);
+    expect(layout.sidebar.width).toBeGreaterThanOrEqual(145);
+    expect(layout.sidebarOverflow).toBeLessThanOrEqual(1);
+    if (width <= 840) expect(layout.treeHeading.height).toBeLessThanOrEqual(62);
+    expect(layout.splitter.width).toBeGreaterThanOrEqual(14);
+    expect(layout.splitterGripWidth).toBeGreaterThanOrEqual(3);
+    expect(Number.parseFloat(layout.shellRadius)).toBeLessThanOrEqual(4);
+    expect(Number.parseFloat(layout.sidebarRadius)).toBeLessThanOrEqual(4);
+    expect(Number.parseFloat(layout.footerRadius)).toBeLessThanOrEqual(4);
+    expect(layout.tree.width).toBeGreaterThan(200);
+    expect(layout.preview.width).toBeGreaterThan(150);
+    expect(layout.footer.left).toBeGreaterThanOrEqual(0);
+    expect(layout.footer.right).toBeLessThanOrEqual(layout.viewportWidth + 1);
+    expect(layout.footer.bottom).toBeLessThanOrEqual(layout.viewportHeight + 1);
+    await expect(page.locator('.live-region')).toBeEmpty();
+    await expect(page.locator('.refresh-badge')).toHaveText('Watching');
+    await page.screenshot({ path: path.resolve(import.meta.dirname, `../../docs/testing/2026-10-10-window-resize-${width}x${height}.png`) });
+  }
 });
 
 test('native preview collapses accessibly and restores long-path content without changing selection', async ({ native }) => {
@@ -807,7 +939,7 @@ test('native preview collapses accessibly and restores long-path content without
   await expect(expand).toBeFocused();
   await expect(page.getByRole('tree', { name: 'Workspace files' })).toBeVisible();
   await expect(page.locator('.metric-primary strong')).toHaveText('603');
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-collapsed.png') });
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-preview-collapsed.png') });
 
   await page.setViewportSize({ width: 720, height: 520 });
   await expect(page.locator('.export-bar')).toBeInViewport();
@@ -835,12 +967,12 @@ test('native preview collapses accessibly and restores long-path content without
   await assertNativeCollapsedPreviewIsReachable();
   await page.getByRole('button', { name: 'Collapse sidebar' }).click();
   await assertNativeCollapsedPreviewIsReachable();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-collapsed-720x520-sidebar-collapsed.png') });
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-preview-sidebar-collapsed-720x520.png') });
   await page.getByRole('button', { name: 'Expand sidebar' }).click();
   await expect(page.getByRole('button', { name: 'Expand preview' })).toBeVisible();
   await expect(page.getByRole('separator', { name: 'File preview' })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-collapsed-720x520.png') });
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-preview-collapsed-720x520.png') });
 
   await page.getByRole('button', { name: 'Expand preview' }).focus();
   await page.keyboard.press('Enter');
@@ -851,7 +983,7 @@ test('native preview collapses accessibly and restores long-path content without
   await expect(page.getByText('export const longPath = true;')).toBeVisible();
   expect(await page.locator('.preview-panel').evaluate((panel) => panel.scrollWidth <= panel.clientWidth)).toBe(true);
   await expect(page.locator('.metric-primary strong')).toHaveText('603');
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-720x520.png') });
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-preview-open-720x520.png') });
 });
 
 test('native watcher reconciles a deleted source before allowing copy again', async ({ native }) => {

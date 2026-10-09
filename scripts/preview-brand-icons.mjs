@@ -9,7 +9,7 @@ import { createIconSvg } from './brand-assets.mjs';
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const tempPath = await mkdtemp(join(tmpdir(), 'contextpick-brand-preview-'));
 const tauriCliPath = join(repoRoot, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
-const brandSvg = await readFile(join(repoRoot, 'docs', 'design', 'contextpick-brand.svg'), 'utf8');
+const brandSvg = await readFile(join(repoRoot, 'docs', 'design', 'ContextPickLogo.svg'), 'utf8');
 const iconSource = join(tempPath, 'contextpick-icon.svg');
 const sizeOutput = join(tempPath, 'sizes');
 
@@ -49,7 +49,7 @@ try {
   try {
     const page = await browser.newPage({ viewport: { width: 1220, height: 760 }, deviceScaleFactor: 2 });
     await page.setContent(html, { waitUntil: 'load' });
-    await page.screenshot({ path: join(repoRoot, 'docs', 'testing', '2026-10-09-brand-assets.png'), fullPage: true });
+    await page.screenshot({ path: join(repoRoot, 'docs', 'testing', '2026-10-10-brand-assets.png'), fullPage: true });
   } finally {
     await browser.close();
   }

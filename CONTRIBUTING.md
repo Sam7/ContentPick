@@ -51,4 +51,4 @@ The installer and its hash are written under `target/release/bundle`. The standa
 - Do not publish releases, submit packages, sign/notarize artifacts or change repository settings as part of a contribution.
 - New runtime or development dependencies need a documented reason and a license/permission review. Do not infer full third-party license compliance solely from package metadata.
 
-The path-based wordmark in `docs/design/contextpick-brand.svg` contains outlined contours derived from Nunito Black. Its authorship and SIL Open Font License 1.1 attribution are recorded in [`docs/design/ATTRIBUTION.md`](docs/design/ATTRIBUTION.md); no font file is included.
+The product wordmark and app icon source are maintained in [`docs/design/ContextPickLogo.svg`](docs/design/ContextPickLogo.svg). Regenerate native platform icons with `corepack pnpm brand:icons`.

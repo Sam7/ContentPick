@@ -32,6 +32,12 @@ cleanup. The current candidate also passed installed Playwright UI smoke **1/1**
 with fresh app settings in the existing Windows profile and its existing
 WebView2. Independent clean-profile, missing-runtime/restricted-network, and
 upgrade checks remain open.
+
+The Windows x64 output from temporary CI run `37932843273` has a different
+SHA-256 (`5dbe4c973fbe9658cc0d42584ff0a8fafe501e6532169beae50875ae7a4c0b39`)
+from this locally tested installer. It is build evidence only and is not the
+installer currently referenced by the local WinGet and Chocolatey definitions.
+
 The WinGet and Chocolatey URLs point at
 the expected future GitHub Release asset path, but that release does not
 currently exist and the URL has not been downloaded or validated. Do not treat
@@ -40,10 +46,10 @@ these definitions as installable packages.
 The Homebrew file lives under a project tap because the official cask
 repository's current public-interest bar is not met. A project tap is opt-in
 and Homebrew treats third-party taps as unsupported code requiring user trust.
-The cask records the temporary CI candidate hashes for Apple Silicon
-(`b4be90b08eba9c6e8b26b808ab71c43a776943f4c2a9614750ccc661c3f39521`) and Intel
-(`38ba1bc6d0d58d5a8a9c1530ddca46f152ed5d01e455048d9a5bbb4aaa09ae58`) from
-run `37892810854`. The URLs remain provisional; before submission, publish the
+The cask records the temporary CI candidate hashes from run `37932843273` for
+Apple Silicon (`fcc8b7e4a9052af58eb2c02c9717af3b24cc6f7bc90839d8b697998650de9629`)
+and Intel (`2183e0956578ece5e3d5010f5a964cfe4377799c45f681af8e1b7c1b69279742`).
+The URLs remain provisional; before submission, publish the
 exact tested artifacts and confirm their public bytes still match. Homebrew
 audit and clean macOS installation/Gatekeeper checks remain open. Developer ID
 signing, notarization, and Gatekeeper acceptance remain release gates; do not

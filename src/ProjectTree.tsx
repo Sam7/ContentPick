@@ -1,8 +1,10 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
+import { IconBan, IconChevronDown, IconChevronRight, IconDotsVertical, IconFileText, IconFolder, IconFolderOpen } from '@tabler/icons-react';
 import type { Entry, SelectionIntent } from './bridge';
 import { formatBytes } from './format';
+import { UiIcon } from './UiIcon';
 
 type ProjectTreeProps = {
   entries: Entry[];
@@ -244,18 +246,18 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
     };
   }, [actionOpen, onAction]);
   return <><div className={`tree-row ${entry.selected ? 'is-selected' : ''} ${entry.reason ? 'is-muted' : ''}`} role="treeitem" tabIndex={tabStop ? 0 : -1} aria-keyshortcuts="Shift+F10" aria-level={entry.path.split('/').length} aria-posinset={posInSet} aria-setsize={setSize} aria-checked={entry.partial ? 'mixed' : entry.selected} aria-expanded={isDirectory && !needsBrowse ? displayedExpanded : undefined} onKeyDownCapture={onKeyDown} onFocusCapture={onFocus}>
-    {isDirectory && !needsBrowse ? <button className="disclosure" tabIndex={-1} aria-label={`${displayedExpanded ? 'Collapse' : 'Expand'} ${entry.path}`} onClick={onExpand} disabled={searchRevealed} title={searchRevealed ? 'Search is temporarily revealing matching descendants.' : undefined}>{displayedExpanded ? '⌄' : '›'}</button> : <span className="disclosure-spacer" />}
+    {isDirectory && !needsBrowse ? <button className="disclosure" tabIndex={-1} aria-label={`${displayedExpanded ? 'Collapse' : 'Expand'} ${entry.path}`} onClick={onExpand} disabled={searchRevealed} title={searchRevealed ? 'Search is temporarily revealing matching descendants.' : undefined}><UiIcon icon={displayedExpanded ? IconChevronDown : IconChevronRight} size={16} /></button> : <span className="disclosure-spacer" />}
     {checkbox}
     <button className="entry-main" tabIndex={-1} aria-label={entry.kind === 'file' ? `Preview ${entry.path}` : undefined} onClick={onPreview} disabled={entry.kind !== 'file' || previewDisabled}>
-      <span className={`file-glyph ${isDirectory ? 'folder-glyph' : entry.kind === 'blocked' ? 'blocked-glyph' : ''}`} aria-hidden="true">{isDirectory ? '▰' : entry.kind === 'blocked' ? '⊘' : '◇'}</span>
+      <span className={`file-glyph ${isDirectory ? 'folder-glyph' : entry.kind === 'blocked' ? 'blocked-glyph' : ''}`}><UiIcon icon={isDirectory ? IconFolder : entry.kind === 'blocked' ? IconBan : IconFileText} size={15} /></span>
       <span className="entry-name">{entry.path.split('/').at(-1)}</span>
       {entry.forceIncluded && <span className="override-pill">Override</span>}
       {entry.partial && <span className="partial-label">Partial</span>}
       {entry.reason && <span className="reason-label" title={entry.reason}>{entry.reason}</span>}
     </button>
-    {entry.kind === 'file' && <span className="entry-size">{formatBytes(entry.size)}</span>}
-    {needsBrowse && <button className="browse-ignored" tabIndex={-1} onClick={onBrowse} disabled={busy}>Browse ignored files</button>}
-    <div className="row-menu-wrap"><button ref={triggerRef} className="row-menu" tabIndex={-1} aria-label={`More actions for ${entry.path}`} aria-expanded={actionOpen} onClick={onAction}>•••</button>
+    {entry.kind === 'file' && <span className="entry-size" title={`${entry.size} bytes`}>{formatBytes(entry.size)}</span>}
+    {needsBrowse && <button className="browse-ignored" tabIndex={-1} aria-label="Browse ignored files" title="Browse ignored files" onClick={onBrowse} disabled={busy}><UiIcon icon={IconFolderOpen} size={15} /><span className="browse-ignored-label">Browse ignored files</span></button>}
+    <div className="row-menu-wrap"><button ref={triggerRef} className="row-menu" tabIndex={-1} aria-label={`More actions for ${entry.path}`} aria-expanded={actionOpen} onClick={onAction}><UiIcon icon={IconDotsVertical} size={17} /></button>
     </div>
   </div>{actionOpen && createPortal(<div ref={popoverRef} className="row-menu-popover" role="group" aria-label={`${entry.path} selection actions`} style={position ? { top: position.top, left: position.left } : { visibility: 'hidden' }}>
     <button onClick={() => applyIntent('forceInclude')} disabled={disabled}>Force include</button>

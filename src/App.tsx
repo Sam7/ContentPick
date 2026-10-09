@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent } from 'react';
+import { IconAlertTriangle, IconArrowRight, IconChevronLeft, IconChevronRight, IconCode, IconCopy, IconEye, IconFileExport, IconFileText, IconFolderOpen, IconHash, IconInfoCircle, IconPlus, IconSearch, IconSettings, IconX } from '@tabler/icons-react';
 import type { ContextPickBridge, Entry, ExportResult, FilterPolicy, Preview, ProfileCatalog, SelectionIntent, SensitiveWarningSummary, TokenEstimate, WatchHealth, WorkspacePage, WorkspaceView } from './bridge';
 import { ProjectTree } from './ProjectTree';
 import { WorkspaceToolbar } from './WorkspaceToolbar';
 import { WorkspaceSidebar } from './WorkspaceSidebar';
 import { WorkspaceFilters, type FilterDrafts } from './WorkspaceFilters';
 import { formatBytes } from './format';
+import { UiIcon } from './UiIcon';
 import { projectEntries, type WorkspaceFileView } from './workspaceViews';
 import './app.css';
 
@@ -1029,7 +1031,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
         <section className="panel file-panel" aria-label="Project files">
           <div className="panel-heading"><div><h2>{settingsOpen ? 'Settings' : fileView === 'selected' ? 'Selected files' : fileView === 'ignored' ? 'Git-ignored files' : 'Project files'}</h2><p>{workspace ? indexLoading ? `${workspace.entries.length} of ${workspace.entryCount} items loaded` : `${workspace.entryCount} items discovered` : 'Open a folder to get started'}</p></div><div className="scan-statuses">{workspace && !settingsOpen && <><span className="refresh-badge" title={busy === 'refresh' ? 'Revalidating workspace files.' : watchStatusUnavailable || watchListenerUnavailable ? 'Watcher status or notifications could not be verified. Refresh before continuing.' : watchHealth?.root === workspace.root ? watchHealth.message ?? (watchHealth.state === 'watching' ? 'Watching workspace files.' : watchHealth.state === 'stale' ? 'Files changed. Refresh to update the workspace.' : 'Watcher unavailable. Refresh manually to update the workspace.') : 'Automatic file watching is unavailable in this browser fixture. Refresh after changing files.'}>{busy === 'refresh' ? 'Updating' : watchStatusUnavailable || watchListenerUnavailable ? 'Status unavailable' : watchHealth?.root === workspace.root ? watchHealth.state === 'watching' ? 'Watching' : watchHealth.state === 'stale' ? 'Files changed' : 'Watcher unavailable' : 'Manual refresh'}</span></>}{workspace?.incomplete && <span className="scan-badge"><span className="scan-dot" /> Partial scan</span>}</div></div>
           {workspace ? settingsOpen ? <section className="settings-content" aria-label="Settings">
-            <div className="settings-icon" aria-hidden="true">⚙</div>
+            <div className="settings-icon"><UiIcon icon={IconSettings} /></div>
             <h3>Local workspace settings</h3>
             <p>Workspace path, filters, and file selection choices are saved locally on this device.</p>
             <section className="profile-settings" aria-labelledby="profile-settings-heading">
@@ -1072,12 +1074,12 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
               <button className="button button-secondary" onClick={resetSelections} disabled={busy !== null || workspaceStale || cancelling}>Reset selections</button>
             </div>
           </section> : <>
-            <label className="search-box"><span aria-hidden="true">⌕</span><span className="sr-only">Search files</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files and folders" /></label>
+            <label className="search-box"><UiIcon icon={IconSearch} size={17} /><span className="sr-only">Search files</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files and folders" /></label>
             <ProjectTree entries={visibleEntries} expanded={expanded} actionPath={actionPath} busy={busy !== null || workspaceStale} previewDisabled={workspaceStale || cancelling || (busy !== null && busy !== 'preview')} query={query}
               onExpand={toggleExpanded} onBrowse={browseIgnored} onPreview={previewFile} onIntent={setIntent} onAction={setActionPath} />
             <div className="tree-legend"><span><i className="legend-dot selected-dot" /> Included</span><span><i className="legend-dot muted-dot" /> Filtered</span><span><i className="legend-dot override-dot" /> Force included</span></div>
             {workspace.diagnostics.length > 0 && <ul className="diagnostics">{workspace.diagnostics.map((item) => <li key={item}>{item}</li>)}</ul>}
-          </> : <div className="file-empty"><div className="empty-illustration" aria-hidden="true"><span>⌘</span><i>＋</i></div><h3>Start with a local folder</h3><p>ContextPick reads your project on this device and keeps your source files untouched.</p><button className="button button-primary" onClick={openWorkspace} disabled={cancelling}>Choose a folder <span aria-hidden="true">→</span></button><small>Works offline · your code stays private</small></div>}
+          </> : <div className="file-empty"><div className="empty-illustration" aria-hidden="true"><UiIcon icon={IconFolderOpen} size={28} /><span className="empty-add"><UiIcon icon={IconPlus} size={13} /></span></div><h3>Start with a local folder</h3><p>ContextPick reads your project on this device and keeps your source files untouched.</p><button className="button button-primary" onClick={openWorkspace} disabled={cancelling}>Choose a folder <UiIcon icon={IconArrowRight} size={15} /></button><small>Works offline · your code stays private</small></div>}
         </section>
 
         {workspace && !previewCollapsed && <div
@@ -1103,29 +1105,29 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
             {!previewCollapsed && <div className="preview-title"><h2>Preview</h2><p className="preview-path" title={preview?.path}>{preview ? preview.path : 'Read-only file preview'}</p>{preview && <div className="preview-metadata" role="group" aria-label="Preview file details"><span className="preview-file-size">{previewSizeLabel}</span><span className={`preview-inclusion${previewEntry?.selected ? ' is-included' : ''}`}>{previewInclusionLabel}</span></div>}</div>}
             {previewCollapsed && <span className="preview-collapsed-label">Preview</span>}
             <div className="preview-heading-actions">
-              {!previewCollapsed && preview && <span className="readonly-badge"><span aria-hidden="true">◉</span> Read only</span>}
-              <button ref={previewToggleRef} className="preview-toggle" type="button" aria-label={previewCollapsed ? 'Expand preview' : 'Collapse preview'} aria-expanded={!previewCollapsed} onClick={() => setPreviewCollapsed((collapsed) => !collapsed)}><span aria-hidden="true">{previewCollapsed ? '‹' : '›'}</span></button>
+              {!previewCollapsed && preview && <span className="readonly-badge"><UiIcon icon={IconEye} size={14} /> Read only</span>}
+              <button ref={previewToggleRef} className="preview-toggle" type="button" aria-label={previewCollapsed ? 'Expand preview' : 'Collapse preview'} aria-expanded={!previewCollapsed} onClick={() => setPreviewCollapsed((collapsed) => !collapsed)}><UiIcon icon={previewCollapsed ? IconChevronLeft : IconChevronRight} /></button>
             </div>
           </div>
-          {!previewCollapsed && (preview ? <div className="code-preview"><div className="code-toolbar"><span><i className="code-dot" />{preview.path.split('.').pop()}</span><span>{preview.content.truncated ? 'Preview truncated' : 'UTF-8 text'}</span></div><pre><code>{preview.content.text}</code></pre>{preview.content.truncated && <div className="truncation-note">Preview is capped. Export includes the full eligible file.</div>}</div> : <div className="preview-empty"><div className="preview-placeholder" aria-hidden="true"><span>‹›</span><i /><i /><i /><i /><i /></div><h3>{workspace ? 'Select a text file to preview' : 'Your preview appears here'}</h3><p>{workspace ? 'Choose a file from the tree to inspect its contents.' : 'Open a folder, then select a file to see its contents before export.'}</p></div>)}
+          {!previewCollapsed && (preview ? <div className="code-preview"><div className="code-toolbar"><span><i className="code-dot" />{preview.path.split('.').pop()}</span><span>{preview.content.truncated ? 'Preview truncated' : 'UTF-8 text'}</span></div><pre><code>{preview.content.text}</code></pre>{preview.content.truncated && <div className="truncation-note">Preview is capped. Export includes the full eligible file.</div>}</div> : <div className="preview-empty"><div className="preview-placeholder" aria-hidden="true"><UiIcon icon={IconCode} size={27} /><i /><i /><i /><i /><i /></div><h3>{workspace ? 'Select a text file to preview' : 'Your preview appears here'}</h3><p>{workspace ? 'Choose a file from the tree to inspect its contents.' : 'Open a folder, then select a file to see its contents before export.'}</p></div>)}
         </section>
       </section>
 
       <div className="bottom-dock">
         <div className="dock-notices">
-          <div className="live-region" aria-live="polite" role="status">{status || (busy === 'refresh' ? 'Updating workspace…' : workspaceStale ? watchHealth?.message ?? (watchHealth?.state === 'unavailable' ? 'Watcher unavailable. Refresh before continuing.' : 'Files changed. Refresh before continuing.') : watchHealth?.root === workspace?.root && watchHealth?.state === 'watching' ? 'Watching workspace files.' : '') || (busy ? `${busy === 'preview' ? 'Loading preview' : 'Working'}…` : '')}</div>
-          {error && <div className="error-toast" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
+          <div className="live-region" aria-live="polite" role="status">{status || (busy === 'refresh' ? 'Updating workspace…' : workspaceStale ? watchHealth?.message ?? (watchHealth?.state === 'unavailable' ? 'Watcher unavailable. Refresh before continuing.' : 'Files changed. Refresh before continuing.') : '') || (busy ? `${busy === 'preview' ? 'Loading preview' : 'Working'}…` : '')}</div>
+          {error && <div className="error-toast" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><UiIcon icon={IconX} size={17} /></button></div>}
         </div>
         <footer className="export-bar">
           <div className="footer-metrics" role="group" aria-label="Selection estimates">
-            <div className="metric metric-primary"><span className="metric-icon" aria-hidden="true">✳</span><span><strong>{workspace ? workspace.selectedCount : '—'}</strong><small>Selected files</small></span></div>
-            <div className="metric"><span className="metric-icon" aria-hidden="true">↗</span><span><strong>{workspace ? `≈ ${formatBytes(workspace.estimatedBytes)}` : '—'}</strong><small>Estimated export size</small></span></div>
-            <div className="metric token-metric" aria-live="polite" aria-atomic="true"><span className="metric-icon" aria-hidden="true">▤</span><span><strong>{tokenEstimateLabel}</strong><small>{tokenEstimateDetail}</small></span><button className="info-tip" type="button" title={tokenEstimateTitle} aria-label={tokenEstimateTitle}>i</button></div>
+            <div className="metric metric-primary"><span className="metric-icon"><UiIcon icon={IconFileText} /></span><span><strong>{workspace ? workspace.selectedCount : '—'}</strong><small>Selected files</small></span></div>
+            <div className="metric"><span className="metric-icon"><UiIcon icon={IconFileExport} /></span><span><strong>{workspace ? `≈ ${formatBytes(workspace.estimatedBytes)}` : '—'}</strong><small>Estimated export size</small></span></div>
+            <div className="metric token-metric" aria-live="polite" aria-atomic="true"><span className="metric-icon"><UiIcon icon={IconHash} /></span><span><strong>{tokenEstimateLabel}</strong><small>{tokenEstimateDetail}</small></span><button className="info-tip" type="button" title={tokenEstimateTitle} aria-label={tokenEstimateTitle}><UiIcon icon={IconInfoCircle} size={16} /></button></div>
           </div>
           <div className="export-actions">
             {['restore', 'open', 'refresh', 'browse', 'export', 'copy'].includes(busy ?? '') && <button ref={cancelOperationButtonRef} className="button button-secondary cancel-button" onClick={cancelOperation} disabled={cancelling}>{cancelling ? 'Cancelling…' : 'Cancel operation'}</button>}
-            <button className="button button-secondary" onClick={() => exportContent(true)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}><span aria-hidden="true">▢</span> Copy context</button>
-            <button className="button button-primary export-button" onClick={() => exportContent(false)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}>{busy === 'export' ? 'Preparing…' : 'Export Markdown'} <span aria-hidden="true">→</span></button>
+            <button className="button button-secondary" onClick={() => exportContent(true)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}><UiIcon icon={IconCopy} size={16} /> Copy context</button>
+            <button className="button button-primary export-button" onClick={() => exportContent(false)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}>{busy === 'export' ? 'Preparing…' : 'Export Markdown'} <UiIcon icon={IconArrowRight} size={16} /></button>
           </div>
         </footer>
       </div>
@@ -1140,7 +1142,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
           ref={sensitiveDialogRef}
           onKeyDown={handleSensitiveDialogKeyDown}
         >
-          <span className="sensitive-dialog-icon" aria-hidden="true">!</span>
+          <span className="sensitive-dialog-icon"><UiIcon icon={IconAlertTriangle} size={19} /></span>
           <h2 id="sensitive-dialog-title">Potentially sensitive files</h2>
           <p id="sensitive-dialog-description">{sensitivePrompt.summary.total} selected files have names commonly used for sensitive material.</p>
           <ul className="sensitive-warning-list">

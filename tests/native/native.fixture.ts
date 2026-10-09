@@ -20,6 +20,7 @@ type NativeSession = {
   launch: () => Promise<Page>;
   deactivate: () => Promise<NativeWindowState>;
   activate: () => Promise<NativeWindowState>;
+  resizeWindow: (width: number, height: number) => Promise<void>;
   stop: () => Promise<void>;
   installLegacySettings: () => Promise<void>;
   readSettings: () => Promise<Record<string, unknown>>;
@@ -160,6 +161,53 @@ Start-Sleep -Milliseconds 100
     },
   });
   return JSON.parse(stdout.trim()) as NativeWindowState;
+}
+
+async function setNativeWindowSize(processId: number, executablePath: string, width: number, height: number): Promise<void> {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 720 || height < 520) {
+    throw new Error('Native test window size must meet the configured 720 × 520 minimum.');
+  }
+  const script = `
+$ErrorActionPreference = 'Stop'
+$process = Get-Process -Id ([int]$env:CONTEXTPICK_TEST_PROCESS_ID)
+$expectedPath = [System.IO.Path]::GetFullPath($env:CONTEXTPICK_TEST_EXECUTABLE)
+if ([System.IO.Path]::GetFullPath($process.Path) -ine $expectedPath) { throw 'Native test process path changed.' }
+$window = $process.MainWindowHandle
+if ($window -eq [IntPtr]::Zero) { throw 'Native test window handle is unavailable.' }
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class ContextPickTestResize {
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+}
+'@
+$flags = 0x0002 -bor 0x0004 -bor 0x0010
+if (-not [ContextPickTestResize]::SetWindowPos($window, [IntPtr]::Zero, 0, 0, [int]$env:CONTEXTPICK_TEST_WIDTH, [int]$env:CONTEXTPICK_TEST_HEIGHT, $flags)) {
+  throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+}
+Start-Sleep -Milliseconds 150
+$rect = [ContextPickTestResize+Rect]::new()
+if (-not [ContextPickTestResize]::GetWindowRect($window, [ref]$rect)) {
+  throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+}
+if (($rect.Right - $rect.Left) -lt [int]$env:CONTEXTPICK_TEST_WIDTH -or ($rect.Bottom - $rect.Top) -lt [int]$env:CONTEXTPICK_TEST_HEIGHT) {
+  throw 'Native test window was constrained below the requested dimensions.'
+}
+`;
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    timeout: 10_000,
+    env: {
+      ...process.env,
+      CONTEXTPICK_TEST_PROCESS_ID: String(processId),
+      CONTEXTPICK_TEST_EXECUTABLE: executablePath,
+      CONTEXTPICK_TEST_WIDTH: String(width),
+      CONTEXTPICK_TEST_HEIGHT: String(height),
+    },
+  });
 }
 
 async function stopTree(child: ChildProcess, observedProcesses: ObservedProcess[], expectedExecutablePath: string): Promise<void> {
@@ -379,7 +427,10 @@ export const test = base.extend<NativeFixtures>({
         await writeFile(path.join(settingsDir, 'settings.json'), JSON.stringify(legacy), 'utf8');
       };
       const readSettings = async () => JSON.parse(await readFile(path.join(settingsDir, 'settings.json'), 'utf8')) as Record<string, unknown>;
-      await runTest({ root, get page() { if (!page) throw new Error('Native page is not running.'); return page; }, get startupMs() { return startupMs; }, launch, deactivate: () => changeWindowActivation(false), activate: () => changeWindowActivation(true), stop, installLegacySettings, readSettings, memoryReport: memorySampler.report });
+      await runTest({ root, get page() { if (!page) throw new Error('Native page is not running.'); return page; }, get startupMs() { return startupMs; }, launch, deactivate: () => changeWindowActivation(false), activate: () => changeWindowActivation(true), resizeWindow: async (width, height) => {
+        if (!child?.pid) throw new Error('Native test process is not running.');
+        await setNativeWindowSize(child.pid, nativeExe, width, height);
+      }, stop, installLegacySettings, readSettings, memoryReport: memorySampler.report });
     } finally {
       let stopFailure: string | undefined;
       try {

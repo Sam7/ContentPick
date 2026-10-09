@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createIconSvg } from './brand-assets.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const brandPath = join(repoRoot, 'docs', 'design', 'contextpick-brand.svg');
+const brandPath = join(repoRoot, 'docs', 'design', 'ContextPickLogo.svg');
 const tauriCliPath = join(repoRoot, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
 const iconOutput = join(repoRoot, 'src-tauri', 'icons');
 const tempPath = await mkdtemp(join(tmpdir(), 'contextpick-brand-'));
@@ -14,7 +14,9 @@ const tempPath = await mkdtemp(join(tmpdir(), 'contextpick-brand-'));
 try {
   const brandSvg = await readFile(brandPath, 'utf8');
   const iconSource = join(tempPath, 'contextpick-icon.svg');
-  await writeFile(iconSource, createIconSvg(brandSvg), 'utf8');
+  const iconSvg = createIconSvg(brandSvg);
+  await writeFile(iconSource, iconSvg, 'utf8');
+  await writeFile(join(iconOutput, 'mark.svg'), iconSvg, 'utf8');
 
   const result = spawnSync(process.execPath, [tauriCliPath, 'icon', iconSource, '--output', iconOutput], {
     cwd: repoRoot,

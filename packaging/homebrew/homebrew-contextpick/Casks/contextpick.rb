@@ -1,10 +1,10 @@
 cask "contextpick" do
   version "0.1.0"
 
-  # Temporary unsigned candidates from CI run 37892810854. Confirm these
+  # Temporary unsigned candidates from CI run 37932843273. Confirm these
   # hashes against the exact public release assets before submission.
-  sha256 arm:   "b4be90b08eba9c6e8b26b808ab71c43a776943f4c2a9614750ccc661c3f39521",
-         intel: "38ba1bc6d0d58d5a8a9c1530ddca46f152ed5d01e455048d9a5bbb4aaa09ae58"
+  sha256 arm:   "fcc8b7e4a9052af58eb2c02c9717af3b24cc6f7bc90839d8b697998650de9629",
+         intel: "2183e0956578ece5e3d5010f5a964cfe4377799c45f681af8e1b7c1b69279742"
 
   on_arm do
     url "https://github.com/Sam7/ContentPick/releases/download/v0.1.0/ContextPick_0.1.0_aarch64.dmg"
