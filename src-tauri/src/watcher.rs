@@ -496,13 +496,6 @@ impl WorkspaceWatcher {
         let callback_root = root.to_path_buf();
         let mut watcher = notify::RecommendedWatcher::new(
             move |result: notify::Result<Event>| {
-                #[cfg(all(test, target_os = "macos"))]
-                if let Ok(event) = &result {
-                    eprintln!(
-                        "CONTEXT_PICK_WATCH root={callback_root:?} event={event:?} rescan={}",
-                        event.need_rescan()
-                    );
-                }
                 forward_result(
                     result,
                     &callback_root,
@@ -679,6 +672,69 @@ mod tests {
     fn event(kind: EventKind) -> notify::Result<Event> {
         Ok(Event::new(kind))
     }
+
+    // FSEvents may deliver queued pre-watch hints after registration. Establish a
+    // quiet baseline before asserting that subsequent reads do not invalidate.
+    #[cfg(target_os = "macos")]
+    fn drain_startup_hints(watcher: &WorkspaceWatcher) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "startup hints did not settle");
+            match watcher.recv_timeout(Duration::from_millis(500)) {
+                Ok(WatchSignal::RuntimeError(message)) => panic!("watcher failed: {message}"),
+                Ok(WatchSignal::Changed | WatchSignal::FullReconcile) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => return,
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("watcher stopped"),
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn drain_startup_hints(_: &WorkspaceWatcher) {}
+
+    // The live service publishes startup hints conservatively. Reconcile that
+    // backend startup burst before testing the new-root lifecycle itself.
+    #[cfg(target_os = "macos")]
+    fn reconcile_startup_hints(service: &WatchService, root: &Path, generation: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "startup hints did not settle");
+            let checkpoint = service.checkpoint(root).expect("active watcher checkpoint");
+            std::thread::sleep(Duration::from_millis(500));
+            let after_quiet = service.checkpoint(root).expect("active watcher checkpoint");
+            if after_quiet.invalidation_revision != checkpoint.invalidation_revision {
+                continue;
+            }
+
+            Workspace::scan(
+                root,
+                FilterPolicy::default(),
+                BTreeMap::new(),
+                BTreeSet::new(),
+                &AtomicBool::new(false),
+            )
+            .expect("startup reconciliation should succeed");
+            let Some(health) = service.revalidated(root, generation, Some(checkpoint)) else {
+                panic!("active watcher should remain available");
+            };
+            if health.state != WatchState::Watching {
+                continue;
+            }
+
+            std::thread::sleep(Duration::from_millis(500));
+            let settled = service.checkpoint(root).expect("active watcher checkpoint");
+            if settled.invalidation_revision == after_quiet.invalidation_revision
+                && service
+                    .status()
+                    .is_some_and(|current| current.state == WatchState::Watching)
+            {
+                return;
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn reconcile_startup_hints(_: &WatchService, _: &Path, _: u64) {}
 
     fn forward_result(
         result: notify::Result<Event>,
@@ -1337,12 +1393,14 @@ mod tests {
         let old_health = service.activate(&old_root, 1).unwrap();
         let new_health = service.activate(&new_root, 2).unwrap();
         assert!(new_health.epoch > old_health.epoch);
-        assert_eq!(service.status(), Some(new_health.clone()));
+        reconcile_startup_hints(&service, &new_root, 2);
+        let watching = service.status().unwrap();
+        assert_eq!(watching.state, WatchState::Watching);
         while events.try_recv().is_ok() {}
 
         fs::write(old_root.join("ignored.txt"), "old root").unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(service.status(), Some(new_health.clone()));
+        assert_eq!(service.status(), Some(watching.clone()));
         assert!(events.try_recv().is_err());
 
         fs::write(new_root.join("current.txt"), "new root").unwrap();
@@ -1417,10 +1475,11 @@ mod tests {
         let path = root.path().join("preview.txt");
         fs::write(&path, "preview content").unwrap();
         let watcher = WorkspaceWatcher::start(root.path()).expect("watcher startup should succeed");
+        drain_startup_hints(&watcher);
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "preview content");
         assert_eq!(
-            watcher.recv_timeout(Duration::from_millis(400)),
+            watcher.recv_timeout(Duration::from_millis(750)),
             Err(mpsc::RecvTimeoutError::Timeout),
             "read-only preview activity must not mark the workspace stale"
         );
@@ -1439,6 +1498,7 @@ mod tests {
         fs::write(root.path().join("src/main.ts"), "export const value = 1;\n").unwrap();
         fs::write(root.path().join("README.md"), "# Scan fixture\n").unwrap();
         let watcher = WorkspaceWatcher::start(root.path()).expect("watcher startup should succeed");
+        drain_startup_hints(&watcher);
 
         Workspace::scan(
             root.path(),
@@ -1449,7 +1509,7 @@ mod tests {
         )
         .expect("workspace scan should succeed");
         assert_eq!(
-            watcher.recv_timeout(Duration::from_millis(500)),
+            watcher.recv_timeout(Duration::from_millis(750)),
             Err(mpsc::RecvTimeoutError::Timeout),
             "enumerating and reading a workspace must not invalidate its own snapshot"
         );
