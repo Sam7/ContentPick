@@ -29,9 +29,26 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class ContextPickNativeDialog {
+  public static IntPtr FoundWindow;
+  public static uint FoundProcess;
+  public delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
   public delegate bool EnumChildProc(IntPtr window, IntPtr parameter);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint Type; public INPUT_UNION Data; }
+  [StructLayout(LayoutKind.Explicit)] public struct INPUT_UNION {
+    [FieldOffset(0)] public MOUSEINPUT Mouse;
+    [FieldOffset(0)] public KEYBDINPUT Keyboard;
+    [FieldOffset(0)] public HARDWAREINPUT Hardware;
+  }
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int Dx; public int Dy; public uint MouseData; public uint Flags; public uint Time; public IntPtr ExtraInfo; }
+  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort VirtualKey; public ushort ScanCode; public uint Flags; public uint Time; public IntPtr ExtraInfo; }
+  [StructLayout(LayoutKind.Sequential)] public struct HARDWAREINPUT { public uint Message; public ushort ParameterLow; public ushort ParameterHigh; }
+  [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
   [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc callback, IntPtr parameter);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 }
@@ -40,16 +57,58 @@ $expected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${title
 $send = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${sendBase64}'))
 $confirmation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${confirmBase64}'))
 $deadline = [DateTime]::UtcNow.AddSeconds(12)
+$fixturePrefix = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'contextpick-native-playwright-'))
+$dialog = [IntPtr]::Zero
+$dialogProcess = [uint32]0
 $actual = ''
 do {
-  $window = [ContextPickNativeDialog]::GetForegroundWindow()
-  $buffer = [Text.StringBuilder]::new(512)
-  [void][ContextPickNativeDialog]::GetWindowText($window, $buffer, $buffer.Capacity)
-  $actual = $buffer.ToString()
-  if ($actual.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -ge 0) { break }
+  $found = [ContextPickNativeDialog+EnumWindowsProc] {
+    param($window, $parameter)
+    $windowBuffer = [Text.StringBuilder]::new(512)
+    [void][ContextPickNativeDialog]::GetWindowText($window, $windowBuffer, $windowBuffer.Capacity)
+    if ($windowBuffer.ToString().IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $true }
+    $owner = [uint32]0
+    [void][ContextPickNativeDialog]::GetWindowThreadProcessId($window, [ref]$owner)
+    $process = Get-Process -Id $owner -ErrorAction SilentlyContinue
+    if ($process -and $process.ProcessName -ieq 'contextpick' -and [IO.Path]::GetFullPath($process.Path).StartsWith($fixturePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+      [ContextPickNativeDialog]::FoundWindow = $window
+      [ContextPickNativeDialog]::FoundProcess = $owner
+      return $false
+    }
+    return $true
+  }
+  [void][ContextPickNativeDialog]::EnumWindows($found, [IntPtr]::Zero)
+  $dialog = [ContextPickNativeDialog]::FoundWindow
+  $dialogProcess = [ContextPickNativeDialog]::FoundProcess
+  if ($dialog -ne [IntPtr]::Zero) { break }
   Start-Sleep -Milliseconds 100
 } while ([DateTime]::UtcNow -lt $deadline)
-if ($actual.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "Expected native dialog '$expected'; active window was '$actual'." }
+if ($dialog -eq [IntPtr]::Zero) { throw "Could not find app-owned native dialog '$expected'." }
+[void][ContextPickNativeDialog]::ShowWindowAsync($dialog, 9)
+$setResult = [ContextPickNativeDialog]::SetForegroundWindow($dialog)
+if ([ContextPickNativeDialog]::GetForegroundWindow() -ne $dialog) {
+  $inputs = [ContextPickNativeDialog+INPUT[]]::new(2)
+  $inputSize = [Runtime.InteropServices.Marshal]::SizeOf([type][ContextPickNativeDialog+INPUT])
+  $inputs[0].Type = 1; $inputs[0].Data.Keyboard.VirtualKey = 0x12
+  $inputs[1].Type = 1; $inputs[1].Data.Keyboard.VirtualKey = 0x12; $inputs[1].Data.Keyboard.Flags = 0x0002
+  $sent = [ContextPickNativeDialog]::SendInput(2, $inputs, $inputSize)
+  if ($sent -ne 2) {
+    $keyUp = [ContextPickNativeDialog+INPUT]::new()
+    $keyUp.Type = 1; $keyUp.Data.Keyboard.VirtualKey = 0x12; $keyUp.Data.Keyboard.Flags = 0x0002
+    [void][ContextPickNativeDialog]::SendInput(1, [ContextPickNativeDialog+INPUT[]]@($keyUp), $inputSize)
+    throw "SendInput accepted $sent of 2 Alt events; refusing to send dialog input."
+  }
+  $setResult = [ContextPickNativeDialog]::SetForegroundWindow($dialog)
+} else { $sent = 0 }
+Start-Sleep -Milliseconds 150
+$foreground = [ContextPickNativeDialog]::GetForegroundWindow()
+$foregroundPid = [uint32]0
+[void][ContextPickNativeDialog]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+$buffer = [Text.StringBuilder]::new(512)
+[void][ContextPickNativeDialog]::GetWindowText($foreground, $buffer, $buffer.Capacity)
+$actual = $buffer.ToString()
+if ($foreground -ne $dialog -or $foregroundPid -ne $dialogProcess -or $actual.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "Refusing to send keys: dialog HWND=$dialog PID=$dialogProcess; foreground HWND=$foreground PID=$foregroundPid title='$actual'; SetForegroundWindow=$setResult SendInput=$sent." }
+$window = $dialog
 if ($send.Length -gt 0) {
   [Windows.Forms.SendKeys]::SendWait('^a')
   [Windows.Forms.SendKeys]::SendWait($send)
