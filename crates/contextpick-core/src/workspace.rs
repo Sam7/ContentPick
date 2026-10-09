@@ -1810,7 +1810,9 @@ mod diagnostic_tests {
         assert!(diagnostics.iter().map(String::len).sum::<usize>() <= DIAGNOSTIC_BYTES_LIMIT);
     }
 
-    #[cfg(unix)]
+    // Linux permits arbitrary non-NUL filename bytes; the macOS CI filesystem
+    // rejects these malformed UTF-8 names with EILSEQ before the scan begins.
+    #[cfg(target_os = "linux")]
     #[test]
     fn invalid_utf8_directory_entries_consume_the_raw_entry_budget() {
         use std::os::unix::ffi::OsStringExt;

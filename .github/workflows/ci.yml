@@ -8,6 +8,17 @@ permissions:
   contents: read
 
 jobs:
+  linux-core-tests:
+    name: Core tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Rust core tests
+        run: cargo test -p contextpick-core --locked
+
   checks:
     name: Checks (${{ matrix.os }})
     strategy:
