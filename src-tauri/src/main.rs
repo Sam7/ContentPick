@@ -18,7 +18,7 @@ use serde::Serialize;
 #[cfg(debug_assertions)]
 use std::sync::Condvar;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -390,12 +390,25 @@ fn persist_workspace(state: &mut Session, workspace: &Workspace) -> CommandResul
     {
         let root = workspace.root.display().to_string();
         preferences.recent_root = Some(root.clone());
+        let (profiles, active_profile) = preferences.workspaces.get(&root).map_or_else(
+            || (BTreeMap::new(), None),
+            |saved| {
+                let active_profile = saved.active_profile.as_ref().filter(|name| {
+                    saved.profiles.get(name.as_str()).is_some_and(|profile| {
+                        profile.policy == workspace.policy && profile.intents == workspace.intents
+                    })
+                });
+                (saved.profiles.clone(), active_profile.cloned())
+            },
+        );
         preferences.workspaces.insert(
             root,
             SavedWorkspace {
                 policy: workspace.policy.clone(),
                 intents: workspace.intents.clone(),
                 generated_outputs: workspace.generated_outputs.clone(),
+                profiles,
+                active_profile,
             },
         );
     }
@@ -2687,6 +2700,101 @@ mod tests {
                 .contains("context.md")
         );
         assert!(!root.path().join("context.md").exists());
+    }
+
+    #[test]
+    fn publishing_workspace_changes_preserves_its_saved_profiles() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root_key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        let mut saved = SavedWorkspace::default();
+        saved.policy.include_extensions = vec![".md".into()];
+        saved.create_profile("Documentation").unwrap();
+        let mut preferences = Preferences::default();
+        preferences.workspaces.insert(root_key.clone(), saved);
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            preferences,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+
+        publish(&shared, fixture(root.path()), 1).unwrap();
+
+        let restored = Preferences::load(&config.path().join("settings.json")).unwrap();
+        assert_eq!(
+            restored.workspaces[&root_key].profiles["Documentation"]
+                .policy
+                .include_extensions,
+            [".md"]
+        );
+        assert!(restored.workspaces[&root_key].active_profile.is_none());
+    }
+
+    #[test]
+    fn publishing_workspace_changes_preserves_a_matching_active_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root_key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        let mut saved = SavedWorkspace::default();
+        saved.create_profile("Default selection").unwrap();
+        let mut preferences = Preferences::default();
+        preferences.workspaces.insert(root_key.clone(), saved);
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            preferences,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+
+        publish(&shared, fixture(root.path()), 1).unwrap();
+
+        let restored = Preferences::load(&config.path().join("settings.json")).unwrap();
+        assert_eq!(
+            restored.workspaces[&root_key].active_profile.as_deref(),
+            Some("Default selection")
+        );
+    }
+
+    #[test]
+    fn publishing_workspace_edits_clears_active_profile_but_preserves_its_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root_key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        let mut saved = SavedWorkspace::default();
+        saved.create_profile("Default selection").unwrap();
+        let mut preferences = Preferences::default();
+        preferences.workspaces.insert(root_key.clone(), saved);
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            preferences,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+
+        let mut edited = fixture(root.path());
+        edited.policy.include_extensions = vec![".md".into()];
+        publish(&shared, edited, 1).unwrap();
+
+        let restored = Preferences::load(&config.path().join("settings.json")).unwrap();
+        let saved = &restored.workspaces[&root_key];
+        assert!(saved.active_profile.is_none());
+        assert!(
+            saved.profiles["Default selection"]
+                .policy
+                .include_extensions
+                .is_empty()
+        );
+        assert_eq!(saved.policy.include_extensions, [".md"]);
     }
 
     #[test]

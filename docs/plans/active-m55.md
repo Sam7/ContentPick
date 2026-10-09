@@ -12,20 +12,20 @@ The execution checklist is [`ROADMAP.md`](../project/ROADMAP.md); product requir
 ## Verified locally
 
 - Frontend: `corepack pnpm test` — 77 Vitest + 3 brand checks; `typecheck`; `lint`; `test:e2e` — 16/16.
-- Rust: `cargo test --workspace --locked` — 185; `cargo fmt --all -- --check`; strict workspace Clippy.
+- Rust: `cargo test --workspace --locked` — 200 passed; `cargo fmt --all -- --check`; strict workspace Clippy. M5.1 profile persistence is locally verified; see the roadmap and review log.
 - Actual Windows WebView2 suite: rerun after the release-configuration changes, **13/13**. Installed-candidate smoke: 1/1 under a non-elevated standard user; notice files, app restore/preview, uninstall registration and cleanup checked.
 - Target dependency notices regenerate byte-for-byte with cargo-about 0.9.2 for Windows x64, macOS x64 and arm64. Independent Rust-license review found target graphs, notice text mapping and bundled resource selection consistent.
 - WinGet manifest validator passed on schema 1.12.0. Chocolatey install/uninstall scripts parse; nuspec XML parses; local installer SHA-256 matches candidate metadata. Independent package review found no candidate hash/version drift or automated publish path.
 
 ## Remaining M5.5 gates
 
-1. Verify the corrected Windows/macOS architecture CI bundle matrix; retain and inspect exact bundle artifacts and hashes. Run `37887028410` exposed a clean-checkout ordering defect on macOS arm64: `cargo test --workspace` compiled Tauri before the ignored generated notice resource existed. The workflow fix now prepares target notices before all Tauri-compiling Cargo steps. Windows x64 and macOS x64 were still running at last check; rerun the matrix after pushing the fix.
+1. Verify the corrected Windows/macOS architecture CI bundle matrix; retain and inspect exact bundle artifacts and hashes. Run `37887028410` exposed a clean-checkout ordering defect on macOS arm64; the workflow now prepares target notices before all Tauri-compiling Cargo steps. Follow-up run `37887405550` passed Ubuntu and all Windows x64 steps, including bundle/hash, but both macOS jobs failed the Rust notice comparison because embedded upstream license text differed only by CRLF/LF. A reviewed local fix applies `git diff --ignore-cr-at-eol` to Rust notices only; frontend notice comparison remains exact. Commit/push and rerun to verify.
 2. Obtain macOS x64/arm64 DMGs and complete clean supported-Mac install/Gatekeeper evidence; no DMG or local Mac GUI smoke exists.
 3. On independent clean Windows environments, verify absent-WebView2 bootstrap and restricted-network failure/recovery, silent install with progress, supported standard/elevated contexts, registration, upgrade and uninstall. Current Windows host already had WebView2; only the standard-user install/uninstall path is evidenced.
 4. Validate Chocolatey packaging and Homebrew cask with their actual tooling on supported clean hosts; test package-manager-initiated installation where tooling is available. Chocolatey/Ruby/Homebrew are unavailable on this Windows host. WinGet validates locally. Recheck final package IDs/schema immediately before later submission.
 5. Run `git diff --check`, review the integrated diff and update this record. Keep M5.5 unchecked until every M5.5 acceptance criterion has evidence.
 
-No packages may be submitted or public release published as part of this M5.5 candidate work. The user authorized a verified Windows GitHub Release in M5.6; package-manager submissions remain separately authorized. After the M5.5 gate passes, review/stage only that milestone scope and commit/push per the user’s standing instruction. Continue with M5.1/M5.2, M5.6 and the M5 review; do not stop at M5.5.
+No packages may be submitted or public release published as part of this M5.5 candidate work. The user authorized a verified Windows GitHub Release in M5.6; package-manager submissions remain separately authorized. After the M5.5 gate passes, review/stage only that milestone scope and commit/push per the user’s standing instruction. M5.1 is verified; M5.2 is now unblocked and can proceed independently of these remaining M5.5 checks. Continue to M5.6 and the M5 review; do not stop at M5.5.
 
 ## Known verification limit
 

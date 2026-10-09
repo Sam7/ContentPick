@@ -15,14 +15,135 @@ use std::{
 };
 
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_PROFILES_PER_WORKSPACE: usize = 20;
+pub const MAX_PROFILE_NAME_BYTES: usize = 80;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SavedWorkspace {
     pub policy: FilterPolicy,
     pub intents: BTreeMap<String, Intent>,
     #[serde(default)]
     pub generated_outputs: BTreeSet<String>,
+    #[serde(default)]
+    pub profiles: BTreeMap<String, SavedProfile>,
+    #[serde(default)]
+    pub active_profile: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SavedProfile {
+    pub policy: FilterPolicy,
+    pub intents: BTreeMap<String, Intent>,
+}
+
+impl SavedWorkspace {
+    /// Store a named snapshot of the current policy and manual path intents.
+    pub fn create_profile(&mut self, name: &str) -> Result<()> {
+        let name = normalize_profile_name(name)?;
+        if self.profiles.contains_key(&name) {
+            return Err(Error::Message(format!(
+                "a profile named {name:?} already exists"
+            )));
+        }
+        if self.profiles.len() >= MAX_PROFILES_PER_WORKSPACE {
+            return Err(Error::Message(format!(
+                "a workspace can contain at most {MAX_PROFILES_PER_WORKSPACE} profiles"
+            )));
+        }
+        let profile = self.snapshot_profile()?;
+        self.profiles.insert(name.clone(), profile);
+        self.active_profile = Some(name);
+        Ok(())
+    }
+
+    /// Replace an existing snapshot with the current policy and manual intents.
+    pub fn update_profile(&mut self, name: &str) -> Result<()> {
+        let name = normalize_profile_name(name)?;
+        if !self.profiles.contains_key(&name) {
+            return Err(Error::Message(format!("profile {name:?} does not exist")));
+        }
+        let profile = self.snapshot_profile()?;
+        self.profiles.insert(name.clone(), profile);
+        self.active_profile = Some(name);
+        Ok(())
+    }
+
+    /// Apply one profile's policy and manual intents to the current workspace.
+    pub fn activate_profile(&mut self, name: &str) -> Result<()> {
+        let name = normalize_profile_name(name)?;
+        let profile = self
+            .profiles
+            .get(&name)
+            .ok_or_else(|| Error::Message(format!("profile {name:?} does not exist")))?
+            .clone();
+        profile.policy.validate()?;
+        self.policy = profile.policy;
+        self.intents = profile.intents;
+        self.active_profile = Some(name);
+        Ok(())
+    }
+
+    pub fn rename_profile(&mut self, current_name: &str, new_name: &str) -> Result<()> {
+        let current_name = normalize_profile_name(current_name)?;
+        let new_name = normalize_profile_name(new_name)?;
+        if !self.profiles.contains_key(&current_name) {
+            return Err(Error::Message(format!(
+                "profile {current_name:?} does not exist"
+            )));
+        }
+        if current_name == new_name {
+            return Ok(());
+        }
+        if self.profiles.contains_key(&new_name) {
+            return Err(Error::Message(format!(
+                "a profile named {new_name:?} already exists"
+            )));
+        }
+        let is_active = self.active_profile.as_deref() == Some(current_name.as_str());
+        let profile = self
+            .profiles
+            .remove(&current_name)
+            .expect("profile existence was checked");
+        self.profiles.insert(new_name.clone(), profile);
+        if is_active {
+            self.active_profile = Some(new_name);
+        }
+        Ok(())
+    }
+
+    pub fn delete_profile(&mut self, name: &str) -> Result<()> {
+        let name = normalize_profile_name(name)?;
+        self.profiles
+            .remove(&name)
+            .ok_or_else(|| Error::Message(format!("profile {name:?} does not exist")))?;
+        if self.active_profile.as_deref() == Some(name.as_str()) {
+            self.active_profile = None;
+        }
+        Ok(())
+    }
+
+    fn snapshot_profile(&self) -> Result<SavedProfile> {
+        self.policy.validate()?;
+        Ok(SavedProfile {
+            policy: self.policy.clone(),
+            intents: self.intents.clone(),
+        })
+    }
+}
+
+fn normalize_profile_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Message("profile name cannot be empty".into()));
+    }
+    if name.len() > MAX_PROFILE_NAME_BYTES {
+        return Err(Error::Message(format!(
+            "profile name cannot exceed {MAX_PROFILE_NAME_BYTES} UTF-8 bytes"
+        )));
+    }
+    Ok(name.to_owned())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +162,24 @@ struct LegacyPreferencesV1 {
     recent_root: Option<String>,
     #[serde(default)]
     workspaces: BTreeMap<String, LegacySavedWorkspaceV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyPreferencesV2 {
+    version: u32,
+    #[serde(default)]
+    recent_root: Option<String>,
+    #[serde(default)]
+    workspaces: BTreeMap<String, LegacySavedWorkspaceV2>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+struct LegacySavedWorkspaceV2 {
+    policy: FilterPolicy,
+    intents: BTreeMap<String, Intent>,
+    generated_outputs: BTreeSet<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -77,7 +216,8 @@ impl Default for LegacyFilterPolicyV1 {
 enum ParsedPreferences {
     Current(Preferences),
     LegacyV1(LegacyPreferencesV1),
-    InvalidLegacyV1(String),
+    LegacyV2(LegacyPreferencesV2),
+    InvalidMigration { version: u32, error: String },
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +231,7 @@ pub struct PreferencesRecovery {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             recent_root: None,
             workspaces: BTreeMap::new(),
         }
@@ -104,7 +244,7 @@ impl Preferences {
             Ok(parsed) => parsed,
             Err(error) => return recover_unreadable(path, error),
         };
-        let preferences = match parsed {
+        let (source_version, migrated) = match parsed {
             ParsedPreferences::Current(preferences) => {
                 return PreferencesRecovery {
                     preferences,
@@ -112,18 +252,24 @@ impl Preferences {
                     saving_blocked: false,
                 };
             }
-            ParsedPreferences::LegacyV1(legacy) => match migrate_v1(legacy) {
-                Ok(preferences) => preferences,
-                Err(error) => return recover_failed_migration(path, error.to_string()),
-            },
-            ParsedPreferences::InvalidLegacyV1(error) => {
-                return recover_failed_migration(path, error);
+            ParsedPreferences::LegacyV1(legacy) => (1, migrate_v1(legacy).and_then(migrate_v2)),
+            ParsedPreferences::LegacyV2(legacy) => (2, migrate_v2(legacy)),
+            ParsedPreferences::InvalidMigration { version, error } => {
+                return recover_failed_migration(path, version, error);
             }
         };
+        let preferences = match migrated {
+            Ok(preferences) => preferences,
+            Err(error) => return recover_failed_migration(path, source_version, error.to_string()),
+        };
 
-        persist_migration(path, preferences, backup_original, |preferences, path| {
-            preferences.save(path)
-        })
+        persist_migration(
+            path,
+            source_version,
+            preferences,
+            backup_original,
+            |preferences, path| preferences.save(path),
+        )
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -133,14 +279,18 @@ impl Preferences {
                 "version-1 settings require transactional migration; load them with recovery enabled"
                     .into(),
             )),
-            ParsedPreferences::InvalidLegacyV1(error) => Err(Error::Message(error)),
+            ParsedPreferences::LegacyV2(_) => Err(Error::Message(
+                "version-2 settings require transactional migration; load them with recovery enabled"
+                    .into(),
+            )),
+            ParsedPreferences::InvalidMigration { error, .. } => Err(Error::Message(error)),
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if self.version != 2 {
+        if self.version != 3 {
             return Err(Error::Message(format!(
-                "only settings version 2 can be saved; found version {}",
+                "only settings version 3 can be saved; found version {}",
                 self.version
             )));
         }
@@ -168,6 +318,7 @@ impl Preferences {
 
 fn persist_migration(
     path: &Path,
+    source_version: u32,
     preferences: Preferences,
     backup_original: impl FnOnce(&Path) -> io::Result<PathBuf>,
     save: impl FnOnce(&Preferences, &Path) -> Result<()>,
@@ -178,7 +329,7 @@ fn persist_migration(
             return PreferencesRecovery {
                 preferences: Preferences::default(),
                 notice: Some(format!(
-                    "Version-1 settings migration needs a backup before saving, but backup failed: {error}. The original remains at {}; saving is disabled. Check directory permissions or copy the file manually.",
+                    "Version-{source_version} settings migration needs a backup before saving, but backup failed: {error}. The original remains at {}; saving is disabled. Check directory permissions or copy the file manually.",
                     path.display()
                 )),
                 saving_blocked: true,
@@ -194,7 +345,7 @@ fn persist_migration(
         Err(error) => PreferencesRecovery {
             preferences: Preferences::default(),
             notice: Some(format!(
-                "Version-1 settings migration could not be saved: {error}. The original was preserved at {}; a backup is at {}. Saving is disabled until you resolve the migration.",
+                "Version-{source_version} settings migration could not be saved: {error}. The original was preserved at {}; a backup is at {}. Saving is disabled until you resolve the migration.",
                 path.display(),
                 backup.display()
             )),
@@ -218,10 +369,17 @@ fn read_preferences(path: &Path) -> Result<ParsedPreferences> {
     }
     let value: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
-        Err(error) if contains_legacy_v1_marker(&bytes) => {
-            return Ok(ParsedPreferences::InvalidLegacyV1(format!(
-                "version-1 settings are corrupt and cannot be migrated: {error}"
-            )));
+        Err(error) if contains_settings_version_marker(&bytes, 1) => {
+            return Ok(ParsedPreferences::InvalidMigration {
+                version: 1,
+                error: format!("version-1 settings are corrupt and cannot be migrated: {error}"),
+            });
+        }
+        Err(error) if contains_settings_version_marker(&bytes, 2) => {
+            return Ok(ParsedPreferences::InvalidMigration {
+                version: 2,
+                error: format!("version-2 settings are corrupt and cannot be migrated: {error}"),
+            });
         }
         Err(error) => {
             return Err(Error::Message(format!(
@@ -233,11 +391,19 @@ fn read_preferences(path: &Path) -> Result<ParsedPreferences> {
     match version_value.and_then(serde_json::Value::as_u64) {
         Some(1) => Ok(match serde_json::from_value::<LegacyPreferencesV1>(value) {
             Ok(preferences) => ParsedPreferences::LegacyV1(preferences),
-            Err(error) => ParsedPreferences::InvalidLegacyV1(format!(
-                "version-1 settings are invalid and cannot be migrated: {error}"
-            )),
+            Err(error) => ParsedPreferences::InvalidMigration {
+                version: 1,
+                error: format!("version-1 settings are invalid and cannot be migrated: {error}"),
+            },
         }),
-        Some(2) => {
+        Some(2) => Ok(match serde_json::from_value::<LegacyPreferencesV2>(value) {
+            Ok(preferences) => ParsedPreferences::LegacyV2(preferences),
+            Err(error) => ParsedPreferences::InvalidMigration {
+                version: 2,
+                error: format!("version-2 settings are invalid and cannot be migrated: {error}"),
+            },
+        }),
+        Some(3) => {
             let preferences: Preferences = serde_json::from_value(value).map_err(|error| {
                 Error::Message(format!(
                     "settings are invalid: {error}; original file preserved"
@@ -249,16 +415,19 @@ fn read_preferences(path: &Path) -> Result<ParsedPreferences> {
         Some(version) => Err(Error::Message(format!(
             "unsupported settings version {version}; original file preserved"
         ))),
-        None if version_value.is_some_and(|version| {
-            version.as_f64() == Some(1.0)
-                || version
-                    .as_str()
-                    .is_some_and(|text| text.parse::<f64>().is_ok_and(|number| number == 1.0))
-        }) =>
-        {
-            Ok(ParsedPreferences::InvalidLegacyV1(
-                "version-1 settings use a non-integer schema version and cannot be migrated".into(),
-            ))
+        None if version_value.is_some_and(|version| is_non_integer_version(version, 1)) => {
+            Ok(ParsedPreferences::InvalidMigration {
+                version: 1,
+                error: "version-1 settings use a non-integer schema version and cannot be migrated"
+                    .into(),
+            })
+        }
+        None if version_value.is_some_and(|version| is_non_integer_version(version, 2)) => {
+            Ok(ParsedPreferences::InvalidMigration {
+                version: 2,
+                error: "version-2 settings use a non-integer schema version and cannot be migrated"
+                    .into(),
+            })
         }
         None => Err(Error::Message(
             "settings have no valid schema version; original file preserved".into(),
@@ -266,7 +435,7 @@ fn read_preferences(path: &Path) -> Result<ParsedPreferences> {
     }
 }
 
-fn contains_legacy_v1_marker(bytes: &[u8]) -> bool {
+fn contains_settings_version_marker(bytes: &[u8], wanted: u32) -> bool {
     let mut index = 0usize;
     while index < bytes.len() {
         match bytes[index] {
@@ -276,7 +445,7 @@ fn contains_legacy_v1_marker(bytes: &[u8]) -> bool {
                         let mut value = skip_json_whitespace(bytes, after_key);
                         if bytes.get(value) == Some(&b':') {
                             value = skip_json_whitespace(bytes, value + 1);
-                            if looks_like_legacy_v1_version(bytes, value) {
+                            if looks_like_settings_version(bytes, value, wanted) {
                                 return true;
                             }
                         }
@@ -292,10 +461,13 @@ fn contains_legacy_v1_marker(bytes: &[u8]) -> bool {
     false
 }
 
-fn looks_like_legacy_v1_version(bytes: &[u8], start: usize) -> bool {
+fn looks_like_settings_version(bytes: &[u8], start: usize, wanted: u32) -> bool {
     if bytes.get(start) == Some(&b'"') {
-        return decode_json_string_token(bytes, start)
-            .is_some_and(|(version, _)| version.parse::<f64>().is_ok_and(|number| number == 1.0));
+        return decode_json_string_token(bytes, start).is_some_and(|(version, _)| {
+            version
+                .parse::<f64>()
+                .is_ok_and(|number| number == f64::from(wanted))
+        });
     }
 
     let mut end = start;
@@ -314,10 +486,19 @@ fn looks_like_legacy_v1_version(bytes: &[u8], start: usize) -> bool {
         .iter()
         .position(|byte| *byte != b'0')
         .map_or(token, |index| &token[index..]);
-    text.parse::<f64>().is_ok_and(|value| value == 1.0)
-        || significant.starts_with(b"1.")
-        || significant.starts_with(b"1e")
-        || significant.starts_with(b"1E")
+    text.parse::<f64>()
+        .is_ok_and(|value| value == f64::from(wanted))
+        || significant.starts_with(format!("{wanted}.").as_bytes())
+        || significant.starts_with(format!("{wanted}e").as_bytes())
+        || significant.starts_with(format!("{wanted}E").as_bytes())
+}
+
+fn is_non_integer_version(value: &serde_json::Value, wanted: u32) -> bool {
+    value.as_f64() == Some(f64::from(wanted))
+        || value.as_str().is_some_and(|text| {
+            text.parse::<f64>()
+                .is_ok_and(|number| number == f64::from(wanted))
+        })
 }
 
 fn decode_json_string_token(bytes: &[u8], start: usize) -> Option<(String, usize)> {
@@ -351,7 +532,7 @@ fn skip_json_whitespace(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-fn migrate_v1(legacy: LegacyPreferencesV1) -> Result<Preferences> {
+fn migrate_v1(legacy: LegacyPreferencesV1) -> Result<LegacyPreferencesV2> {
     if legacy.version != 1 {
         return Err(Error::Message("invalid legacy settings version".into()));
     }
@@ -396,15 +577,42 @@ fn migrate_v1(legacy: LegacyPreferencesV1) -> Result<Preferences> {
         })?;
         workspaces.insert(
             root,
-            SavedWorkspace {
+            LegacySavedWorkspaceV2 {
                 policy,
                 intents: workspace.intents,
                 generated_outputs: workspace.generated_outputs,
             },
         );
     }
-    let migrated = Preferences {
+    Ok(LegacyPreferencesV2 {
         version: 2,
+        recent_root: legacy.recent_root,
+        workspaces,
+    })
+}
+
+fn migrate_v2(legacy: LegacyPreferencesV2) -> Result<Preferences> {
+    if legacy.version != 2 {
+        return Err(Error::Message("invalid version-2 settings schema".into()));
+    }
+    let workspaces = legacy
+        .workspaces
+        .into_iter()
+        .map(|(root, workspace)| {
+            (
+                root,
+                SavedWorkspace {
+                    policy: workspace.policy,
+                    intents: workspace.intents,
+                    generated_outputs: workspace.generated_outputs,
+                    profiles: BTreeMap::new(),
+                    active_profile: None,
+                },
+            )
+        })
+        .collect();
+    let migrated = Preferences {
+        version: 3,
         recent_root: legacy.recent_root,
         workspaces,
     };
@@ -413,9 +621,9 @@ fn migrate_v1(legacy: LegacyPreferencesV1) -> Result<Preferences> {
 }
 
 fn validate_preferences(preferences: &Preferences) -> Result<()> {
-    if preferences.version != 2 {
+    if preferences.version != 3 {
         return Err(Error::Message(format!(
-            "unsupported settings version {}; expected version 2",
+            "unsupported settings version {}; expected version 3",
             preferences.version
         )));
     }
@@ -425,6 +633,48 @@ fn validate_preferences(preferences: &Preferences) -> Result<()> {
                 "invalid filter policy for workspace {root:?}: {error}"
             ))
         })?;
+        if workspace.profiles.len() > MAX_PROFILES_PER_WORKSPACE {
+            return Err(Error::Message(format!(
+                "workspace {root:?} exceeds the {MAX_PROFILES_PER_WORKSPACE}-profile limit"
+            )));
+        }
+        for (name, profile) in &workspace.profiles {
+            let normalized = normalize_profile_name(name).map_err(|error| {
+                Error::Message(format!(
+                    "invalid profile name in workspace {root:?}: {error}"
+                ))
+            })?;
+            if normalized != name.as_str() {
+                return Err(Error::Message(format!(
+                    "profile name {name:?} in workspace {root:?} is not normalized"
+                )));
+            }
+            profile.policy.validate().map_err(|error| {
+                Error::Message(format!(
+                    "invalid filter policy for profile {name:?} in workspace {root:?}: {error}"
+                ))
+            })?;
+        }
+        if let Some(active_profile) = &workspace.active_profile {
+            let normalized = normalize_profile_name(active_profile).map_err(|error| {
+                Error::Message(format!(
+                    "invalid active profile name in workspace {root:?}: {error}"
+                ))
+            })?;
+            if normalized.as_str() != active_profile.as_str()
+                || !workspace.profiles.contains_key(&normalized)
+            {
+                return Err(Error::Message(format!(
+                    "active profile {active_profile:?} in workspace {root:?} is missing or not normalized"
+                )));
+            }
+            let profile = &workspace.profiles[&normalized];
+            if profile.policy != workspace.policy || profile.intents != workspace.intents {
+                return Err(Error::Message(format!(
+                    "active profile {active_profile:?} does not match the current policy and intents in workspace {root:?}"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -450,12 +700,16 @@ fn recover_unreadable(path: &Path, error: Error) -> PreferencesRecovery {
     }
 }
 
-fn recover_failed_migration(path: &Path, error: String) -> PreferencesRecovery {
+fn recover_failed_migration(
+    path: &Path,
+    source_version: u32,
+    error: String,
+) -> PreferencesRecovery {
     match backup_original(path) {
         Ok(backup) => PreferencesRecovery {
             preferences: Preferences::default(),
             notice: Some(format!(
-                "Version-1 settings migration failed: {error}. The original was preserved at {}; a backup is at {}. Saving is disabled until you resolve the migration.",
+                "Version-{source_version} settings migration failed: {error}. The original was preserved at {}; a backup is at {}. Saving is disabled until you resolve the migration.",
                 path.display(),
                 backup.display()
             )),
@@ -464,7 +718,7 @@ fn recover_failed_migration(path: &Path, error: String) -> PreferencesRecovery {
         Err(backup_error) => PreferencesRecovery {
             preferences: Preferences::default(),
             notice: Some(format!(
-                "Version-1 settings migration failed: {error}; backup also failed: {backup_error}. The original remains at {}; saving is disabled. Check directory permissions or manually copy the file.",
+                "Version-{source_version} settings migration failed: {error}; backup also failed: {backup_error}. The original remains at {}; saving is disabled. Check directory permissions or manually copy the file.",
                 path.display()
             )),
             saving_blocked: true,
@@ -573,14 +827,15 @@ mod tests {
     fn failed_migration_save_keeps_original_and_backup_and_blocks_saving() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let original = r#"{"version":1,"recentRoot":"root","workspaces":{}}"#;
+        let original = r#"{"version":2,"recentRoot":"root","workspaces":{}}"#;
         std::fs::write(&path, original).unwrap();
         let mut save_called = false;
 
-        let recovery = persist_migration(&path, Preferences::default(), backup_original, |_, _| {
-            save_called = true;
-            Err(Error::Message("injected migration save failure".into()))
-        });
+        let recovery =
+            persist_migration(&path, 2, Preferences::default(), backup_original, |_, _| {
+                save_called = true;
+                Err(Error::Message("injected migration save failure".into()))
+            });
 
         assert!(save_called);
         assert!(recovery.saving_blocked);
@@ -588,7 +843,7 @@ mod tests {
             recovery
                 .notice
                 .unwrap()
-                .contains("migration could not be saved")
+                .contains("Version-2 settings migration could not be saved")
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         let backups: Vec<_> = std::fs::read_dir(dir.path().join("settings-recovery"))
