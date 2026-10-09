@@ -581,6 +581,11 @@ fn forward_result(
         {
             return;
         }
+        // FSEvents reports access-time updates as Metadata(Any), and can pair
+        // child changes with metadata notifications for their parent directory.
+        // Its explicit data/name/create/remove and rescan events still invalidate.
+        #[cfg(target_os = "macos")]
+        Ok(event) if metadata_only_index_change(&event) => return,
         Ok(event) if directory_metadata_only(&event) => return,
         // No path history is promised. Normal events are only invalidation hints.
         Ok(_) => WatchSignal::Changed,
@@ -612,6 +617,17 @@ fn forward_result(
         // Disconnection means the owning watcher has been dropped.
         Err(TrySendError::Full(WatchSignal::Changed) | TrySendError::Disconnected(_)) => {}
     }
+}
+
+#[cfg(target_os = "macos")]
+fn metadata_only_index_change(event: &Event) -> bool {
+    !event.paths.is_empty()
+        && matches!(
+            event.kind,
+            notify::EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::Any
+            ))
+        )
 }
 
 fn reserved_export_temporary_activity(root: &Path, event: &Event) -> bool {
@@ -782,6 +798,76 @@ mod tests {
         )));
         forward_result(Ok(access_time), &sender, &sticky);
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn metadata_only_events_do_not_invalidate_indexed_content() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("source.rs");
+        fs::write(&file, "fn source() {}\n").unwrap();
+        let (sender, receiver) = mpsc::sync_channel(SIGNAL_CAPACITY);
+        let sticky = Mutex::new(StickySignals::default());
+        let revision = Mutex::new(0);
+
+        for path in [root.path(), file.as_path()] {
+            let metadata = Event::new(EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::Any,
+            )))
+            .add_path(path.to_path_buf());
+            super::forward_result(Ok(metadata), root.path(), &sender, &sticky, &revision);
+        }
+
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(*revision.lock().unwrap(), 0);
+
+        let content_change = Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(file);
+        super::forward_result(Ok(content_change), root.path(), &sender, &sticky, &revision);
+
+        assert_eq!(receiver.try_recv().unwrap(), WatchSignal::Changed);
+        assert_eq!(*revision.lock().unwrap(), 1);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn generic_metadata_events_still_invalidate_on_other_backends() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("source.rs");
+        fs::write(&file, "fn source() {}\n").unwrap();
+        let (sender, receiver) = mpsc::sync_channel(SIGNAL_CAPACITY);
+        let sticky = Mutex::new(StickySignals::default());
+        let revision = Mutex::new(0);
+        let metadata = Event::new(EventKind::Modify(notify::event::ModifyKind::Metadata(
+            notify::event::MetadataKind::Any,
+        )))
+        .add_path(file);
+
+        super::forward_result(Ok(metadata), root.path(), &sender, &sticky, &revision);
+
+        assert_eq!(receiver.try_recv().unwrap(), WatchSignal::Changed);
+        assert_eq!(*revision.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn explicit_ownership_metadata_still_invalidates() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("source.rs");
+        fs::write(&file, "fn source() {}\n").unwrap();
+        let (sender, receiver) = mpsc::sync_channel(SIGNAL_CAPACITY);
+        let sticky = Mutex::new(StickySignals::default());
+        let revision = Mutex::new(0);
+        let ownership = Event::new(EventKind::Modify(notify::event::ModifyKind::Metadata(
+            notify::event::MetadataKind::Ownership,
+        )))
+        .add_path(file);
+
+        super::forward_result(Ok(ownership), root.path(), &sender, &sticky, &revision);
+
+        assert_eq!(receiver.try_recv().unwrap(), WatchSignal::Changed);
+        assert_eq!(*revision.lock().unwrap(), 1);
     }
 
     #[test]
