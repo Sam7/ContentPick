@@ -6,7 +6,7 @@ An offline Windows/macOS desktop app being built with Tauri 2, React and a Rust 
 
 ## Development
 
-Prerequisites: Node 24, Corepack/pnpm 12.10.1, Rust 1.99, and [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). Windows requires Visual Studio C++ Build Tools (Desktop development with C++, Windows SDK) and WebView2. macOS requires Xcode Command Line Tools. Windows is tested locally; macOS CI is configured but has not been run from this repository.
+Prerequisites: Node 24, Corepack/pnpm 12.10.1, Rust 1.99, and [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). Windows requires Visual Studio C++ Build Tools (Desktop development with C++, Windows SDK) and WebView2. macOS requires Xcode Command Line Tools. Windows is tested locally; macOS runs on GitHub Actions. Current platform evidence and open gates are recorded in [project status](docs/project/STATUS.md).
 
 From a shell with Node and Cargo on PATH:
 

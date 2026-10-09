@@ -2185,6 +2185,8 @@ mod tests {
             ..Default::default()
         }));
         let (_, watcher) = publish_watching_fixture(&shared, root.path(), 1);
+        #[cfg(target_os = "macos")]
+        watcher::reconcile_test_startup_hints(&watcher, root.path(), 1);
         let frozen = manifest(&shared, &watcher).unwrap();
 
         let temp_path = root.path().join(".contextpick-export-watcher-probe.tmp");

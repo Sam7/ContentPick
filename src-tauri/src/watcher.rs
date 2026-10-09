@@ -41,6 +41,53 @@ pub(crate) enum WatchState {
     Unavailable,
 }
 
+// FSEvents may deliver queued pre-watch hints after registration. Tests that
+// exercise behavior after watcher startup need an authoritative baseline first.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn reconcile_test_startup_hints(service: &WatchService, root: &Path, generation: u64) {
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::atomic::AtomicBool,
+        time::Instant,
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "startup hints did not settle");
+        let checkpoint = service.checkpoint(root).expect("active watcher checkpoint");
+        thread::sleep(Duration::from_millis(500));
+        let after_quiet = service.checkpoint(root).expect("active watcher checkpoint");
+        if after_quiet != checkpoint {
+            continue;
+        }
+
+        contextpick_core::workspace::Workspace::scan(
+            root,
+            contextpick_core::workspace::FilterPolicy::default(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            &AtomicBool::new(false),
+        )
+        .expect("startup reconciliation should succeed");
+        let Some(health) = service.revalidated(root, generation, Some(checkpoint)) else {
+            panic!("active watcher should remain available");
+        };
+        if health.state != WatchState::Watching {
+            continue;
+        }
+
+        thread::sleep(Duration::from_millis(500));
+        let settled = service.checkpoint(root).expect("active watcher checkpoint");
+        if settled == after_quiet
+            && service
+                .status()
+                .is_some_and(|current| current.state == WatchState::Watching)
+        {
+            return;
+        }
+    }
+}
+
 type PublishHealth = Arc<dyn Fn(WatchHealth) + Send + Sync>;
 
 /// Owns the single watcher for the active workspace and publishes health only.
@@ -691,50 +738,6 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     fn drain_startup_hints(_: &WorkspaceWatcher) {}
-
-    // The live service publishes startup hints conservatively. Reconcile that
-    // backend startup burst before testing the new-root lifecycle itself.
-    #[cfg(target_os = "macos")]
-    fn reconcile_startup_hints(service: &WatchService, root: &Path, generation: u64) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            assert!(Instant::now() < deadline, "startup hints did not settle");
-            let checkpoint = service.checkpoint(root).expect("active watcher checkpoint");
-            std::thread::sleep(Duration::from_millis(500));
-            let after_quiet = service.checkpoint(root).expect("active watcher checkpoint");
-            if after_quiet.invalidation_revision != checkpoint.invalidation_revision {
-                continue;
-            }
-
-            Workspace::scan(
-                root,
-                FilterPolicy::default(),
-                BTreeMap::new(),
-                BTreeSet::new(),
-                &AtomicBool::new(false),
-            )
-            .expect("startup reconciliation should succeed");
-            let Some(health) = service.revalidated(root, generation, Some(checkpoint)) else {
-                panic!("active watcher should remain available");
-            };
-            if health.state != WatchState::Watching {
-                continue;
-            }
-
-            std::thread::sleep(Duration::from_millis(500));
-            let settled = service.checkpoint(root).expect("active watcher checkpoint");
-            if settled.invalidation_revision == after_quiet.invalidation_revision
-                && service
-                    .status()
-                    .is_some_and(|current| current.state == WatchState::Watching)
-            {
-                return;
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn reconcile_startup_hints(_: &WatchService, _: &Path, _: u64) {}
 
     fn forward_result(
         result: notify::Result<Event>,
@@ -1393,7 +1396,8 @@ mod tests {
         let old_health = service.activate(&old_root, 1).unwrap();
         let new_health = service.activate(&new_root, 2).unwrap();
         assert!(new_health.epoch > old_health.epoch);
-        reconcile_startup_hints(&service, &new_root, 2);
+        #[cfg(target_os = "macos")]
+        super::reconcile_test_startup_hints(&service, &new_root, 2);
         let watching = service.status().unwrap();
         assert_eq!(watching.state, WatchState::Watching);
         while events.try_recv().is_ok() {}
