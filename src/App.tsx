@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent } from 'react';
-import type { ContextPickBridge, Entry, ExportResult, FilterPolicy, Preview, SelectionIntent, SensitiveWarningSummary, TokenEstimate, WatchHealth, WorkspacePage, WorkspaceView } from './bridge';
+import type { ContextPickBridge, Entry, ExportResult, FilterPolicy, Preview, ProfileCatalog, SelectionIntent, SensitiveWarningSummary, TokenEstimate, WatchHealth, WorkspacePage, WorkspaceView } from './bridge';
 import { ProjectTree } from './ProjectTree';
 import { WorkspaceToolbar } from './WorkspaceToolbar';
 import { WorkspaceSidebar } from './WorkspaceSidebar';
@@ -115,9 +115,13 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [policyOpen, setPolicyOpen] = useState(false);
+  const [selectedProfileName, setSelectedProfileName] = useState('');
+  const [newProfileName, setNewProfileName] = useState('');
+  const [renameProfileName, setRenameProfileName] = useState('');
   const [policy, setPolicy] = useState<FilterPolicy>(DEFAULT_FILTER_POLICY);
   const [policyDrafts, setPolicyDrafts] = useState(() => draftsFromPolicy(policy));
   const policyDirty = useRef(false);
+  const [hasUnappliedPolicy, setHasUnappliedPolicy] = useState(false);
   const [busy, setBusyState] = useState<string | null>('restore');
   const busyOperation = useRef<string | null>('restore');
   const setBusy = useCallback((value: string | null) => {
@@ -150,6 +154,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const estimateRoot = workspace?.root;
   const estimateGeneration = workspace?.generation;
   const estimateSelectedCount = workspace?.selectedCount;
+  const profileCatalog = workspace?.profileCatalog;
   const workspaceRequestId = useRef(0);
   const tokenEstimateSequence = useRef(0);
   const activeTokenEstimateRequest = useRef<string | null>(null);
@@ -538,7 +543,10 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       setWorkspace((current) => current && current.root === restored.root && current.generation > restored.generation ? current : restored);
       setPolicy(restored.policy);
       setPolicyDrafts(draftsFromPolicy(restored.policy));
+      setSelectedProfileName(restored.profileCatalog.activeProfile ?? restored.profileCatalog.names[0] ?? '');
+      setRenameProfileName(restored.profileCatalog.activeProfile ?? '');
       policyDirty.current = false;
+      setHasUnappliedPolicy(false);
       setPreview(null);
       setExpanded(new Set());
       await loadWorkspacePages(restored, () => active && requestId === workspaceRequestId.current && requestEpoch === cancellationEpoch.current);
@@ -572,13 +580,15 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     }
   }
 
-  function commitWorkspace(result: WorkspaceView, hydratePolicy = !policyDirty.current) {
+  function commitWorkspace(result: WorkspaceView, hydratePolicy = !policyDirty.current, preservePreview = false) {
     if (workspace && workspace.root === result.root && result.generation < workspace.generation) return;
     const rootChanged = workspace?.root !== result.root;
+    const snapshotChanged = rootChanged || !workspace || workspace.generation !== result.generation;
     if (hydratePolicy || rootChanged) {
       setPolicy(result.policy);
       setPolicyDrafts(draftsFromPolicy(result.policy));
       policyDirty.current = false;
+      setHasUnappliedPolicy(false);
     }
     if (rootChanged) {
       activeRoot.current = result.root;
@@ -593,13 +603,73 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       setFileView('all');
       setSettingsOpen(false);
     }
-    if (!workspace || workspace.root !== result.root || workspace.generation !== result.generation) {
+    if (snapshotChanged) {
+      setSelectedProfileName(result.profileCatalog.activeProfile ?? result.profileCatalog.names[0] ?? '');
+      setRenameProfileName(result.profileCatalog.activeProfile ?? '');
+    }
+    if (!preservePreview && snapshotChanged) {
       previewRequestId.current += 1;
       setPreview(null);
     }
     setWorkspace(result);
     const health = watchHealthRef.current;
     setWorkspaceStale((rootChanged && !fixtureMode) || watchStatusUnavailableRef.current || watchListenerUnavailableRef.current || (health?.root === result.root && health.state !== 'watching'));
+  }
+
+  function changeProfileCatalog(
+    action: () => Promise<ProfileCatalog>,
+    preferredName: string | null,
+    successMessage: string,
+  ) {
+    if (!workspace || workspaceStale || cancelling || busy !== null) return;
+    const { root, generation } = workspace;
+    const requestId = ++workspaceRequestId.current;
+    void runCommand('profile', action, (catalog) => {
+      if (catalog.root !== root || catalog.generation !== generation) return;
+      setWorkspace((current) => current && current.root === root && current.generation === generation
+        ? { ...current, profileCatalog: catalog }
+        : current);
+      setSelectedProfileName(preferredName ?? catalog.activeProfile ?? catalog.names[0] ?? '');
+      setRenameProfileName(catalog.activeProfile ?? '');
+      setStatus(successMessage);
+    }, () => requestId === workspaceRequestId.current);
+  }
+
+  function createProfile() {
+    const name = newProfileName;
+    if (!name.trim()) return;
+    changeProfileCatalog(() => bridge.create_profile({ name }), name.trim(), 'Profile saved.');
+  }
+
+  function updateProfile() {
+    if (!selectedProfileName) return;
+    changeProfileCatalog(() => bridge.update_profile({ name: selectedProfileName }), selectedProfileName, 'Profile updated.');
+  }
+
+  function loadProfile() {
+    if (!workspace || !selectedProfileName || workspaceStale || cancelling || busy !== null) return;
+    const root = workspace.root;
+    const requestId = ++workspaceRequestId.current;
+    void runWorkspaceCommand('profile', () => bridge.load_profile({ name: selectedProfileName }), (result) => {
+      commitWorkspace(result, true, true);
+      setStatus(`Loaded profile: ${selectedProfileName}`);
+    }, () => requestId === workspaceRequestId.current && workspace?.root === root);
+  }
+
+  function renameProfile() {
+    if (!selectedProfileName || !renameProfileName.trim()) return;
+    const currentName = selectedProfileName;
+    const newName = renameProfileName;
+    changeProfileCatalog(() => bridge.rename_profile({ currentName, newName }), newName.trim(), 'Profile renamed.');
+  }
+
+  function deleteProfile() {
+    if (!selectedProfileName) return;
+    changeProfileCatalog(
+      () => bridge.delete_profile({ name: selectedProfileName }),
+      null,
+      'Profile deleted.',
+    );
   }
 
   function openWorkspace() {
@@ -814,6 +884,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
 
   function updateTextPolicy(field: 'includeExtensions' | 'includePaths' | 'excludePaths', draft: string) {
     policyDirty.current = true;
+    setHasUnappliedPolicy(true);
     setPolicyDrafts((current) => ({ ...current, [field]: draft }));
     const values = draft
       .split(',')
@@ -950,7 +1021,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
           gitignore={policy.gitignore}
           drafts={policyDrafts}
           disabled={!workspace || workspaceStale || busy !== null || cancelling}
-          onGitignoreChange={(enabled) => { policyDirty.current = true; setPolicy((current) => ({ ...current, gitignore: enabled })); }}
+          onGitignoreChange={(enabled) => { policyDirty.current = true; setHasUnappliedPolicy(true); setPolicy((current) => ({ ...current, gitignore: enabled })); }}
           onTextChange={updateTextPolicy}
           onReset={resetFilters}
           onSubmit={submitPolicy}
@@ -961,6 +1032,41 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
             <div className="settings-icon" aria-hidden="true">⚙</div>
             <h3>Local workspace settings</h3>
             <p>Workspace path, filters, and file selection choices are saved locally on this device.</p>
+            <section className="profile-settings" aria-labelledby="profile-settings-heading">
+              <h3 id="profile-settings-heading">Selection profiles</h3>
+              <p>Save filters and file choices for this workspace. Profiles stay on this device.</p>
+              <p className="profile-active" role="status">Active profile: <strong>{profileCatalog?.activeProfile ?? 'Custom'}</strong></p>
+              <label className="profile-field">
+                <span>Saved profile</span>
+                <select aria-label="Saved profile" value={selectedProfileName} onChange={(event) => {
+                  const name = event.target.value;
+                  setSelectedProfileName(name);
+                  setRenameProfileName(name);
+                }} disabled={busy !== null || workspaceStale || cancelling}>
+                  {profileCatalog?.names.length === 0 && <option value="">No saved profiles</option>}
+                  {profileCatalog?.names.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </label>
+              <div className="profile-buttons">
+                <button className="button button-secondary" onClick={loadProfile} disabled={!selectedProfileName || !profileCatalog?.names.includes(selectedProfileName) || busy !== null || workspaceStale || cancelling}>Load profile</button>
+                <button className="button button-secondary" onClick={updateProfile} disabled={!selectedProfileName || !profileCatalog?.names.includes(selectedProfileName) || busy !== null || workspaceStale || cancelling || hasUnappliedPolicy}>Update profile</button>
+              </div>
+              {hasUnappliedPolicy && <p className="profile-note">Apply filter edits before saving or updating a profile. Loading a profile replaces unapplied filter edits.</p>}
+              <label className="profile-field">
+                <span>New profile name</span>
+                <input value={newProfileName} maxLength={80} onChange={(event) => setNewProfileName(event.target.value)} placeholder="e.g. Documentation" />
+              </label>
+              <button className="button button-secondary" onClick={createProfile} disabled={!newProfileName.trim() || !profileCatalog || profileCatalog.names.length >= 20 || busy !== null || workspaceStale || cancelling || hasUnappliedPolicy}>Save as profile</button>
+              <label className="profile-field">
+                <span>Rename selected profile</span>
+                <input value={renameProfileName} maxLength={80} onChange={(event) => setRenameProfileName(event.target.value)} disabled={!selectedProfileName} />
+              </label>
+              <div className="profile-buttons">
+                <button className="button button-secondary" onClick={renameProfile} disabled={!selectedProfileName || !renameProfileName.trim() || busy !== null || workspaceStale || cancelling}>Rename profile</button>
+                <button className="button button-secondary" onClick={deleteProfile} disabled={!selectedProfileName || !profileCatalog?.names.includes(selectedProfileName) || busy !== null || workspaceStale || cancelling}>Delete profile</button>
+              </div>
+              <small className="profile-limit">Up to 20 profiles per workspace.</small>
+            </section>
             <div className="settings-action">
               <div><strong>Reset selections</strong><small>Clear saved file and folder choices. Your filters stay in place.</small></div>
               <button className="button button-secondary" onClick={resetSelections} disabled={busy !== null || workspaceStale || cancelling}>Reset selections</button>

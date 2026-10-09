@@ -30,8 +30,16 @@ export type WorkspaceView = {
   selectedCount: number;
   estimatedBytes: number;
   policy: FilterPolicy;
+  profileCatalog: ProfileCatalog;
   incomplete: boolean;
   diagnostics: string[];
+};
+
+export type ProfileCatalog = {
+  root: string;
+  generation: number;
+  names: string[];
+  activeProfile: string | null;
 };
 
 export type WorkspacePage = {
@@ -85,6 +93,11 @@ export type ContextPickBridge = {
   set_intent(args: { path: string; intent: SelectionIntent }): Promise<WorkspaceView>;
   reset_selections(): Promise<WorkspaceView>;
   set_policy(args: { policy: FilterPolicy }): Promise<WorkspaceView>;
+  create_profile(args: { name: string }): Promise<ProfileCatalog>;
+  update_profile(args: { name: string }): Promise<ProfileCatalog>;
+  rename_profile(args: { currentName: string; newName: string }): Promise<ProfileCatalog>;
+  delete_profile(args: { name: string }): Promise<ProfileCatalog>;
+  load_profile(args: { name: string }): Promise<WorkspaceView>;
   workspace_page(args: { generation: number; offset: number }): Promise<WorkspacePage>;
   preview_file(args: { path: string }): Promise<Preview>;
   estimate_tokens(args: { generation: number; requestId: string }): Promise<TokenEstimate>;
@@ -108,6 +121,11 @@ const nativeBridge: ContextPickBridge = {
   set_intent: (args) => invoke('set_intent', args),
   reset_selections: () => invoke('reset_selections'),
   set_policy: (args) => invoke('set_policy', args),
+  create_profile: (args) => invoke('create_profile', args),
+  update_profile: (args) => invoke('update_profile', args),
+  rename_profile: (args) => invoke('rename_profile', args),
+  delete_profile: (args) => invoke('delete_profile', args),
+  load_profile: (args) => invoke('load_profile', args),
   workspace_page: (args) => invoke('workspace_page', args),
   preview_file: (args) => invoke('preview_file', args),
   estimate_tokens: (args) => invoke('estimate_tokens', args),
@@ -138,6 +156,7 @@ const fixtureWorkspace: WorkspaceView = {
   selectedCount: 3,
   estimatedBytes: 6240,
   policy: { gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] },
+  profileCatalog: { root: '/workspace/patchwork', generation: 1, names: ['Documentation', 'Rust'], activeProfile: 'Rust' },
   incomplete: true,
   diagnostics: [],
 };
@@ -166,6 +185,15 @@ export type BrowserBridgeOptions = { cancelPicker?: boolean; failExport?: boolea
 
 /** Static, synthetic responses for UI development. This deliberately contains no selection/filter policy. */
 export function createBrowserBridge(options: BrowserBridgeOptions = {}): ContextPickBridge {
+  const profileCatalog = structuredClone(fixtureWorkspace.profileCatalog);
+  let workspaceGeneration = fixtureWorkspace.generation;
+  const withCatalog = (view: WorkspaceView): WorkspaceView => ({
+    ...structuredClone(view),
+    generation: workspaceGeneration,
+    profileCatalog: { ...structuredClone(profileCatalog), generation: workspaceGeneration },
+  });
+  const profileResponse = (): ProfileCatalog => ({ ...structuredClone(profileCatalog), generation: workspaceGeneration });
+  const currentWorkspace = () => withCatalog(fixtureWorkspace);
   const watchHealth: WatchHealth = {
     root: fixtureWorkspace.root,
     epoch: 1,
@@ -179,15 +207,51 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
     on_window_focus: async () => () => {},
     request_focus_reconcile: async () => null,
     restore_workspace: async () => null,
-    choose_workspace: async () => options.cancelPicker ? null : structuredClone(fixtureWorkspace),
-    refresh_workspace: async () => structuredClone(fixtureWorkspace),
+    choose_workspace: async () => options.cancelPicker ? null : currentWorkspace(),
+    refresh_workspace: async () => currentWorkspace(),
     set_intent: async ({ path, intent }) => {
-      if (path === 'README.md' && (intent === 'exclude' || intent === 'forceExclude')) return structuredClone(fixtureReadmeExcluded);
-      if (path === 'src/main.generated.ts' && intent === 'forceInclude') return structuredClone(fixtureGeneratedForced);
-      return structuredClone(fixtureWorkspace);
+      profileCatalog.activeProfile = null;
+      if (path === 'README.md' && (intent === 'exclude' || intent === 'forceExclude')) return withCatalog(fixtureReadmeExcluded);
+      if (path === 'src/main.generated.ts' && intent === 'forceInclude') return withCatalog(fixtureGeneratedForced);
+      return currentWorkspace();
     },
-    reset_selections: async () => structuredClone(fixtureWorkspace),
-    set_policy: async () => structuredClone(fixtureWorkspace),
+    reset_selections: async () => { profileCatalog.activeProfile = null; return currentWorkspace(); },
+    set_policy: async () => { profileCatalog.activeProfile = null; return currentWorkspace(); },
+    create_profile: async ({ name }) => {
+      const normalized = name.trim();
+      if (!normalized) throw new Error('profile name cannot be empty');
+      if (profileCatalog.names.includes(normalized)) throw new Error(`a profile named ${JSON.stringify(normalized)} already exists`);
+      if (profileCatalog.names.length >= 20) throw new Error('a workspace can contain at most 20 profiles');
+      profileCatalog.names = [...profileCatalog.names, normalized].sort();
+      profileCatalog.activeProfile = normalized;
+      return profileResponse();
+    },
+    update_profile: async ({ name }) => {
+      if (!profileCatalog.names.includes(name)) throw new Error(`profile ${JSON.stringify(name)} does not exist`);
+      profileCatalog.activeProfile = name;
+      return profileResponse();
+    },
+    rename_profile: async ({ currentName, newName }) => {
+      const normalized = newName.trim();
+      if (!profileCatalog.names.includes(currentName)) throw new Error(`profile ${JSON.stringify(currentName)} does not exist`);
+      if (!normalized) throw new Error('profile name cannot be empty');
+      if (normalized !== currentName && profileCatalog.names.includes(normalized)) throw new Error(`a profile named ${JSON.stringify(normalized)} already exists`);
+      profileCatalog.names = profileCatalog.names.map((name) => name === currentName ? normalized : name).sort();
+      if (profileCatalog.activeProfile === currentName) profileCatalog.activeProfile = normalized;
+      return profileResponse();
+    },
+    delete_profile: async ({ name }) => {
+      if (!profileCatalog.names.includes(name)) throw new Error(`profile ${JSON.stringify(name)} does not exist`);
+      profileCatalog.names = profileCatalog.names.filter((profile) => profile !== name);
+      if (profileCatalog.activeProfile === name) profileCatalog.activeProfile = null;
+      return profileResponse();
+    },
+    load_profile: async ({ name }) => {
+      if (!profileCatalog.names.includes(name)) throw new Error(`profile ${JSON.stringify(name)} does not exist`);
+      profileCatalog.activeProfile = name;
+      workspaceGeneration += 1;
+      return currentWorkspace();
+    },
     workspace_page: async () => { throw new Error('The browser fixture does not paginate workspaces.'); },
     preview_file: async ({ path }) => {
       if (options.failPreview) throw new Error('Preview could not be read.');
@@ -204,9 +268,9 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
     }),
     cancel_token_estimate: async () => {},
     browse_ignored: async ({ path }) => {
-      if (path !== 'dist') return structuredClone(fixtureWorkspace);
+      if (path !== 'dist') return currentWorkspace();
       return {
-        ...structuredClone(fixtureWorkspace),
+        ...currentWorkspace(),
         entries: [
           ...structuredClone(fixtureWorkspace.entries).map((entry) => entry.path === 'dist' ? { ...entry, enumerated: true } : entry),
           { path: 'dist/report.md', kind: 'file', size: 404, selected: false, forceIncluded: false, gitIgnored: true, reason: '.gitignore (dist/)', enumerated: true, partial: false },
@@ -222,7 +286,7 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
     copy_markdown: async () => ({ destination: 'clipboard', bytes: 6240, files: 3 }),
     confirm_sensitive_output: async () => ({ destination: 'clipboard', bytes: 6240, files: 3 }),
     cancel_sensitive_output: async () => true,
-    cancel_operation: async () => structuredClone(fixtureWorkspace),
+    cancel_operation: async () => currentWorkspace(),
   };
 }
 

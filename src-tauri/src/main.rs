@@ -13,12 +13,12 @@ use contextpick_core::{
     token_count::{TokenEstimate, TokenEstimateCache},
     workspace::{FilterPolicy, Workspace, WorkspaceView},
 };
-use paging::{WorkspacePage, WorkspaceResponse};
+use paging::{ProfileCatalog, WorkspacePage, WorkspaceResponse};
 use serde::Serialize;
 #[cfg(debug_assertions)]
 use std::sync::Condvar;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -320,12 +320,16 @@ async fn blocking<T: Send + 'static>(
 
 fn begin_scan(shared: &Shared) -> CommandResult<(u64, Arc<AtomicBool>)> {
     let mut state = lock(shared)?;
-    cancel_active_token_estimate(&mut state);
-    cancel_active_output(&mut state);
+    Ok(start_scan(&mut state))
+}
+
+fn start_scan(state: &mut Session) -> (u64, Arc<AtomicBool>) {
+    cancel_active_token_estimate(state);
+    cancel_active_output(state);
     state.cancel.store(true, Ordering::Relaxed);
     state.generation += 1;
     state.cancel = Arc::new(AtomicBool::new(false));
-    Ok((state.generation, state.cancel.clone()))
+    (state.generation, state.cancel.clone())
 }
 
 fn publish(
@@ -333,13 +337,36 @@ fn publish(
     workspace: Workspace,
     generation: u64,
 ) -> CommandResult<WorkspaceResponse> {
+    publish_with_active_profile(shared, workspace, generation, None)
+}
+
+fn publish_with_active_profile(
+    shared: &Shared,
+    workspace: Workspace,
+    generation: u64,
+    active_profile: Option<&str>,
+) -> CommandResult<WorkspaceResponse> {
     let snapshot = Arc::new(workspace.view(generation));
-    let response = paging::initial(&snapshot)?;
     let mut state = lock(shared)?;
     if state.generation != generation {
         return Err("operation superseded by a newer request".into());
     }
-    persist_workspace(&mut state, &workspace)?;
+    let mut preferences = preferences_with_workspace(&state.preferences, &workspace);
+    if let Some(name) = active_profile {
+        let saved = preferences
+            .workspaces
+            .get_mut(&snapshot.root)
+            .ok_or("workspace preferences unavailable")?;
+        if !saved.profiles.get(name).is_some_and(|profile| {
+            profile.policy == workspace.policy && profile.intents == workspace.intents
+        }) {
+            return Err("profile changed while it was loading; try again".into());
+        }
+        saved.active_profile = Some(name.to_owned());
+    }
+    let profile_catalog = profile_catalog_for(&preferences, &snapshot.root, generation);
+    let response = paging::initial(&snapshot, profile_catalog)?;
+    save_preferences(&mut state, preferences)?;
     state.workspace = Some(workspace);
     state.snapshot = Some(snapshot);
     Ok(response)
@@ -379,44 +406,155 @@ async fn workspace_page(
     blocking(move || get_workspace_page(&shared, generation, offset)).await
 }
 
-fn persist_workspace(state: &mut Session, workspace: &Workspace) -> CommandResult<()> {
+fn preferences_with_workspace(current: &Preferences, workspace: &Workspace) -> Preferences {
+    let mut preferences = current.clone();
+    let root = workspace.root.display().to_string();
+    preferences.recent_root = Some(root.clone());
+    let existing = preferences
+        .workspaces
+        .get(&root)
+        .cloned()
+        .unwrap_or_default();
+    let active_profile = existing.active_profile.as_ref().filter(|name| {
+        existing.profiles.get(name.as_str()).is_some_and(|profile| {
+            profile.policy == workspace.policy && profile.intents == workspace.intents
+        })
+    });
+    preferences.workspaces.insert(
+        root,
+        SavedWorkspace {
+            policy: workspace.policy.clone(),
+            intents: workspace.intents.clone(),
+            generated_outputs: workspace.generated_outputs.clone(),
+            profiles: existing.profiles,
+            active_profile: active_profile.cloned(),
+        },
+    );
+    preferences
+}
+
+fn profile_catalog_for(preferences: &Preferences, root: &str, generation: u64) -> ProfileCatalog {
+    let saved = preferences.workspaces.get(root);
+    ProfileCatalog {
+        root: root.to_owned(),
+        generation,
+        names: saved
+            .map(|workspace| workspace.profiles.keys().cloned().collect())
+            .unwrap_or_default(),
+        active_profile: saved.and_then(|workspace| workspace.active_profile.clone()),
+    }
+}
+
+fn save_preferences(state: &mut Session, preferences: Preferences) -> CommandResult<()> {
     if state.settings_saving_blocked {
         return Err(format!(
             "Settings recovery could not preserve the original at {}. Copy it to a safe location, fix config directory permissions and restart ContextPick before saving changes.",
             state.settings_path.display()
         ));
     }
-    let mut preferences = state.preferences.clone();
-    {
-        let root = workspace.root.display().to_string();
-        preferences.recent_root = Some(root.clone());
-        let (profiles, active_profile) = preferences.workspaces.get(&root).map_or_else(
-            || (BTreeMap::new(), None),
-            |saved| {
-                let active_profile = saved.active_profile.as_ref().filter(|name| {
-                    saved.profiles.get(name.as_str()).is_some_and(|profile| {
-                        profile.policy == workspace.policy && profile.intents == workspace.intents
-                    })
-                });
-                (saved.profiles.clone(), active_profile.cloned())
-            },
-        );
-        preferences.workspaces.insert(
-            root,
-            SavedWorkspace {
-                policy: workspace.policy.clone(),
-                intents: workspace.intents.clone(),
-                generated_outputs: workspace.generated_outputs.clone(),
-                profiles,
-                active_profile,
-            },
-        );
-    }
     preferences
         .save(&state.settings_path)
         .map_err(|e| format!("Could not save preferences: {e}"))?;
     state.preferences = preferences;
     Ok(())
+}
+
+fn persist_workspace(state: &mut Session, workspace: &Workspace) -> CommandResult<()> {
+    let preferences = preferences_with_workspace(&state.preferences, workspace);
+    save_preferences(state, preferences)
+}
+
+fn change_profile_catalog(
+    shared: &Shared,
+    change: impl FnOnce(&mut SavedWorkspace) -> contextpick_core::Result<()>,
+) -> CommandResult<ProfileCatalog> {
+    let mut state = lock(shared)?;
+    let workspace = state.workspace.clone().ok_or("choose a workspace first")?;
+    let snapshot = state.snapshot.as_ref().ok_or("choose a workspace first")?;
+    let root = snapshot.root.clone();
+    if workspace.root.display().to_string() != root {
+        return Err("published workspace state is inconsistent".into());
+    }
+    let generation = snapshot.generation;
+    let mut preferences = preferences_with_workspace(&state.preferences, &workspace);
+    let saved = preferences
+        .workspaces
+        .get_mut(&root)
+        .ok_or("workspace preferences unavailable")?;
+    change(saved).map_err(|error| error.to_string())?;
+    let catalog = profile_catalog_for(&preferences, &root, generation);
+    save_preferences(&mut state, preferences)?;
+    Ok(catalog)
+}
+
+#[tauri::command]
+fn create_profile(name: String, state: State<'_, Shared>) -> CommandResult<ProfileCatalog> {
+    change_profile_catalog(state.inner(), |saved| saved.create_profile(&name))
+}
+
+#[tauri::command]
+fn update_profile(name: String, state: State<'_, Shared>) -> CommandResult<ProfileCatalog> {
+    change_profile_catalog(state.inner(), |saved| saved.update_profile(&name))
+}
+
+#[tauri::command]
+fn rename_profile(
+    current_name: String,
+    new_name: String,
+    state: State<'_, Shared>,
+) -> CommandResult<ProfileCatalog> {
+    change_profile_catalog(state.inner(), |saved| {
+        saved.rename_profile(&current_name, &new_name)
+    })
+}
+
+#[tauri::command]
+fn delete_profile(name: String, state: State<'_, Shared>) -> CommandResult<ProfileCatalog> {
+    change_profile_catalog(state.inner(), |saved| saved.delete_profile(&name))
+}
+
+fn load_profile_at(shared: &Shared, name: &str) -> CommandResult<WorkspaceResponse> {
+    let (previous, generation, cancel, active_profile) = {
+        let mut state = lock(shared)?;
+        let mut previous = state.workspace.clone().ok_or("choose a workspace first")?;
+        let root = previous.root.display().to_string();
+        let mut saved = state
+            .preferences
+            .workspaces
+            .get(&root)
+            .cloned()
+            .ok_or("workspace preferences unavailable")?;
+        saved
+            .activate_profile(name)
+            .map_err(|error| error.to_string())?;
+        previous.policy = saved.policy;
+        previous.intents = saved.intents;
+        let active_profile = saved.active_profile.ok_or("profile name is invalid")?;
+        let (generation, cancel) = start_scan(&mut state);
+        (previous, generation, cancel, active_profile)
+    };
+    let workspace = Workspace::scan_pinned_with_outputs(
+        previous.root_handle,
+        previous.policy,
+        previous.intents,
+        previous.browsed,
+        previous.generated_outputs,
+        &cancel,
+    )
+    .map_err(|error| error.to_string())?;
+    publish_with_active_profile(shared, workspace, generation, Some(&active_profile))
+}
+
+#[tauri::command]
+async fn load_profile(
+    name: String,
+    state: State<'_, Shared>,
+    watcher: State<'_, WatchShared>,
+) -> CommandResult<WorkspaceResponse> {
+    let shared = state.inner().clone();
+    let response = blocking(move || load_profile_at(&shared, &name)).await?;
+    activate_watcher(watcher.inner(), &response);
+    Ok(response)
 }
 
 #[tauri::command]
@@ -1549,19 +1687,26 @@ async fn cancel_operation(state: State<'_, Shared>) -> CommandResult<Option<Work
 }
 
 fn cancel_and_snapshot(shared: &Shared) -> CommandResult<Option<WorkspaceResponse>> {
-    let (generation, workspace) = {
+    let (generation, workspace, preferences) = {
         let mut state = lock(shared)?;
         cancel_active_token_estimate(&mut state);
         cancel_active_output(&mut state);
         state.cancel.store(true, Ordering::Relaxed);
         state.generation += 1;
         state.cancel = Arc::new(AtomicBool::new(false));
-        (state.generation, state.workspace.clone())
+        (
+            state.generation,
+            state.workspace.clone(),
+            state.preferences.clone(),
+        )
     };
     let snapshot = workspace.map(|workspace| Arc::new(workspace.view(generation)));
     let response = snapshot
         .as_ref()
-        .map(|view| paging::initial(view))
+        .map(|view| {
+            let catalog = profile_catalog_for(&preferences, &view.root, generation);
+            paging::initial(view, catalog)
+        })
         .transpose()?;
     let mut state = lock(shared)?;
     if state.generation != generation {
@@ -1623,6 +1768,11 @@ fn main() {
         request_focus_reconcile,
         set_intent,
         set_policy,
+        create_profile,
+        update_profile,
+        rename_profile,
+        delete_profile,
+        load_profile,
         browse_ignored,
         preview_file,
         estimate_tokens,
@@ -1650,6 +1800,11 @@ fn main() {
         request_focus_reconcile,
         set_intent,
         set_policy,
+        create_profile,
+        update_profile,
+        rename_profile,
+        delete_profile,
+        load_profile,
         browse_ignored,
         preview_file,
         estimate_tokens,
@@ -2795,6 +2950,243 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(saved.policy.include_extensions, [".md"]);
+    }
+
+    #[test]
+    fn published_workspace_contains_its_scoped_profile_catalog() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root_key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        let mut saved = SavedWorkspace::default();
+        saved.create_profile("Rust").unwrap();
+        saved.create_profile("Documentation").unwrap();
+        saved.activate_profile("Rust").unwrap();
+        let mut preferences = Preferences::default();
+        preferences.workspaces.insert(root_key.clone(), saved);
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            preferences,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+
+        let response = publish(&shared, fixture(root.path()), 1).unwrap();
+
+        assert_eq!(response.profile_catalog.root, root_key);
+        assert_eq!(response.profile_catalog.generation, 1);
+        assert_eq!(response.profile_catalog.names, ["Documentation", "Rust"]);
+        assert_eq!(
+            response.profile_catalog.active_profile.as_deref(),
+            Some("Rust")
+        );
+    }
+
+    #[test]
+    fn profile_catalog_mutations_commit_to_disk_before_returning() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root_key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+        publish(&shared, fixture(root.path()), 1).unwrap();
+
+        let catalog =
+            change_profile_catalog(&shared, |saved| saved.create_profile("Rust")).unwrap();
+        assert_eq!(catalog.root, root_key);
+        assert_eq!(catalog.generation, 1);
+        assert_eq!(catalog.names, ["Rust"]);
+        assert_eq!(catalog.active_profile.as_deref(), Some("Rust"));
+
+        let persisted = Preferences::load(&config.path().join("settings.json")).unwrap();
+        assert_eq!(
+            persisted.workspaces[&root_key].profiles["Rust"].policy,
+            FilterPolicy::default()
+        );
+        assert_eq!(
+            persisted.workspaces[&root_key].active_profile.as_deref(),
+            Some("Rust")
+        );
+
+        let before = lock(&shared).unwrap().preferences.workspaces[&root_key]
+            .profiles
+            .clone();
+        let invalid_parent = config.path().join("not-a-directory");
+        std::fs::write(&invalid_parent, "fixture").unwrap();
+        lock(&shared).unwrap().settings_path = invalid_parent.join("settings.json");
+        assert!(change_profile_catalog(&shared, |saved| saved.create_profile("Docs")).is_err());
+        assert_eq!(
+            lock(&shared).unwrap().preferences.workspaces[&root_key].profiles,
+            before
+        );
+        let after_failed_save = Preferences::load(&config.path().join("settings.json")).unwrap();
+        assert_eq!(after_failed_save.version, persisted.version);
+        assert_eq!(after_failed_save.recent_root, persisted.recent_root);
+        assert_eq!(
+            after_failed_save.workspaces[&root_key],
+            persisted.workspaces[&root_key]
+        );
+    }
+
+    #[test]
+    fn profile_catalog_uses_published_generation_during_an_inflight_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root_key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+        let published = publish(&shared, fixture(root.path()), 1).unwrap();
+
+        // begin_scan advances the request generation while the old snapshot
+        // stays published until the replacement scan succeeds.
+        lock(&shared).unwrap().generation = 2;
+        let catalog =
+            change_profile_catalog(&shared, |saved| saved.create_profile("Rust")).unwrap();
+
+        assert_eq!(catalog.root, root_key);
+        assert_eq!(catalog.generation, published.view.generation);
+        assert_eq!(catalog.generation, 1);
+    }
+
+    #[test]
+    fn loading_profile_changes_only_workspace_policy_and_intents() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.md"), "notes\n").unwrap();
+        let root_key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        let mut saved = SavedWorkspace::default();
+        saved.create_profile("Rust").unwrap();
+        saved.policy.include_extensions = vec![".md".into()];
+        saved.intents.insert("file.md".into(), Intent::ForceExclude);
+        saved
+            .intents
+            .insert("stale.md".into(), Intent::ForceInclude);
+        saved.create_profile("Docs").unwrap();
+        saved.activate_profile("Rust").unwrap();
+        let mut preferences = Preferences::default();
+        preferences.workspaces.insert(root_key.clone(), saved);
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            preferences,
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        }));
+        let mut workspace = fixture(root.path());
+        workspace.browsed.insert("src".into());
+        workspace.generated_outputs.insert("context.md".into());
+        publish(&shared, workspace, 1).unwrap();
+
+        let response = load_profile_at(&shared, "Docs").unwrap();
+
+        assert_eq!(response.view.root, root_key);
+        assert_eq!(
+            response.profile_catalog.generation,
+            response.view.generation
+        );
+        assert_eq!(
+            response.profile_catalog.active_profile.as_deref(),
+            Some("Docs")
+        );
+        assert_eq!(response.view.policy.include_extensions, [".md"]);
+        let file = response
+            .view
+            .entries
+            .iter()
+            .find(|entry| entry.path == "file.md")
+            .unwrap();
+        assert!(!file.selected);
+        let current = lock(&shared).unwrap();
+        let workspace = current.workspace.as_ref().unwrap();
+        assert!(workspace.browsed.contains("src"));
+        assert!(workspace.generated_outputs.contains("context.md"));
+        let saved = &current.preferences.workspaces[&root_key];
+        assert_eq!(saved.active_profile.as_deref(), Some("Docs"));
+        assert_eq!(saved.intents.get("stale.md"), Some(&Intent::ForceInclude));
+        assert!(saved.generated_outputs.contains("context.md"));
+    }
+
+    #[test]
+    fn failed_profile_load_save_keeps_current_workspace_and_active_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.md"), "notes\n").unwrap();
+        let root_key = std::fs::canonicalize(root.path())
+            .unwrap()
+            .display()
+            .to_string();
+        let mut saved = SavedWorkspace::default();
+        saved.create_profile("Original").unwrap();
+        saved.policy.include_extensions = vec![".md".into()];
+        saved.create_profile("Docs").unwrap();
+        saved.activate_profile("Original").unwrap();
+        let mut preferences = Preferences::default();
+        preferences.workspaces.insert(root_key.clone(), saved);
+        let settings_path = config.path().join("settings.json");
+        let shared = Arc::new(Mutex::new(Session {
+            generation: 1,
+            preferences,
+            settings_path: settings_path.clone(),
+            ..Default::default()
+        }));
+        publish(&shared, fixture(root.path()), 1).unwrap();
+        let before_workspace = lock(&shared).unwrap().workspace.as_ref().unwrap().clone();
+        let before_preferences = lock(&shared).unwrap().preferences.clone();
+        let invalid_parent = config.path().join("not-a-directory");
+        std::fs::write(&invalid_parent, "fixture").unwrap();
+        lock(&shared).unwrap().settings_path = invalid_parent.join("settings.json");
+
+        let error = match load_profile_at(&shared, "Docs") {
+            Ok(_) => panic!("profile load should not commit when its settings save fails"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("Could not save preferences"));
+        let state = lock(&shared).unwrap();
+        assert_eq!(
+            state.workspace.as_ref().unwrap().policy,
+            before_workspace.policy
+        );
+        assert_eq!(
+            state.workspace.as_ref().unwrap().intents,
+            before_workspace.intents
+        );
+        assert_eq!(
+            state.preferences.recent_root,
+            before_preferences.recent_root
+        );
+        assert_eq!(
+            state.preferences.workspaces[&root_key],
+            before_preferences.workspaces[&root_key]
+        );
+        drop(state);
+        let persisted = Preferences::load(&settings_path).unwrap();
+        assert_eq!(
+            persisted.workspaces[&root_key].active_profile.as_deref(),
+            Some("Original")
+        );
+        assert!(
+            persisted.workspaces[&root_key]
+                .policy
+                .include_extensions
+                .is_empty()
+        );
     }
 
     #[test]

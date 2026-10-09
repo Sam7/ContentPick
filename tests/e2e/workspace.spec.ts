@@ -568,6 +568,7 @@ test('keeps pending-operation status and cancellation error above the footer at 
       entryCount: 1, nextOffset: null,
       selectedCount: 1, estimatedBytes: 12,
       policy: { gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] },
+      profileCatalog: { root: 'C:/workspace/project', generation: 1, names: [], activeProfile: null },
       incomplete: false, diagnostics: [],
     };
     const watchHealth = {

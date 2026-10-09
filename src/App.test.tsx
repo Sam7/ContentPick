@@ -1167,6 +1167,97 @@ describe('ContextPick workspace UI', () => {
     expect(resetCalls).toHaveLength(1);
   });
 
+  it('shows saved selection profiles in local workspace settings', async () => {
+    const user = userEvent.setup();
+    render(<App bridge={createBrowserBridge()} />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    expect(await screen.findByRole('heading', { name: 'Selection profiles' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Saved profile' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Load profile' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save as profile' })).toBeInTheDocument();
+  });
+
+  it('loads, updates, renames, deletes, and creates saved selection profiles', async () => {
+    const user = userEvent.setup();
+    render(<App bridge={createBrowserBridge()} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    const profile = screen.getByRole('combobox', { name: 'Saved profile' });
+
+    expect(screen.getByText('Rust', { selector: 'strong' })).toBeInTheDocument();
+    await user.selectOptions(profile, 'Documentation');
+    await user.click(screen.getByRole('button', { name: 'Load profile' }));
+    expect(await screen.findByText('Documentation', { selector: 'strong' })).toBeInTheDocument();
+
+    await user.selectOptions(profile, 'Rust');
+    await user.click(screen.getByRole('button', { name: 'Update profile' }));
+    expect(await screen.findByText('Rust', { selector: 'strong' })).toBeInTheDocument();
+
+    await user.selectOptions(profile, 'Documentation');
+    const rename = screen.getByRole('textbox', { name: 'Rename selected profile' });
+    await user.clear(rename);
+    await user.type(rename, 'Guides');
+    await user.click(screen.getByRole('button', { name: 'Rename profile' }));
+    await waitFor(() => expect(profile).toHaveValue('Guides'));
+    expect(screen.getByRole('option', { name: 'Guides' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Delete profile' }));
+    await waitFor(() => expect(screen.queryByRole('option', { name: 'Guides' })).not.toBeInTheDocument());
+
+    await user.type(screen.getByRole('textbox', { name: 'New profile name' }), 'Notes');
+    await user.click(screen.getByRole('button', { name: 'Save as profile' }));
+    expect(await screen.findByText('Notes', { selector: 'strong' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Notes' })).toBeInTheDocument();
+  });
+
+  it('preserves the preview and tree search while loading a profile', async () => {
+    const user = userEvent.setup();
+    render(<App bridge={createBrowserBridge()} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Preview README.md' }));
+    expect(await screen.findByText(/^# Patchwork/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Expand src' }));
+    await user.type(screen.getByRole('textbox', { name: 'Search files' }), 'main.ts');
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Saved profile' }), 'Documentation');
+    await user.click(screen.getByRole('button', { name: 'Load profile' }));
+
+    expect(await screen.findByText(/^# Patchwork/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getByRole('textbox', { name: 'Search files' })).toHaveValue('main.ts');
+    expect(screen.getByRole('button', { name: 'Preview src/main.ts' })).toBeInTheDocument();
+  });
+
+  it('shows Custom when edits diverge from saved profile snapshots', async () => {
+    const user = userEvent.setup();
+    render(<App bridge={createBrowserBridge()} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Select README.md' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    expect(await screen.findByText('Custom', { selector: 'strong' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Rust' })).toBeInTheDocument();
+  });
+
+  it('surfaces profile persistence errors without changing the visible catalog', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const bridge = {
+      ...base,
+      create_profile: async () => { throw new Error('Profile storage is unavailable.'); },
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.type(screen.getByRole('textbox', { name: 'New profile name' }), 'Local notes');
+    await user.click(screen.getByRole('button', { name: 'Save as profile' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Profile storage is unavailable.');
+    expect(screen.queryByRole('option', { name: 'Local notes' })).not.toBeInTheDocument();
+    expect(screen.getByText('Rust', { selector: 'strong' })).toBeInTheDocument();
+  });
+
   it('reopens collapsed filters on the first click and preserves unsubmitted drafts', async () => {
     const user = userEvent.setup();
     render(<App bridge={createBrowserBridge()} />);
@@ -1629,6 +1720,7 @@ describe('ContextPick workspace UI', () => {
     const largeWorkspace: WorkspaceView = {
       root: '/workspace/large', generation: 1, entries, entryCount: entries.length, nextOffset: null, selectedCount: 0, estimatedBytes: 0, incomplete: false, diagnostics: [],
       policy: { gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] },
+      profileCatalog: { root: '/workspace/large', generation: 1, names: [], activeProfile: null },
     };
     const bridge = {
       ...createBrowserBridge(),

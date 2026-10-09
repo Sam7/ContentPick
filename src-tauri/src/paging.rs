@@ -4,6 +4,15 @@ use serde::Serialize;
 pub(crate) const PAGE_ENTRY_LIMIT: usize = 512;
 pub(crate) const PAGE_BYTE_LIMIT: usize = 256 * 1024;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProfileCatalog {
+    pub root: String,
+    pub generation: u64,
+    pub names: Vec<String>,
+    pub active_profile: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkspaceResponse {
@@ -11,6 +20,7 @@ pub(crate) struct WorkspaceResponse {
     pub view: WorkspaceView,
     pub entry_count: usize,
     pub next_offset: Option<usize>,
+    pub profile_catalog: ProfileCatalog,
 }
 
 #[derive(Serialize)]
@@ -58,7 +68,10 @@ fn bounded_entries(
     Ok((entries, (end < view.entries.len()).then_some(end)))
 }
 
-pub(crate) fn initial(view: &WorkspaceView) -> Result<WorkspaceResponse, String> {
+pub(crate) fn initial(
+    view: &WorkspaceView,
+    profile_catalog: ProfileCatalog,
+) -> Result<WorkspaceResponse, String> {
     let mut response = WorkspaceResponse {
         view: WorkspaceView {
             root: view.root.clone(),
@@ -72,6 +85,7 @@ pub(crate) fn initial(view: &WorkspaceView) -> Result<WorkspaceResponse, String>
         },
         entry_count: view.entries.len(),
         next_offset: None,
+        profile_catalog,
     };
     let (entries, next_offset) = bounded_entries(view, 0, serialized_len(&response)?)?;
     response.view.entries = entries;
@@ -123,10 +137,19 @@ mod tests {
         }
     }
 
+    fn profile_catalog(view: &WorkspaceView) -> ProfileCatalog {
+        ProfileCatalog {
+            root: view.root.clone(),
+            generation: view.generation,
+            names: vec![],
+            active_profile: None,
+        }
+    }
+
     #[test]
     fn twenty_thousand_entries_transfer_in_bounded_ordered_pages() {
         let view = fixture(20_000);
-        let first = initial(&view).unwrap();
+        let first = initial(&view, profile_catalog(&view)).unwrap();
         assert_eq!(first.entry_count, 20_000);
         assert_eq!(first.view.entries.len(), PAGE_ENTRY_LIMIT);
         assert_eq!(first.view.selected_count, 20_000);
@@ -157,7 +180,7 @@ mod tests {
         for entry in &mut view.entries {
             entry.reason = Some("quote\"\n\\é".repeat(300));
         }
-        let first = initial(&view).unwrap();
+        let first = initial(&view, profile_catalog(&view)).unwrap();
         assert!(first.view.entries.len() < PAGE_ENTRY_LIMIT);
         assert!(!first.view.entries.is_empty());
         assert!(serde_json::to_vec(&first).unwrap().len() <= PAGE_BYTE_LIMIT);
@@ -165,12 +188,31 @@ mod tests {
         assert!(!second.entries.is_empty());
         assert!(serde_json::to_vec(&second).unwrap().len() <= PAGE_BYTE_LIMIT);
         view.diagnostics.push("x".repeat(PAGE_BYTE_LIMIT));
-        assert!(initial(&view).is_err());
+        assert!(initial(&view, profile_catalog(&view)).is_err());
+    }
+
+    #[test]
+    fn initial_page_budget_includes_worst_case_profile_catalog_escaping() {
+        let view = fixture(20_000);
+        let names: Vec<_> = (0..20)
+            .map(|index| format!("{index:02}{}", "\u{0001}".repeat(78)))
+            .collect();
+        let profile_catalog = ProfileCatalog {
+            root: view.root.clone(),
+            generation: view.generation,
+            active_profile: names.first().cloned(),
+            names,
+        };
+
+        let response = initial(&view, profile_catalog).unwrap();
+
+        assert!(serde_json::to_vec(&response).unwrap().len() <= PAGE_BYTE_LIMIT);
     }
 
     #[test]
     fn empty_end_invalid_offsets_and_oversized_entry_are_explicit() {
-        let empty = initial(&fixture(0)).unwrap();
+        let empty_view = fixture(0);
+        let empty = initial(&empty_view, profile_catalog(&empty_view)).unwrap();
         assert!(empty.view.entries.is_empty());
         assert!(empty.next_offset.is_none());
         let mut view = fixture(1);
@@ -178,7 +220,7 @@ mod tests {
         assert!(page(&view, 2).is_err());
         assert!(page(&view, usize::MAX).is_err());
         view.entries[0].reason = Some("x".repeat(PAGE_BYTE_LIMIT));
-        assert!(initial(&view).is_err());
+        assert!(initial(&view, profile_catalog(&view)).is_err());
         assert!(page(&view, 0).is_err());
     }
 }

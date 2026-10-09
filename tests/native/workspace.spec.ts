@@ -134,6 +134,63 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await expect(page.getByRole('button', { name: 'Preview dist/deep/generated.ts' })).toHaveCount(0);
 });
 
+test('native selection profiles load and persist across restart', async ({ native }, testInfo) => {
+  let page = native.page;
+  const rootBeforeLoad = await page.locator('.workspace-path').getAttribute('title');
+  await expect(page.locator('.metric-primary strong')).toHaveText('602');
+  const search = page.getByRole('textbox', { name: 'Search files' });
+  await search.fill('file-0599.ts');
+  await page.getByRole('button', { name: 'Preview src/file-0599.ts' }).click();
+  await expect(page.getByText('export const value599 = 599;')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('textbox', { name: 'New profile name' }).fill('Baseline');
+  await page.getByRole('button', { name: 'Save as profile' }).click();
+  await expect(page.locator('.profile-active strong')).toHaveText('Baseline');
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(search).toHaveValue('file-0599.ts');
+  await search.clear();
+  await page.getByRole('checkbox', { name: 'Select README.md' }).click();
+  await expect(page.locator('.metric-primary strong')).toHaveText('601');
+  await search.fill('file-0599.ts');
+  await page.getByRole('button', { name: 'Preview src/file-0599.ts' }).click();
+  await expect(page.getByText('export const value599 = 599;')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('textbox', { name: 'New profile name' }).fill('Reduced');
+  await page.getByRole('button', { name: 'Save as profile' }).click();
+  const profiles = page.getByRole('combobox', { name: 'Saved profile' });
+  await page.screenshot({ path: testInfo.outputPath('profile-settings.png') });
+  await profiles.selectOption('Baseline');
+  await expect(profiles).toHaveValue('Baseline');
+  await page.getByRole('button', { name: 'Load profile' }).click();
+  await expect(page.locator('.profile-active strong')).toHaveText('Baseline');
+  await expect(page.locator('.metric-primary strong')).toHaveText('602');
+  await expect(page.locator('.workspace-path')).toHaveAttribute('title', rootBeforeLoad!);
+  await expect(page.getByText('export const value599 = 599;')).toBeVisible();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(search).toHaveValue('file-0599.ts');
+  await expect(page.getByRole('button', { name: 'Preview src/file-0599.ts' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('textbox', { name: 'Rename selected profile' }).fill('Everything');
+  await page.getByRole('button', { name: 'Rename profile' }).click();
+  await expect(page.locator('.profile-active strong')).toHaveText('Everything');
+  await profiles.selectOption('Reduced');
+  await page.getByRole('button', { name: 'Delete profile' }).click();
+  await expect(profiles.getByRole('option', { name: 'Reduced' })).toHaveCount(0);
+
+  await native.stop();
+  page = await native.launch();
+  await expect(page.locator('.metric-primary strong')).toHaveText('602');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const restoredProfiles = page.getByRole('combobox', { name: 'Saved profile' });
+  await expect(restoredProfiles).toHaveValue('Everything');
+  await expect(restoredProfiles.getByRole('option')).toHaveCount(1);
+  await expect(page.locator('.profile-active strong')).toHaveText('Everything');
+});
+
 test('native sensitive-file confirmation gates copy and export and rejects stale selection tickets', async ({ native }) => {
   const { page, root } = native;
   const marker = `SYNTHETIC_CONTEXT_PICK_${Date.now()}`;
@@ -550,7 +607,7 @@ test('native startup migrates version-1 extension exclusions into visible path r
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-4-native-filters-720x520-scrolled.png') });
 
   const settings = await native.readSettings();
-  expect(settings.version).toBe(2);
+  expect(settings.version).toBe(3);
   const workspaces = settings.workspaces as Record<string, { policy: Record<string, unknown>; intents: Record<string, string> }>;
   const migrated = workspaces[native.root];
   expect(migrated.policy.excludePaths).toEqual(['file-ext:ts']);
