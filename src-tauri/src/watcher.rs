@@ -495,7 +495,7 @@ impl WorkspaceWatcher {
         let callback_revision = Arc::clone(&invalidation_revision);
         let callback_root = root.to_path_buf();
         let mut watcher = notify::RecommendedWatcher::new(
-            move |result| {
+            move |result: notify::Result<Event>| {
                 #[cfg(all(test, target_os = "macos"))]
                 if let Ok(event) = &result {
                     eprintln!(
