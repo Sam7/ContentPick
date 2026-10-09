@@ -88,12 +88,12 @@ fn reject_in_root_links(root: &WorkspaceRoot, original: &Path) -> Result<bool> {
         }
         if inside {
             let metadata = std::fs::symlink_metadata(&prefix)?;
-            let mut linked = metadata.file_type().is_symlink();
+            let linked = metadata.file_type().is_symlink();
             #[cfg(windows)]
-            {
+            let linked = {
                 use std::os::windows::fs::MetadataExt;
-                linked |= metadata.file_attributes() & 0x400 != 0;
-            }
+                linked || metadata.file_attributes() & 0x400 != 0
+            };
             if linked {
                 return Err(Error::Message(
                     "link or reparse point in workspace destination parent".into(),
@@ -177,12 +177,12 @@ impl Destination {
             Err(error) => return Err(error.into()),
         };
         if let Some(metadata) = metadata {
-            let mut link = metadata.file_type().is_symlink();
+            let link = metadata.file_type().is_symlink();
             #[cfg(windows)]
-            {
+            let link = {
                 use cap_std::fs::MetadataExt;
-                link |= metadata.file_attributes() & 0x400 != 0;
-            }
+                link || metadata.file_attributes() & 0x400 != 0
+            };
             if link || !metadata.is_file() {
                 return Err(Error::Message(
                     "destination must be a regular file, not a link".into(),

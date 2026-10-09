@@ -842,12 +842,12 @@ impl Workspace {
                     continue;
                 }
             };
-            let mut linked = metadata.file_type().is_symlink();
+            let linked = metadata.file_type().is_symlink();
             #[cfg(windows)]
-            {
+            let linked = {
                 use cap_std::fs::MetadataExt;
-                linked |= metadata.file_attributes() & 0x400 != 0;
-            }
+                linked || metadata.file_attributes() & 0x400 != 0
+            };
             let directory = metadata.is_dir() && !linked;
             let mut hard = if linked {
                 Some("link/reparse point: traversal disabled".into())
