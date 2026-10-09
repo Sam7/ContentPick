@@ -496,6 +496,13 @@ impl WorkspaceWatcher {
         let callback_root = root.to_path_buf();
         let mut watcher = notify::RecommendedWatcher::new(
             move |result| {
+                #[cfg(all(test, target_os = "macos"))]
+                if let Ok(event) = &result {
+                    eprintln!(
+                        "CONTEXT_PICK_WATCH root={callback_root:?} event={event:?} rescan={}",
+                        event.need_rescan()
+                    );
+                }
                 forward_result(
                     result,
                     &callback_root,
