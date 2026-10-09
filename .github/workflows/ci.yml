@@ -74,6 +74,15 @@ jobs:
       - name: Rust format
         run: cargo fmt --all -- --check
 
+      - name: Install pinned Rust license report generator
+        run: cargo install cargo-about --version 0.9.2 --locked --root .tools/license-audit --features cli
+
+      - name: Prepare and verify target-specific notices
+        run: |
+          pnpm licenses:rust ${{ matrix.artifact_platform }}
+          node licenses/generate-frontend-notices.mjs
+          git diff --exit-code -- licenses/generated/frontend.txt licenses/generated/rust-${{ matrix.artifact_platform }}.html
+
       - name: Rust workspace tests
         run: cargo test --workspace --locked
 
@@ -87,15 +96,6 @@ jobs:
       - name: Native application build (no bundle)
         working-directory: src-tauri
         run: cargo build --locked
-
-      - name: Install pinned Rust license report generator
-        run: cargo install cargo-about --version 0.9.2 --locked --root .tools/license-audit --features cli
-
-      - name: Prepare and verify target-specific notices
-        run: |
-          pnpm licenses:rust ${{ matrix.artifact_platform }}
-          node licenses/generate-frontend-notices.mjs
-          git diff --exit-code -- licenses/generated/frontend.txt licenses/generated/rust-${{ matrix.artifact_platform }}.html
 
       - name: Build unsigned platform candidate bundle
         run: pnpm exec tauri build --bundles ${{ matrix.bundle }}

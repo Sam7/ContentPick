@@ -19,7 +19,7 @@ The execution checklist is [`ROADMAP.md`](../project/ROADMAP.md); product requir
 
 ## Remaining M5.5 gates
 
-1. Verify the modified Windows/macOS architecture CI bundle matrix on the pushed candidate; retain and inspect exact bundle artifacts and hashes. No remote run for this workflow exists yet.
+1. Verify the corrected Windows/macOS architecture CI bundle matrix; retain and inspect exact bundle artifacts and hashes. Run `37887028410` exposed a clean-checkout ordering defect on macOS arm64: `cargo test --workspace` compiled Tauri before the ignored generated notice resource existed. The workflow fix now prepares target notices before all Tauri-compiling Cargo steps. Windows x64 and macOS x64 were still running at last check; rerun the matrix after pushing the fix.
 2. Obtain macOS x64/arm64 DMGs and complete clean supported-Mac install/Gatekeeper evidence; no DMG or local Mac GUI smoke exists.
 3. On independent clean Windows environments, verify absent-WebView2 bootstrap and restricted-network failure/recovery, silent install with progress, supported standard/elevated contexts, registration, upgrade and uninstall. Current Windows host already had WebView2; only the standard-user install/uninstall path is evidenced.
 4. Validate Chocolatey packaging and Homebrew cask with their actual tooling on supported clean hosts; test package-manager-initiated installation where tooling is available. Chocolatey/Ruby/Homebrew are unavailable on this Windows host. WinGet validates locally. Recheck final package IDs/schema immediately before later submission.
