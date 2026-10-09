@@ -846,7 +846,8 @@ fn depth_limited_branch_does_not_hide_readable_siblings() {
     );
 }
 
-#[cfg(unix)]
+// APFS rejects malformed UTF-8 names before the scanner can observe them.
+#[cfg(target_os = "linux")]
 #[test]
 fn invalid_filename_marks_ancestors_incomplete_without_hiding_readable_siblings() {
     use std::os::unix::ffi::OsStringExt;
