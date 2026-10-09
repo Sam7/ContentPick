@@ -166,10 +166,11 @@ try {
         throw "Expected a per-user install below LocalAppData, received $installDir."
     }
     if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) { throw 'Installed contextpick.exe is missing.' }
-    foreach ($relativePath in @('LICENSE', 'licenses\frontend.txt', 'licenses\rust.html', 'licenses\ATTRIBUTION.md')) {
+    foreach ($relativePath in @('licenses\LICENSE', 'licenses\frontend.txt', 'licenses\rust.html', 'licenses\ATTRIBUTION.md')) {
         $resourcePath = Join-Path $installDir $relativePath
         if (-not (Test-Path -LiteralPath $resourcePath -PathType Leaf)) { throw "Installed third-party/project notice is missing: $relativePath" }
     }
+    if (Test-Path -LiteralPath (Join-Path $installDir 'LICENSE')) { throw 'The project license should only be installed under licenses\LICENSE.' }
 
     . (Join-Path $repoRoot 'scripts/env.ps1')
     Push-Location $repoRoot
@@ -261,11 +262,50 @@ try {
             if (-not ($insideTemp -and $ownedFixture -and $isExpectedPath -and -not $isReparsePoint)) {
                 throw 'The app config directory did not contain only the expected disposable smoke-test state.'
             }
-            $configFiles = @(Get-ChildItem -LiteralPath $resolvedAppConfig -Force)
-            if ($configFiles.Count -ne 1 -or $configFiles[0].Name -ne 'settings.json' -or $configFiles[0].PSIsContainer -or $configFiles[0].Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+
+            $configEntries = @(Get-ChildItem -LiteralPath $resolvedAppConfig -Force -Recurse)
+            if (@($configEntries | Where-Object { $_.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint) }).Count -gt 0) {
+                throw 'The app config directory contains a reparse point; preserving it for diagnosis.'
+            }
+            $rootEntries = @(Get-ChildItem -LiteralPath $resolvedAppConfig -Force)
+            if (@($rootEntries | Where-Object { $_.Name -notin @('settings.json', 'settings-recovery') }).Count -gt 0) {
                 throw 'The app config directory contains unexpected files; preserving it for diagnosis.'
             }
-            Remove-Item -LiteralPath $configFiles[0].FullName -Force
+            $settingsFile = Join-Path $resolvedAppConfig 'settings.json'
+            if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
+                throw 'The smoke-test settings file is missing; preserving the app config directory.'
+            }
+            $recoveryDir = Join-Path $resolvedAppConfig 'settings-recovery'
+            $recoveryFiles = @()
+            if (Test-Path -LiteralPath $recoveryDir) {
+                if (-not (Test-Path -LiteralPath $recoveryDir -PathType Container)) {
+                    throw 'The settings-recovery path is not a directory; preserving app settings.'
+                }
+                $recoveryEntries = @(Get-ChildItem -LiteralPath $recoveryDir -Force -Recurse)
+                if (@($recoveryEntries | Where-Object { $_.PSIsContainer -or $_.Name -notmatch '^settings-[0-9]+-[0-9]+\.json$' }).Count -gt 0) {
+                    throw 'The settings-recovery directory contains unexpected entries; preserving app settings.'
+                }
+                $recoveryFiles = @($recoveryEntries)
+                foreach ($recoveryFile in $recoveryFiles) {
+                    $snapshot = Get-Content -LiteralPath $recoveryFile.FullName -Raw | ConvertFrom-Json
+                    $snapshotRootValue = [string]$snapshot.recentRoot
+                    if ($snapshotRootValue.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $snapshotRootValue = '\\' + $snapshotRootValue.Substring(8)
+                    } elseif ($snapshotRootValue.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $snapshotRootValue = $snapshotRootValue.Substring(4)
+                    }
+                    $snapshotRoot = [System.IO.Path]::GetFullPath($snapshotRootValue)
+                    $snapshotFixture = Split-Path -Parent $snapshotRoot
+                    $snapshotFixtureName = Split-Path -Leaf $snapshotFixture
+                    if (-not ($snapshotRoot.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and $snapshotFixtureName.StartsWith('contextpick-native-playwright-', [System.StringComparison]::Ordinal))) {
+                        throw 'A recovery snapshot does not point to the disposable Playwright fixture; preserving app settings.'
+                    }
+                }
+            }
+
+            foreach ($recoveryFile in $recoveryFiles) { Remove-Item -LiteralPath $recoveryFile.FullName -Force }
+            if (Test-Path -LiteralPath $recoveryDir) { Remove-Item -LiteralPath $recoveryDir }
+            Remove-Item -LiteralPath $settingsFile -Force
             Remove-Item -LiteralPath $resolvedAppConfig
             Write-Output 'Removed the disposable smoke-test app settings.'
         } catch {

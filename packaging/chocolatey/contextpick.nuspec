@@ -12,6 +12,6 @@
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <description>Offline desktop utility for selecting project files and exporting context for AI tools. Candidate only; not submitted or available from Chocolatey Community.</description>
     <summary>Select project files and export context for AI tools.</summary>
-    <tags>context files developer-tools export</tags>
+    <tags>admin context files developer-tools export</tags>
   </metadata>
 </package>

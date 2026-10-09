@@ -95,12 +95,40 @@ jobs:
         working-directory: src-tauri
         run: cargo check --locked
 
-      - name: Native application build (no bundle)
+      - name: Set Windows bundle source timestamp
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $epoch = (git log -1 --format=%ct).Trim()
+          if ($LASTEXITCODE -ne 0 -or $epoch -notmatch '^\d+$') { throw 'Could not read the source commit timestamp.' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "SOURCE_DATE_EPOCH=$epoch" -Encoding utf8
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value 'RUSTFLAGS=-C link-arg=/Brepro' -Encoding utf8
+
+      - name: Build Windows app (no bundle)
+        if: runner.os == 'Windows'
+        run: pnpm exec tauri build --no-bundle
+
+      - name: Build macOS app (no bundle)
+        if: runner.os == 'macOS'
         working-directory: src-tauri
         run: cargo build --locked
 
-      - name: Build unsigned platform candidate bundle
-        run: pnpm exec tauri build --bundles ${{ matrix.bundle }}
+      - name: Normalize Windows installer input timestamps
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node scripts/normalize-bundle-inputs.mjs $env:SOURCE_DATE_EPOCH target/release/contextpick.exe LICENSE docs/design/ATTRIBUTION.md licenses/generated/frontend.txt licenses/generated/rust.html
+
+      - name: Build unsigned Windows candidate bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pnpm exec tauri bundle --bundles nsis --no-binary-patching
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build unsigned macOS candidate bundle
+        if: runner.os == 'macOS'
+        run: pnpm exec tauri build --bundles dmg
 
       - name: Record candidate SHA-256 (Windows)
         if: runner.os == 'Windows'

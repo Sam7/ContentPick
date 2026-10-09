@@ -27,7 +27,7 @@ $msvcToolchain = Join-Path $localRustup 'toolchains\stable-x86_64-pc-windows-msv
 $msvcAvailable = (Get-Command 'cl.exe' -ErrorAction SilentlyContinue) -or $env:VCToolsInstallDir
 $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not $msvcAvailable -and (Test-Path -LiteralPath $vswhere)) {
-    $msvcAvailable = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    $msvcAvailable = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 }
 if ($msvcAvailable -and (Test-Path -LiteralPath $msvcToolchain)) {
     $env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-msvc'

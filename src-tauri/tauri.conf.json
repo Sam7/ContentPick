@@ -21,7 +21,7 @@
     "shortDescription": "Select code. Export AI context.",
     "category": "DeveloperTool",
     "resources": {
-      "../LICENSE": "LICENSE",
+      "../LICENSE": "licenses/LICENSE",
       "../licenses/generated/frontend.txt": "licenses/frontend.txt",
       "../licenses/generated/rust.html": "licenses/rust.html",
       "../docs/design/ATTRIBUTION.md": "licenses/ATTRIBUTION.md"
