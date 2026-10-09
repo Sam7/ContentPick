@@ -81,7 +81,9 @@ jobs:
         run: |
           pnpm licenses:rust ${{ matrix.artifact_platform }}
           node licenses/generate-frontend-notices.mjs
-          git diff --exit-code -- licenses/generated/frontend.txt licenses/generated/rust-${{ matrix.artifact_platform }}.html
+          git diff --exit-code -- licenses/generated/frontend.txt
+          # The report embeds upstream license line endings; compare CRLF/LF identically without rewriting bundled text.
+          git diff --ignore-cr-at-eol --exit-code -- licenses/generated/rust-${{ matrix.artifact_platform }}.html
 
       - name: Rust workspace tests
         run: cargo test --workspace --locked
