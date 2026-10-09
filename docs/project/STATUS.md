@@ -4,6 +4,8 @@ M0–M3, M3.5 and the locally evidenced Windows P0 gate are verified; M4 impleme
 
 Run `37876858487` passed Windows but Mac failed only `export_temporary_artifacts_do_not_stale_in_root_output` (60 passed); frontend, E2E and format checks passed on both runners. The Mac test saw `Stale` after its probe write because its Tauri fixture had not first established the bounded startup baseline. A shared test-only baseline now covers this fixture and the root-replacement test. Windows Rust workspace tests **185 passed**, fmt and strict Clippy passed, and independent Luna review found no material finding. The Mac result for this candidate is still pending. A fallback physical-Mac test plan is recorded in [NEXT_SESSION](NEXT_SESSION.md); no local Mac result is claimed.
 
+Run `37877564529` passed every Windows job and macOS frontend/E2E/format, but Mac Rust tests had **59 passed, 2 failed**. The export-temp fixture passed a non-canonical temp path to a checkpoint keyed by the published canonical root; a second Tauri token-cache test also needed startup reconciliation after watcher restart. The current candidate uses each published root and baselines the initial and post-refresh token estimate before its freshness assertions. The actual unrelated file remains between scans and cache computed/reused assertions remain. Windows Rust workspace, fmt and strict Clippy pass; the independent reviewer found no material finding. The next Mac result is pending; the existing physical-Mac fallback is a plan only.
+
 ## Completed milestone evidence
 
 - **M0:** Windows toolchains, Tauri/React shell, Rust core and CI baseline are recorded as locally verified. Remote CI was not run.

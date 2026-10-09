@@ -2184,9 +2184,15 @@ mod tests {
             settings_path: config.path().join("settings.json"),
             ..Default::default()
         }));
-        let (_, watcher) = publish_watching_fixture(&shared, root.path(), 1);
+        let (published, watcher) = publish_watching_fixture(&shared, root.path(), 1);
+        #[cfg(not(target_os = "macos"))]
+        let _ = published;
         #[cfg(target_os = "macos")]
-        watcher::reconcile_test_startup_hints(&watcher, root.path(), 1);
+        watcher::reconcile_test_startup_hints(
+            &watcher,
+            std::path::Path::new(&published.view.root),
+            1,
+        );
         let frozen = manifest(&shared, &watcher).unwrap();
 
         let temp_path = root.path().join(".contextpick-export-watcher-probe.tmp");
@@ -2233,6 +2239,12 @@ mod tests {
         let initial = publish(&shared, fixture(root.path()), 1).unwrap();
         let watcher = WatchService::new(|_| {});
         watcher.activate(std::path::Path::new(&initial.view.root), 1);
+        #[cfg(target_os = "macos")]
+        watcher::reconcile_test_startup_hints(
+            &watcher,
+            std::path::Path::new(&initial.view.root),
+            1,
+        );
 
         let first = start_token_estimate(&shared, &watcher, 1, "100:1".into()).unwrap();
         let permit = first.gate.clone().try_acquire_owned().unwrap();
@@ -2252,6 +2264,12 @@ mod tests {
         .unwrap();
         let next = publish(&shared, next_workspace, generation).unwrap();
         watcher.activate(std::path::Path::new(&next.view.root), generation);
+        #[cfg(target_os = "macos")]
+        watcher::reconcile_test_startup_hints(
+            &watcher,
+            std::path::Path::new(&next.view.root),
+            generation,
+        );
 
         let second = start_token_estimate(&shared, &watcher, generation, "100:2".into()).unwrap();
         let permit = second.gate.clone().try_acquire_owned().unwrap();
