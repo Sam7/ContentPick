@@ -281,7 +281,14 @@ export const test = base.extend<NativeFixtures>({
     const root = path.join(ownedDir, 'workspace');
     const webviewProfile = path.join(ownedDir, 'webview2-profile');
     const appDir = path.join(ownedDir, 'app');
-    const nativeExe = path.join(appDir, 'contextpick.exe');
+    const installedExe = process.env.CONTEXTPICK_NATIVE_EXECUTABLE?.trim();
+    const nativeExe = installedExe ? path.resolve(installedExe) : path.join(appDir, 'contextpick.exe');
+    const installedConfig = process.env.CONTEXTPICK_NATIVE_CONFIG_DIR?.trim();
+    let settingsDir = config;
+    if (installedExe) {
+      if (!installedConfig) throw new Error('CONTEXTPICK_NATIVE_CONFIG_DIR is required when testing an installed app.');
+      settingsDir = path.resolve(installedConfig);
+    }
     let child: ChildProcess | undefined;
     let browser: Browser | undefined;
     let page: Page | undefined;
@@ -309,7 +316,7 @@ export const test = base.extend<NativeFixtures>({
         stdio: 'ignore',
         env: {
           ...process.env,
-          CONTEXTPICK_CONFIG_DIR: config,
+          ...(installedExe ? { CONTEXTPICK_NATIVE_CONFIG_DIR: settingsDir } : { CONTEXTPICK_CONFIG_DIR: config }),
           WEBVIEW2_USER_DATA_FOLDER: webviewProfile,
           WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}`,
         },
@@ -342,14 +349,18 @@ export const test = base.extend<NativeFixtures>({
 
     try {
       if (process.platform === 'win32') {
-        await Promise.all([mkdir(config), mkdir(root), mkdir(webviewProfile), mkdir(appDir)]);
-        await Promise.all([access(builtNativeExe), access(builtWebViewLoader)]);
-        await copyFile(builtNativeExe, nativeExe);
-        await copyFile(builtWebViewLoader, path.join(appDir, 'WebView2Loader.dll'));
+        await Promise.all([mkdir(settingsDir, { recursive: true }), mkdir(root), mkdir(webviewProfile), mkdir(appDir)]);
+        if (installedExe) {
+          await access(nativeExe);
+        } else {
+          await Promise.all([access(builtNativeExe), access(builtWebViewLoader)]);
+          await copyFile(builtNativeExe, nativeExe);
+          await copyFile(builtWebViewLoader, path.join(appDir, 'WebView2Loader.dll'));
+        }
         if (nativeScale) await makeScaleWorkspace(root);
         else await makeSyntheticWorkspace(root);
         const preferences = { version: 2, recentRoot: root, workspaces: {} };
-        await writeFile(path.join(config, 'settings.json'), JSON.stringify(preferences), 'utf8');
+        await writeFile(path.join(settingsDir, 'settings.json'), JSON.stringify(preferences), 'utf8');
         await launch();
       }
       const installLegacySettings = async () => {
@@ -365,9 +376,9 @@ export const test = base.extend<NativeFixtures>({
             },
           },
         };
-        await writeFile(path.join(config, 'settings.json'), JSON.stringify(legacy), 'utf8');
+        await writeFile(path.join(settingsDir, 'settings.json'), JSON.stringify(legacy), 'utf8');
       };
-      const readSettings = async () => JSON.parse(await readFile(path.join(config, 'settings.json'), 'utf8')) as Record<string, unknown>;
+      const readSettings = async () => JSON.parse(await readFile(path.join(settingsDir, 'settings.json'), 'utf8')) as Record<string, unknown>;
       await runTest({ root, get page() { if (!page) throw new Error('Native page is not running.'); return page; }, get startupMs() { return startupMs; }, launch, deactivate: () => changeWindowActivation(false), activate: () => changeWindowActivation(true), stop, installLegacySettings, readSettings, memoryReport: memorySampler.report });
     } finally {
       let stopFailure: string | undefined;

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>contextpick</id>
+    <version>0.1.0</version>
+    <title>ContextPick</title>
+    <authors>Sam7</authors>
+    <owners>Sam7</owners>
+    <licenseUrl>https://github.com/Sam7/ContentPick/blob/main/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/Sam7/ContentPick</projectUrl>
+    <projectSourceUrl>https://github.com/Sam7/ContentPick/tree/main/packaging/chocolatey</projectSourceUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Offline desktop utility for selecting project files and exporting context for AI tools. Candidate only; not submitted or available from Chocolatey Community.</description>
+    <summary>Select project files and export context for AI tools.</summary>
+    <tags>context files developer-tools export</tags>
+  </metadata>
+</package>

@@ -11,3 +11,4 @@ src-tauri/icons/android/
 src-tauri/icons/ios/
 docs/testing/*
 docs/prompts/*
+licenses/generated/rust.html

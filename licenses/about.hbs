@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ContextPick Rust dependency licenses</title>
+</head>
+<body>
+  <h1>ContextPick Rust dependency licenses</h1>
+  <p>Generated from the locked Rust workspace dependency graph for the named target.</p>
+  <h2>License texts</h2>
+  {{#each licenses}}
+  <section id="{{id}}">
+    <h3>{{name}}</h3>
+    <ul>
+      {{#each used_by}}
+      <li><code>{{crate.name}} {{crate.version}}</code> — resolved notice expression: <code>{{crate.license}}</code></li>
+      {{/each}}
+    </ul>
+    <pre>{{text}}</pre>
+  </section>
+  {{/each}}
+</body>
+</html>

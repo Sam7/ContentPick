@@ -9,13 +9,15 @@
     "dev:web": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "lint": "eslint src scripts tests/e2e tests/native vite.config.ts playwright.config.ts playwright.native.config.ts playwright.native.scale.config.ts eslint.config.js",
+    "lint": "eslint src scripts tests/e2e tests/native vite.config.ts playwright.config.ts playwright.native.config.ts playwright.installed.config.ts playwright.native.scale.config.ts eslint.config.js",
     "test": "vitest run && node --test scripts/brand-assets.check.mjs",
     "brand:icons": "node scripts/generate-brand-icons.mjs",
     "brand:preview": "node scripts/preview-brand-icons.mjs",
+    "licenses:rust": "node scripts/prepare-rust-notice.mjs",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:native": "playwright test --config playwright.native.config.ts",
+    "test:native:installed": "playwright test --config playwright.installed.config.ts",
     "test:native:scale": "playwright test --config playwright.native.scale.config.ts"
   },
   "dependencies": {
