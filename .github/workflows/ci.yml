@@ -162,3 +162,92 @@ jobs:
             ${{ matrix.bundle_path }}.sha256
           if-no-files-found: error
           retention-days: 14
+
+  installed-windows-smoke:
+    name: Fresh Windows installer lifecycle (windows-2025)
+    needs: checks
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the Windows candidate from this run
+        uses: actions/download-artifact@v4
+        with:
+          name: contextpick-windows-x64-candidate-${{ github.run_number }}-${{ github.sha }}
+          path: ${{ runner.temp }}/contextpick-candidate
+
+      - name: Verify installer checksum sidecar
+        shell: pwsh
+        run: |
+          $artifacts = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'contextpick-candidate') -Filter '*.exe' -File)
+          if ($artifacts.Count -ne 1) { throw "Expected one NSIS installer, found $($artifacts.Count)." }
+          $installer = $artifacts[0]
+          $sidecarPath = "$($installer.FullName).sha256"
+          if (-not (Test-Path -LiteralPath $sidecarPath -PathType Leaf)) { throw 'Installer checksum sidecar is missing.' }
+          $sidecar = (Get-Content -LiteralPath $sidecarPath -Raw).Trim()
+          $pattern = '^(?<hash>[a-f0-9]{64})  ' + [regex]::Escape($installer.Name) + '$'
+          $match = [regex]::Match($sidecar, $pattern)
+          if (-not $match.Success) { throw "Checksum sidecar has unexpected content: $sidecar" }
+          $actual = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = $match.Groups['hash'].Value
+          if ($actual -cne $expected) { throw "Installer checksum mismatch: sidecar $expected, actual $actual." }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "CONTEXTPICK_CANDIDATE_INSTALLER=$($installer.FullName)" -Encoding utf8
+          "Verified $($installer.Name): $actual ($($installer.Length) bytes)"
+
+      - name: Record WebView2 runtime state before install
+        shell: pwsh
+        run: |
+          $runtimeEntries = [System.Collections.Generic.List[string]]::new()
+          foreach ($hive in @([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryHive]::CurrentUser)) {
+            foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+              $base = $null
+              $clients = $null
+              try {
+                $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
+                $clients = $base.OpenSubKey('SOFTWARE\Microsoft\EdgeUpdate\Clients')
+                if (-not $clients) { continue }
+                foreach ($subkeyName in $clients.GetSubKeyNames()) {
+                  $client = $null
+                  try {
+                    $client = $clients.OpenSubKey($subkeyName)
+                    if ([string]$client.GetValue('name') -like '*WebView2 Runtime*') {
+                      $runtimeEntries.Add("$hive/$view $($client.GetValue('name')) version=$($client.GetValue('pv'))")
+                    }
+                  } finally { if ($client) { $client.Dispose() } }
+                }
+              } finally {
+                if ($clients) { $clients.Dispose() }
+                if ($base) { $base.Dispose() }
+              }
+            }
+          }
+          if ($runtimeEntries.Count -eq 0) { Write-Output 'WebView2 Runtime: not detected in EdgeUpdate client registry.' }
+          else { $runtimeEntries | ForEach-Object { Write-Output "WebView2 Runtime: $_" } }
+          Write-Output 'The Windows runner is a fresh ContextPick profile, but its bundled OS/runtime inventory is not assumed absent.'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.10.1
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install frontend test dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install, smoke test, and uninstall candidate
+        shell: pwsh
+        run: .\scripts\test-installed.ps1 -InstallerPath $env:CONTEXTPICK_CANDIDATE_INSTALLER -AllowElevatedRunner
+
+      - name: Retain installed-app failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contextpick-installed-windows-failure-${{ github.run_number }}-${{ github.sha }}
+          path: test-results/**
+          if-no-files-found: ignore
+          retention-days: 7
