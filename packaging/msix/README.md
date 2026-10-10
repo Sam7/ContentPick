@@ -23,7 +23,14 @@ The GitHub NSIS install still downloads the WebView2 bootstrapper when needed. M
 
 Before Store submission, test the actual MSIX on supported Windows 10 and Windows 11 systems, including a clean Windows 10 machine without a previously installed WebView2 Runtime. Verify install, launch, workspace picker, scan, preview, file watching, settings persistence, export, upgrade and uninstall. If a supported configuration cannot launch without WebView2, resolve that distribution path or document the limitation before submission; do not treat successful packaging as install evidence.
 
-The package-identity launch test (`winapp run`) requires Windows Developer Mode. `node --test scripts/prepare-msix.check.mjs` covers safe layout generation, identity escaping, OS bounds, version mapping, missing input and staging-path redirection. A successful `winapp package` only proves package creation; it is not Store certification or public availability.
+To exercise package identity locally, unpack the candidate MSIX with the Windows SDK's `makeappx` and pass the resulting layout directory (not the `.msix` file) to `winapp run`:
+
+```powershell
+makeappx unpack /p target/msix/ContextPick-0.9.0.msix /d target/msix/unpacked
+npm exec --yes --package=@microsoft/winappcli@0.7.1 -- winapp run target/msix/unpacked
+```
+
+This registers and launches the unpacked layout as a loose package; it is a package-identity development smoke test, not an install of the signed Store artifact. It requires Windows Developer Mode. On 2026-10-10 the command reached launch and was blocked because Developer Mode is off. `node --test scripts/prepare-msix.check.mjs` covers safe layout generation, identity escaping, OS bounds, version mapping, missing input and staging-path redirection. A successful `winapp package` only proves package creation; it is not Store certification or public availability.
 
 ## Store onboarding and update automation
 
