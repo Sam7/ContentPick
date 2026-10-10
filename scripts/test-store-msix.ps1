@@ -202,6 +202,8 @@ try {
     Push-Location $repoRoot
     try {
         . (Join-Path $repoRoot 'scripts/env.ps1')
+        # env.ps1 removes its temporary repoRoot variable in this dot-sourced scope.
+        $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
         $env:WINAPP_CLI_TELEMETRY_OPTOUT = '1'
         $env:CONTEXTPICK_MSIX_MAX_VERSION_TESTED = $hostVersion
         Invoke-NativeCommand -FilePath 'corepack' -ArgumentList @('pnpm', 'licenses:rust', 'windows-x64') -LogPath (Join-Path $logRoot 'rust-licenses.log')
