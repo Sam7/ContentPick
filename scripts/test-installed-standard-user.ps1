@@ -25,7 +25,9 @@ function Revoke-TemporaryAccess {
         }
 
         $remainingEntries = @(& icacls.exe $path /findsid "*$script:userSid" /T /C /Q 2>&1)
-        $noMatchingSid = $LASTEXITCODE -eq 1332 -and @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' }).Count -gt 0
+        $noMatchingSid = $LASTEXITCODE -eq 1332 `
+            -and @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' }).Count -gt 0 `
+            -and @($remainingEntries | Where-Object { $_ -match '^Successfully processed \d+ files; Failed processing 0 files\.?$' }).Count -gt 0
         if ($LASTEXITCODE -ne 0 -and -not $noMatchingSid) {
             $script:cleanupErrors.Add("Could not verify removal of the temporary smoke-user SID from $path (icacls exit $LASTEXITCODE).")
         } elseif (-not $noMatchingSid -and $remainingEntries.Count -gt 0) {
@@ -117,7 +119,7 @@ try {
     [Array]::Clear($randomBytes, 0, $randomBytes.Length)
     $securePassword = ConvertTo-SecureString -String $passwordString -AsPlainText -Force
 
-    $null = New-LocalUser -Name $userName -Password $securePassword -Description 'Temporary ContextPick hosted installer smoke account'
+    $null = New-LocalUser -Name $userName -Password $securePassword -Description 'Temporary ContextPick smoke account'
     $accountCreated = $true
     $localUser = Get-LocalUser -Name $userName
     $script:userSid = $localUser.SID.Value
