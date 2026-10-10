@@ -151,23 +151,9 @@ try {
     Grant-TemporaryAccess -Path $nodeHome -Rights 'RX'
 
     $testScript = Join-Path $PSScriptRoot 'test-installed.ps1'
-    $bootstrapLines = @(
-        ('$env:CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR = ' + (ConvertTo-PowerShellLiteral $resultsDir)),
-        ('$env:COREPACK_HOME = ' + (ConvertTo-PowerShellLiteral $corepackDir)),
-        "`$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'",
-        "`$env:CI = 'true'",
-        ('& ' + (ConvertTo-PowerShellLiteral $testScript) + ' -InstallerPath ' + (ConvertTo-PowerShellLiteral $installer)),
-        'exit $LASTEXITCODE'
-    )
-    $bootstrap = [string]::Join([Environment]::NewLine, [string[]]$bootstrapLines)
-    $parseTokens = $null
-    $parseErrors = $null
-    $null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrap, [ref]$parseTokens, [ref]$parseErrors)
-    if ($parseErrors.Count -gt 0) { throw "Could not parse the standard-user smoke bootstrap: $($parseErrors[0].Message)" }
-    $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
     $pwshPath = (Get-Process -Id $PID).Path
     $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
-    $environment = @{
+    $environment = [ordered]@{
         CI = 'true'
         CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR = $resultsDir
         COREPACK_HOME = $corepackDir
@@ -179,10 +165,22 @@ try {
         TEMP = $tempDir
         TMP = $tempDir
     }
+    $bootstrapLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in $environment.GetEnumerator()) {
+        $bootstrapLines.Add('$env:' + $entry.Key + ' = ' + (ConvertTo-PowerShellLiteral ([string]$entry.Value)))
+    }
+    $bootstrapLines.Add('& ' + (ConvertTo-PowerShellLiteral $testScript) + ' -InstallerPath ' + (ConvertTo-PowerShellLiteral $installer))
+    $bootstrapLines.Add('exit $LASTEXITCODE')
+    $bootstrap = [string]::Join([Environment]::NewLine, $bootstrapLines.ToArray())
+    $parseTokens = $null
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrap, [ref]$parseTokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) { throw "Could not parse the standard-user smoke bootstrap: $($parseErrors[0].Message)" }
+    $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
 
     $child = Start-Process -FilePath $pwshPath `
         -ArgumentList @('-NoLogo', '-NoProfile', '-EncodedCommand', $encodedBootstrap) `
-        -Credential $credential -LoadUserProfile -UseNewEnvironment -Environment $environment `
+        -Credential $credential -LoadUserProfile -UseNewEnvironment `
         -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
 
