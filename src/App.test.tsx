@@ -106,6 +106,8 @@ describe('ContextPick workspace UI', () => {
 
     await act(async () => secondSubscription.resolve(() => {}));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Export Markdown' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Export Markdown' }));
+    expect(await screen.findByText(/Export ready/)).toBeInTheDocument();
   });
 
   it('blocks output when the initial watcher status is missing', async () => {

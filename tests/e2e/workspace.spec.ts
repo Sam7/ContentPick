@@ -28,6 +28,48 @@ test('browser fixture supports opening a workspace, preview and export', async (
   await expect.poll(async () => (await status.boundingBox())?.height ?? 0).toBeGreaterThan(20);
 });
 
+test('wide windows use the available width for the workspace panels', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open folder' }).click();
+
+  const shell = await page.locator('.app-shell').boundingBox();
+  const workbench = await page.locator('.workbench').boundingBox();
+  expect(shell?.width).toBe(1920);
+  expect(workbench?.width).toBeGreaterThan(1800);
+  await page.screenshot({ path: 'docs/testing/2026-10-10-wide-window-1920x1080.png' });
+});
+
+test('tree reason badges distinguish ignore, filter, user and hard-guard reasons', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open folder' }).click();
+  await page.getByRole('button', { name: 'Expand src' }).click();
+  await page.getByRole('button', { name: 'Expand assets' }).click();
+
+  const ignored = page.locator('.tree-row').filter({ has: page.locator('.entry-name', { hasText: /^dist$/ }) }).locator('.reason-label');
+  const filtered = page.locator('.tree-row').filter({ has: page.locator('.entry-name', { hasText: /^main\.generated\.ts$/ }) }).locator('.reason-label');
+  const guarded = page.locator('.tree-row').filter({ has: page.locator('.entry-name', { hasText: /^logo\.png$/ }) }).locator('.reason-label');
+  await expect(ignored).toHaveClass(/reason-gitignore/);
+  await expect(filtered).toHaveClass(/reason-filter/);
+  await expect(guarded).toHaveClass(/reason-guard/);
+
+  await page.getByRole('checkbox', { name: 'Select README.md' }).uncheck();
+  const userExcluded = page.locator('.tree-row').filter({ has: page.locator('.entry-name', { hasText: /^README\.md$/ }) }).locator('.reason-label');
+  await expect(userExcluded).toHaveClass(/reason-user/);
+});
+
+test('nested tree elbows align with their corresponding indentation guides', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open folder' }).click();
+  await page.getByRole('textbox', { name: 'Search files' }).fill('Picker');
+
+  const nestedFile = page.getByRole('treeitem').filter({ has: page.locator('.entry-name', { hasText: /^Picker\.tsx$/ }) });
+  const guides = nestedFile.locator('.tree-indent-guides');
+  await expect(guides).toBeVisible();
+  await expect.poll(() => guides.evaluate((element) => getComputedStyle(element, '::after').left)).toBe('27px');
+  await page.screenshot({ path: 'docs/testing/2026-10-10-tree-guides-after.png' });
+});
+
 test('preview splitter supports bounded keyboard and pointer resizing and preserves width across collapse', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Open folder' }).click();

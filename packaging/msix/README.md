@@ -4,18 +4,15 @@ ContextPick keeps its GitHub NSIS installer. The Store candidate is a separate, 
 
 ## Build a candidate on Windows
 
-Use PowerShell with the repository toolchain on `PATH` (`. .\scripts\env.ps1`). Fill these values from the app's **reserved Partner Center identity** and the Windows versions actually supported and tested. Never use the local test identity for Store submission.
+Use PowerShell with the repository toolchain on `PATH` (`. .\scripts\env.ps1`). The manifest pins the reserved Partner Center identity: `DotSam.ContextPick`, publisher `CN=9CF819D8-048A-42F9-91C4-E85E76577891`, display name `DotSam`. These are public package metadata, not secrets. Set only the Windows versions actually supported and tested; never use the local test identity for Store submission.
 
 ```powershell
-$env:CONTEXTPICK_MSIX_IDENTITY_NAME = 'reserved.package.identity'
-$env:CONTEXTPICK_MSIX_PUBLISHER = 'CN=Partner Center publisher value'
-$env:CONTEXTPICK_MSIX_PUBLISHER_DISPLAY_NAME = 'Publisher display name'
 $env:CONTEXTPICK_MSIX_MIN_VERSION = '10.0.19045.0'
 $env:CONTEXTPICK_MSIX_MAX_VERSION_TESTED = '10.0.26200.9457'
 ./scripts/package-msix.ps1
 ```
 
-The script uses Microsoft `winapp` CLI `0.7.1` (pinned via `npm exec`), opts out of CLI telemetry, builds the current Tauri release, stages a clean layout under ignored `target/msix/`, and creates an unsigned `.msix`. Identity and OS bounds are mandatory; packaging fails on invalid values or missing files. Semver `0.9.0` maps to Store package version `1.9.0.0` because MSIX package major versions cannot be zero. Update packages must use a monotonically increasing package version. Do not replace an existing published Store binary in place.
+The script uses Microsoft `winapp` CLI `0.7.1` (pinned via `npm exec`), opts out of CLI telemetry, builds the current Tauri release, stages a clean layout under ignored `target/msix/`, and creates an unsigned `.msix`. The Store identity is fixed in the manifest template; tested OS bounds are mandatory and packaging fails on invalid values or missing files. Semver `0.9.1` maps to Store package version `1.9.1.0` because MSIX package major versions cannot be zero. Update packages must use a monotonically increasing package version. Do not replace an existing published Store binary in place.
 
 ## Runtime and install validation
 
@@ -36,4 +33,4 @@ This registers and launches the unpacked layout as a loose package; it is a pack
 
 The first app reservation, first submission and first publication must be completed in Partner Center. Microsoft says the [Store Developer CLI](https://learn.microsoft.com/en-us/windows/apps/publish/msstore-dev-cli/overview) can automate subsequent submissions only after first publication. Before automating updates, record the reserved identity and product ID, complete the initial listing and age rating, associate an Entra application with Partner Center, and store its tenant/client IDs and client secret as GitHub Actions secrets. Never commit credentials or enable automatic publishing until the initial listing and package have been reviewed. Track package build, validation, submission, certification/acceptance and public Store installation as separate outcomes.
 
-Use the public [ContextPick product site](https://sam7.github.io/ContentPick/) for the optional Website field and [GitHub Issues](https://github.com/Sam7/ContentPick/issues) for the optional support contact URL. Microsoft accepts a web page or support email; support contact is required only when the app is available on Xbox. See [MSIX support information](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/support-info).
+The reserved Store ID is `9NJ3T87DK1SJ` (`https://apps.microsoft.com/detail/9NJ3T87DK1SJ`); this identifies the product but does not mean it has been submitted or published. Use the public [ContextPick product site](https://sam7.github.io/ContentPick/) for the optional Website field and [GitHub Issues](https://github.com/Sam7/ContentPick/issues) for the optional support contact URL. Microsoft accepts a web page or support email; support contact is required only when the app is available on Xbox. See [MSIX support information](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/support-info).

@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "contextpick"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "contextpick-core",
  "notify",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "contextpick-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "cap-primitives",
  "cap-std",

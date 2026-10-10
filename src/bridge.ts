@@ -166,7 +166,7 @@ const fixtureWorkspace: WorkspaceView = {
     { path: 'src/components', kind: 'directory', size: 1830, sizePartial: false, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
     { path: 'src/components/Picker.tsx', kind: 'file', size: 1830, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
     { path: 'assets', kind: 'directory', size: 12_480, sizePartial: false, selected: false, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
-    { path: 'assets/logo.png', kind: 'file', size: 12_480, selected: false, forceIncluded: false, gitIgnored: false, reason: 'Binary image', enumerated: true, partial: false },
+    { path: 'assets/logo.png', kind: 'file', size: 12_480, selected: false, forceIncluded: false, gitIgnored: true, reason: 'Binary image', enumerated: true, partial: false },
     { path: 'dist', kind: 'directory', size: 0, sizePartial: true, selected: false, forceIncluded: false, gitIgnored: true, reason: '.gitignore (dist/)', enumerated: false, partial: false },
     { path: 'README.md', kind: 'file', size: 923, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
   ],
@@ -188,7 +188,7 @@ const fixturePreviews: Record<string, Preview> = {
 
 const fixtureReadmeExcluded: WorkspaceView = {
   ...fixtureWorkspace,
-  entries: fixtureWorkspace.entries.map((entry) => entry.path === 'README.md' ? { ...entry, selected: false } : { ...entry }),
+  entries: fixtureWorkspace.entries.map((entry) => entry.path === 'README.md' ? { ...entry, selected: false, reason: 'excluded by user' } : { ...entry }),
   selectedCount: 2,
   estimatedBytes: 5317,
 };

@@ -179,6 +179,16 @@ export function ProjectTree({ entries, expanded, actionPath, busy, previewDisabl
 
 type TreeRowProps = { entry: Entry; tabStop: boolean; posInSet: number; setSize: number; expanded: boolean; searchRevealed: boolean; actionOpen: boolean; busy: boolean; previewDisabled: boolean; onExpand: () => void; onBrowse: () => void; onPreview: () => void; onIntent: (intent: SelectionIntent) => void; onAction: () => void; onFocus: () => void; onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void };
 
+function reasonClassFor(entry: Entry): string {
+  if (!entry.reason) return '';
+  if (entry.kind === 'blocked' || /binary|unsupported|not a regular|link\/reparse|unreadable|Git metadata/i.test(entry.reason)) return 'reason-guard';
+  if (entry.reason === 'excluded by user') return 'reason-user';
+  if (entry.reason.startsWith('force included')) return 'reason-included';
+  if (entry.gitIgnored) return 'reason-gitignore';
+  if (entry.reason.startsWith('custom ') || entry.reason.startsWith('extension not allowed')) return 'reason-filter';
+  return 'reason-policy';
+}
+
 function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, actionOpen, busy, previewDisabled, onExpand, onBrowse, onPreview, onIntent, onAction, onFocus, onKeyDown }: TreeRowProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -187,6 +197,7 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
   const depth = entry.path.split('/').length;
   const visualDepth = Math.min(depth - 1, 6);
   const needsBrowse = isDirectory && !entry.enumerated && entry.reason !== null;
+  const reasonClass = reasonClassFor(entry);
   const folderSizeUnknown = isDirectory && entry.sizePartial && entry.size === 0;
   const sizeTitle = entry.sizePartial
     ? `At least ${entry.size} bytes of discovered file content; ignored or unscanned descendants may add more.`
@@ -263,7 +274,7 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
       <span className="entry-name">{entry.path.split('/').at(-1)}</span>
       {entry.forceIncluded && <span className="override-pill">Override</span>}
       {entry.partial && <span className="partial-label">Partial</span>}
-      {entry.reason && <span className="reason-label" title={entry.reason}>{entry.reason}</span>}
+      {entry.reason && <span className={`reason-label ${reasonClass}`} title={entry.reason}>{entry.reason}</span>}
     </button>
     {(isDirectory || entry.kind === 'file') && <span className={`entry-size${isDirectory ? ' folder-size' : ''}${folderSizeUnknown ? ' size-unknown' : ''}`} title={sizeTitle} aria-label={sizeAccessibleLabel}>
       {folderSizeUnknown ? '?' : <>{entry.sizePartial ? '≥ ' : ''}{formatBytes(entry.size)}</>}

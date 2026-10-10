@@ -6,12 +6,12 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap uap10 rescap">
   <Identity
-    Name="{{IDENTITY_NAME}}"
-    Publisher="{{PUBLISHER}}"
+    Name="DotSam.ContextPick"
+    Publisher="CN=9CF819D8-048A-42F9-91C4-E85E76577891"
     Version="{{PACKAGE_VERSION}}" />
   <Properties>
     <DisplayName>ContextPick</DisplayName>
-    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
+    <PublisherDisplayName>DotSam</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <uap10:PackageIntegrity>
       <uap10:Content Enforcement="on" />
