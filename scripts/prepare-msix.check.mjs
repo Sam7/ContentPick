@@ -32,10 +32,7 @@ async function fixture() {
   return root;
 }
 
-const versionEnv = {
-  CONTEXTPICK_MSIX_MIN_VERSION: '10.0.22000.0',
-  CONTEXTPICK_MSIX_MAX_VERSION_TESTED: '10.0.26100.0',
-};
+const versionEnv = { CONTEXTPICK_MSIX_MAX_VERSION_TESTED: '10.0.26200.9457' };
 const prepare = (root, outputDir, env = versionEnv) => prepareMsixLayout({ root, outputDir, env, platform: 'win32' });
 
 test('prepares a complete MSIX package layout with reserved Store identity and monotonic four-part version', async () => {
@@ -50,7 +47,7 @@ test('prepares a complete MSIX package layout with reserved Store identity and m
     const manifest = await readFile(path.join(outputDir, 'Package.appxmanifest'), 'utf8');
     assert.match(manifest, /Name="DotSam\.ContextPick"\s+Publisher="CN=9CF819D8-048A-42F9-91C4-E85E76577891"\s+Version="1\.9\.1\.0"/);
     assert.match(manifest, /<PublisherDisplayName>DotSam<\/PublisherDisplayName>/);
-    assert.match(manifest, /MinVersion="10\.0\.22000\.0" MaxVersionTested="10\.0\.26100\.0"/);
+    assert.match(manifest, /MinVersion="10\.0\.26200\.0" MaxVersionTested="10\.0\.26200\.9457"/);
     assert.doesNotMatch(manifest, /\{\{[A-Z_]+\}\}/);
     for (const destination of ['contextpick.exe', 'WebView2Loader.dll', 'licenses/LICENSE', 'licenses/ATTRIBUTION.md', 'licenses/frontend.txt', 'licenses/rust.html', 'Assets/StoreLogo.png', 'Assets/Square150x150Logo.png', 'Assets/Square44x44Logo.png']) {
       assert.equal(await readFile(path.join(outputDir, destination), 'utf8').then((value) => value.startsWith('synthetic:')), true, `${destination} should be staged`);
@@ -61,13 +58,13 @@ test('prepares a complete MSIX package layout with reserved Store identity and m
   }
 });
 
-test('pins the reserved Partner Center identity and requires explicit tested OS bounds', async () => {
+test('pins the reserved identity and Windows 11 25H2 minimum, requiring a tested maximum', async () => {
   const root = await fixture();
   try {
-    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), {}), /CONTEXTPICK_MSIX_MIN_VERSION/);
-    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_MIN_VERSION: '' }), /CONTEXTPICK_MSIX_MIN_VERSION/);
-    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_MIN_VERSION: '999999.0.0.0' }), /four Windows version components/);
-    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_MIN_VERSION: '10.0.26100.0', CONTEXTPICK_MSIX_MAX_VERSION_TESTED: '10.0.22000.0' }), /cannot be greater/);
+    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), {}), /CONTEXTPICK_MSIX_MAX_VERSION_TESTED/);
+    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_MAX_VERSION_TESTED: '' }), /CONTEXTPICK_MSIX_MAX_VERSION_TESTED/);
+    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_MAX_VERSION_TESTED: '999999.0.0.0' }), /four Windows version components/);
+    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_MAX_VERSION_TESTED: '10.0.26100.9457' }), /cannot be greater/);
     await assert.rejects(prepare(root, path.join(root, 'target/outside')), /must be inside/);
   } finally {
     await rm(root, { recursive: true, force: true });

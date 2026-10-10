@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const storeIdentityName = 'DotSam.ContextPick';
+const minimumWindowsVersion = [10, 0, 26200, 0];
 const sourceFiles = [
   ['target/release/contextpick.exe', 'contextpick.exe'],
   ['target/release/WebView2Loader.dll', 'WebView2Loader.dll'],
@@ -63,17 +64,16 @@ export async function prepareMsixLayout({ root = repoRoot, outputDir, env = proc
   const targetRoot = path.resolve(root, 'target', 'msix');
   const resolvedOutput = path.resolve(outputDir);
   if (!resolvedOutput.startsWith(`${targetRoot}${path.sep}`)) throw new Error(`MSIX staging output must be inside ${targetRoot}.`);
-  const minVersion = requireWindowsVersion(env.CONTEXTPICK_MSIX_MIN_VERSION, 'CONTEXTPICK_MSIX_MIN_VERSION');
   const maxVersionTested = requireWindowsVersion(env.CONTEXTPICK_MSIX_MAX_VERSION_TESTED, 'CONTEXTPICK_MSIX_MAX_VERSION_TESTED');
-  if (compareVersions(minVersion, maxVersionTested) > 0) {
-    throw new Error('CONTEXTPICK_MSIX_MIN_VERSION cannot be greater than CONTEXTPICK_MSIX_MAX_VERSION_TESTED.');
+  if (compareVersions(minimumWindowsVersion, maxVersionTested) > 0) {
+    throw new Error('Windows 11 25H2 minimum version cannot be greater than CONTEXTPICK_MSIX_MAX_VERSION_TESTED.');
   }
   await ensureNoReparsePoints(path.resolve(root), resolvedOutput);
   const config = JSON.parse(await readFile(path.join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
   const template = await readFile(path.join(root, 'packaging/msix/Package.appxmanifest.template.xml'), 'utf8');
   const replacements = {
     PACKAGE_VERSION: packageVersion(config.version),
-    MIN_VERSION: minVersion.join('.'),
+    MIN_VERSION: minimumWindowsVersion.join('.'),
     MAX_VERSION_TESTED: maxVersionTested.join('.'),
   };
   let manifest = template;

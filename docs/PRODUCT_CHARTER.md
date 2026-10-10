@@ -93,7 +93,7 @@ No cloud backend, authentication, payments, subscriptions, embeddings, model cal
 | UX-01 | P1 | Virtualised tree, keyboard controls, accessibility | Usable with large visible trees and keyboard |
 | UX-02 | P1 | Filename/path search, tree filtering | Search doesn't accidentally change selection |
 | PR-02 | P1 | Named selection profiles | Save/load independently of transient UI state |
-| RF-02 | P1 | Signed/notarised release strategy and artifacts | Release checklist and tested binaries for target platforms; the approved Windows Microsoft Store route uses an identity-correct MSIX, and is accepted only after Store certification and end-user installation are verified on supported Windows 10/11 targets. See M5.7 in the roadmap for staged acceptance gates. |
+| RF-02 | P1 | Signed/notarised release strategy and artifacts | Release checklist and tested binaries for target platforms; the approved Windows Microsoft Store route uses an identity-correct MSIX targeting Windows 11 25H2+ (`10.0.26200.0`), and is accepted only after Store certification and end-user installation are verified on that supported range. This Store minimum does not change the separate OS support of the GitHub installer. See M5.7 in the roadmap for staged acceptance gates. |
 | SC-04 | P1 | Robust rename, watcher overflow and cache invalidation | Dedicated integration tests |
 | SE-01 | P1 | Warnings for common secrets and private keys | Confirmation before intentional sensitive export |
 | UX-03 | P1 | Collapsible/resizable preview and splitter | Preview can collapse/restore; export controls remain visible at supported window sizes |
