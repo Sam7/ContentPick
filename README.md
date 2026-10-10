@@ -12,9 +12,9 @@ ContextPick can save repetitive file-by-file preparation and keep related projec
 
 ## Download
 
-**Latest release: v0.1.0 preview · Windows x64.** [Download ContextPick](https://github.com/Sam7/ContentPick/releases/download/v0.1.0/ContextPick_0.1.0_x64-setup.exe) · [Release notes and SHA-256 checksum](https://github.com/Sam7/ContentPick/releases/tag/v0.1.0)
+**Latest release: v0.9.0 · Windows x64.** [Download ContextPick](https://github.com/Sam7/ContentPick/releases/download/v0.9.0/ContextPick_0.9.0_x64-setup.exe) · [Release notes and SHA-256 checksum](https://github.com/Sam7/ContentPick/releases/tag/v0.9.0)
 
-This is an unsigned preview, not the planned `0.9` release. Verify the checksum linked on the release page before installing. macOS packaging and Gatekeeper acceptance are not verified; see [project status](docs/project/STATUS.md).
+The Windows installer is unsigned. Verify the checksum linked on the release page before installing. If WebView2 Runtime is absent, setup downloads its bootstrapper and needs network access. This release does not include a verified macOS installer; see [project status](docs/project/STATUS.md).
 
 ## How it works
 
@@ -88,4 +88,4 @@ fn main() {}
 ```
 ````
 
-Native Windows evidence and exact limitations: [status](docs/project/STATUS.md), smoke record (local ignored artifact: `docs/testing/2026-10-08-native-smoke.md`). The downloadable `v0.1.0` Windows preview is linked above; it is not final `0.9` or package-manager availability.
+Native Windows evidence and exact limitations: [status](docs/project/STATUS.md), smoke record (local ignored artifact: `docs/testing/2026-10-08-native-smoke.md`). The `v0.9.0` Windows installer is available above. Package-manager distribution remains paused.
