@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f7f6" />
+    <meta
+      name="description"
+      content="ContextPick is an offline-first Windows desktop app for choosing files from a project and exporting a reviewable Markdown context file for AI assistants."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="ContextPick — useful project context, in one file" />
+    <meta
+      property="og:description"
+      content="Choose project files, review them locally, and create one organized Markdown file for ChatGPT, Claude, Gemini, or another text-based assistant."
+    />
+    <meta property="og:url" content="https://sam7.github.io/ContentPick/" />
+    <meta property="og:image" content="https://sam7.github.io/ContentPick/site-assets/contextpick-workspace.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="https://sam7.github.io/ContentPick/" />
+    <link rel="icon" type="image/svg+xml" href="site-assets/contextpick-mark.svg" />
+    <title>ContextPick — useful project context, in one file</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "ContextPick",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Windows",
+        "description": "An offline-first desktop app for selecting project files and exporting a reviewable Markdown context file.",
+        "downloadUrl": "https://github.com/Sam7/ContentPick/releases/download/v0.1.0/ContextPick_0.1.0_x64-setup.exe",
+        "softwareVersion": "0.1.0",
+        "license": "https://github.com/Sam7/ContentPick/blob/main/LICENSE"
+      }
+    </script>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #142c38;
+        --muted: #526976;
+        --soft: #71838c;
+        --paper: #f4f7f6;
+        --surface: #ffffff;
+        --line: #dce6e4;
+        --teal: #078d7b;
+        --teal-dark: #087666;
+        --mint: #dcf5ee;
+        --amber: #a6661a;
+        --shadow: 0 18px 54px rgb(19 48 57 / 9%);
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--paper);
+        font: 16px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      a { color: var(--teal-dark); text-underline-offset: 0.2em; }
+      a:hover { color: #045f53; }
+      a:focus-visible, summary:focus-visible { outline: 3px solid #61c8b5; outline-offset: 4px; border-radius: 3px; }
+      img { display: block; max-width: 100%; }
+      .wrap { width: min(1160px, calc(100% - 48px)); margin: 0 auto; }
+      .skip-link { position: absolute; z-index: 10; top: 8px; left: 8px; padding: 9px 13px; transform: translateY(-160%); border-radius: 3px; color: #fff; background: var(--ink); font-weight: 700; }
+      .skip-link:focus { transform: translateY(0); }
+
+      .topbar { border-bottom: 1px solid rgb(220 230 228 / 78%); background: rgb(255 255 255 / 78%); }
+      .topbar-inner { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+      .brand { display: inline-flex; align-items: center; gap: 11px; text-decoration: none; color: var(--ink); font-weight: 750; letter-spacing: -0.04em; }
+      .brand img { width: 149px; height: 32px; object-fit: contain; object-position: left center; }
+      nav { display: flex; align-items: center; gap: 25px; }
+      nav a { color: var(--muted); font-size: 0.91rem; font-weight: 600; text-decoration: none; }
+      nav .nav-download { color: #fff; background: var(--teal); padding: 10px 16px; border-radius: 4px; }
+      nav .nav-download:hover, .button-primary:hover { color: #fff; background: #076f61; }
+
+      .hero { padding: 76px 0 64px; overflow: hidden; }
+      .hero-grid { display: grid; grid-template-columns: minmax(330px, 0.82fr) minmax(0, 1.18fr); align-items: center; gap: 52px; }
+      .eyebrow { display: inline-flex; align-items: center; gap: 9px; margin: 0 0 17px; color: var(--teal-dark); font-size: 0.8rem; font-weight: 750; letter-spacing: 0.11em; text-transform: uppercase; }
+      .eyebrow::before { width: 22px; height: 2px; content: ""; background: var(--teal); }
+      h1, h2, h3, p { margin-top: 0; }
+      h1 { max-width: 620px; margin-bottom: 19px; font-size: clamp(2.75rem, 5vw, 4.65rem); line-height: 1.04; letter-spacing: -0.065em; }
+      h1 em { color: var(--teal); font-style: normal; }
+      .hero-copy { max-width: 530px; color: var(--muted); font-size: 1.16rem; line-height: 1.7; }
+      .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 29px 0 15px; }
+      .button { display: inline-flex; min-height: 48px; align-items: center; justify-content: center; gap: 10px; padding: 11px 19px; border: 1px solid var(--line); border-radius: 4px; font-weight: 700; text-decoration: none; transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease; }
+      .button:hover { transform: translateY(-1px); }
+      .button-primary { border-color: var(--teal); color: white; background: var(--teal); box-shadow: 0 8px 20px rgb(8 141 123 / 18%); }
+      .button-secondary { color: var(--ink); background: white; }
+      .button-secondary:hover { border-color: #9bb8b1; color: var(--ink); }
+      .release-note { color: var(--soft); font-size: 0.86rem; }
+      .hero-art { position: relative; }
+      .hero-art::before { position: absolute; z-index: -1; inset: -26px -34px 24px 24px; border-radius: 9px; background: linear-gradient(135deg, #e0f4ed, #e9f0f2 68%, #f4f7f6); content: ""; }
+      .hero-art img { width: 100%; border: 1px solid #d4e0df; border-radius: 5px; background: white; box-shadow: var(--shadow); }
+      .image-caption { margin: 11px 0 0; color: var(--soft); font-size: 0.82rem; text-align: right; }
+
+      .trust-strip { border-block: 1px solid var(--line); background: #fff; }
+      .trust-items { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; padding: 22px 0; }
+      .trust-item { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 0.91rem; font-weight: 650; }
+      .check { display: grid; width: 31px; height: 31px; flex: 0 0 auto; place-items: center; border-radius: 50%; color: var(--teal-dark); background: var(--mint); font-weight: 800; }
+
+      section.content { padding: 87px 0; }
+      .section-heading { max-width: 660px; margin-bottom: 39px; }
+      .section-heading h2 { margin-bottom: 12px; font-size: clamp(2rem, 3.5vw, 3rem); line-height: 1.12; letter-spacing: -0.05em; }
+      .section-heading p { margin-bottom: 0; color: var(--muted); font-size: 1.08rem; }
+      .problem { display: grid; grid-template-columns: 0.75fr 1.25fr; gap: 70px; align-items: start; }
+      .problem aside { padding: 24px; border-left: 3px solid var(--teal); background: white; color: var(--muted); }
+      .problem aside strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 1.05rem; }
+      .problem-copy { color: var(--muted); font-size: 1.04rem; }
+
+      .workflow { background: #eaf1ef; }
+      .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; counter-reset: step; }
+      .step { min-height: 205px; padding: 23px 22px; border: 1px solid #d8e4e1; border-radius: 4px; background: white; counter-increment: step; }
+      .step::before { display: grid; width: 34px; height: 34px; margin-bottom: 20px; place-items: center; border-radius: 50%; color: #fff; background: var(--teal); content: counter(step); font-weight: 800; }
+      .step h3 { margin-bottom: 8px; font-size: 1.02rem; }
+      .step p { margin-bottom: 0; color: var(--muted); font-size: 0.93rem; }
+
+      .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+      .feature { padding: 23px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+      .feature-mark { display: grid; width: 38px; height: 38px; margin-bottom: 18px; place-items: center; border-radius: 4px; color: var(--teal-dark); background: var(--mint); font-size: 1.12rem; font-weight: 800; }
+      .feature h3 { margin-bottom: 8px; font-size: 1.02rem; }
+      .feature p { margin-bottom: 0; color: var(--muted); font-size: 0.92rem; }
+
+      .screens { padding-top: 28px !important; }
+      .screen-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+      figure { margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: white; box-shadow: 0 10px 30px rgb(19 48 57 / 5%); }
+      figure img { width: 100%; height: auto; background: #fff; }
+      figcaption { padding: 15px 18px 17px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+      figcaption strong { display: block; margin-bottom: 3px; color: var(--ink); }
+
+      .privacy { color: #eaf5f2; background: #173541; }
+      .privacy .eyebrow { color: #89dfce; }
+      .privacy .section-heading p { color: #c0d0d2; }
+      .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+      .privacy-card { padding: 22px; border: 1px solid rgb(201 226 221 / 20%); border-radius: 4px; background: rgb(255 255 255 / 5%); }
+      .privacy-card h3 { margin-bottom: 8px; color: #fff; font-size: 1rem; }
+      .privacy-card p { margin-bottom: 0; color: #c0d0d2; font-size: 0.93rem; }
+
+      .limits { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 64px; }
+      .limits-copy { color: var(--muted); }
+      .limit-list { display: grid; gap: 11px; margin: 0; padding: 0; list-style: none; }
+      .limit-list li { padding: 15px 17px; border: 1px solid var(--line); border-radius: 4px; background: white; color: var(--muted); font-size: 0.93rem; }
+      .limit-list strong { color: var(--ink); }
+
+      .faq { background: #fff; }
+      .faq-list { max-width: 850px; border-top: 1px solid var(--line); }
+      details { padding: 19px 0; border-bottom: 1px solid var(--line); }
+      summary { color: var(--ink); cursor: pointer; font-weight: 700; }
+      details p { max-width: 760px; margin: 11px 0 0; color: var(--muted); }
+
+      .download { padding: 70px 0; }
+      .download-card { display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 36px; border-radius: 5px; color: white; background: linear-gradient(115deg, #126956, #078d7b 72%, #16a892); box-shadow: var(--shadow); }
+      .download-card h2 { margin-bottom: 8px; font-size: clamp(1.7rem, 3vw, 2.45rem); line-height: 1.16; letter-spacing: -0.04em; }
+      .download-card p { max-width: 640px; margin-bottom: 0; color: #d2eeea; }
+      .download-card .button { flex: 0 0 auto; border-color: white; color: var(--teal-dark); background: white; }
+      .download-card .button:hover { background: #eaf8f4; }
+      .fine-print { margin: 14px 0 0; color: var(--soft); font-size: 0.82rem; }
+
+      footer { padding: 27px 0 37px; border-top: 1px solid var(--line); color: var(--soft); font-size: 0.85rem; }
+      .footer-inner { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+      .footer-links { display: flex; flex-wrap: wrap; gap: 18px; }
+      .footer-links a { color: var(--muted); }
+
+      @media (max-width: 900px) {
+        .hero-grid { grid-template-columns: 1fr; gap: 35px; }
+        .hero-copy { max-width: 700px; }
+        .hero-art { max-width: 760px; }
+        .problem, .limits { grid-template-columns: 1fr; gap: 25px; }
+        .steps { grid-template-columns: repeat(2, 1fr); }
+        .feature-grid { grid-template-columns: repeat(2, 1fr); }
+      }
+      @media (max-width: 620px) {
+        .wrap { width: min(100% - 32px, 520px); }
+        .topbar-inner { min-height: 66px; }
+        nav { gap: 13px; }
+        nav a:not(.nav-download) { display: none; }
+        nav .nav-download { padding: 9px 12px; font-size: 0.82rem; }
+        .hero { padding: 54px 0 47px; }
+        h1 { font-size: clamp(2.55rem, 12vw, 3.5rem); }
+        .hero-copy { font-size: 1.04rem; }
+        .hero-art::before { inset: -13px -8px 12px 8px; }
+        .trust-items { grid-template-columns: 1fr; gap: 13px; padding: 19px 0; }
+        section.content { padding: 64px 0; }
+        .section-heading { margin-bottom: 27px; }
+        .steps, .feature-grid, .screen-grid, .privacy-grid { grid-template-columns: 1fr; }
+        .step { min-height: 0; }
+        .download { padding: 54px 0; }
+        .download-card { align-items: flex-start; flex-direction: column; padding: 27px 23px; }
+        .footer-inner { align-items: flex-start; flex-direction: column; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="topbar" id="top">
+      <div class="wrap topbar-inner">
+        <a class="brand" href="#top" aria-label="ContextPick home">
+          <img src="site-assets/contextpick-brand.svg" alt="ContextPick" width="149" height="32" />
+        </a>
+        <nav aria-label="Main navigation">
+          <a href="#how-it-works">How it works</a>
+          <a href="#features">Features</a>
+          <a href="#privacy">Privacy</a>
+          <a class="nav-download" href="https://github.com/Sam7/ContentPick/releases/download/v0.1.0/ContextPick_0.1.0_x64-setup.exe">Download</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero">
+        <div class="wrap hero-grid">
+          <div>
+            <p class="eyebrow">Project context, ready to share</p>
+            <h1>Give your AI the files that <em>matter.</em></h1>
+            <p class="hero-copy">Choose the useful parts of a codebase or document folder, review what will be included, then export one organized Markdown file for ChatGPT, Claude, Gemini, or another text-based assistant.</p>
+            <div class="actions">
+              <a class="button button-primary" href="https://github.com/Sam7/ContentPick/releases/download/v0.1.0/ContextPick_0.1.0_x64-setup.exe">Download for Windows <span aria-hidden="true">→</span></a>
+              <a class="button button-secondary" href="https://github.com/Sam7/ContentPick">Explore the open-source project</a>
+            </div>
+            <p class="release-note">Windows x64 · v0.1.0 preview · unsigned · Free and open source</p>
+          </div>
+          <div class="hero-art">
+            <img src="site-assets/contextpick-workspace.png" alt="ContextPick desktop app showing a searchable project tree, selected source file, read-only code preview, file sizes, and export estimates." width="1536" height="1024" fetchpriority="high" />
+            <p class="image-caption">A real Windows app view. Your source stays on your device.</p>
+          </div>
+        </div>
+      </section>
+
+      <div class="trust-strip" aria-label="Product principles">
+        <div class="wrap trust-items">
+          <div class="trust-item"><span class="check" aria-hidden="true">✓</span> You choose what enters the export</div>
+          <div class="trust-item"><span class="check" aria-hidden="true">✓</span> Review the output before sharing</div>
+          <div class="trust-item"><span class="check" aria-hidden="true">✓</span> No telemetry or source uploads</div>
+        </div>
+      </div>
+
+      <section class="content">
+        <div class="wrap problem">
+          <div class="section-heading">
+            <p class="eyebrow">The context problem</p>
+            <h2>Useful answers start with the right files.</h2>
+          </div>
+          <div class="problem-copy">
+            <p>When a project spans source files, tests, configuration and notes, the context an assistant needs is spread across the folder. Finding those files one by one and attaching them individually takes time. Upload limits and context windows also vary by provider, plan and feature.</p>
+            <p>ContextPick turns a local project selection into one readable Markdown document. You can include a broad set of text files, narrow the set by extension, inspect the selection and size, and decide yourself where the result goes.</p>
+            <aside><strong>One file keeps the handoff manageable.</strong> It does not bypass a service’s upload rules or context limit. Check the current limits of the assistant you use.</aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="content workflow" id="how-it-works">
+        <div class="wrap">
+          <div class="section-heading">
+            <p class="eyebrow">A simple workflow</p>
+            <h2>From project folder to reviewable context.</h2>
+            <p>Keep the choices visible, and make the final export yourself.</p>
+          </div>
+          <div class="steps">
+            <article class="step"><h3>Open a workspace</h3><p>Choose a local project folder. ContextPick builds a searchable file tree on your device.</p></article>
+            <article class="step"><h3>Choose what matters</h3><p>Select files and folders, or limit eligible text files to extensions such as Rust, TypeScript, Markdown or JSON.</p></article>
+            <article class="step"><h3>Review the selection</h3><p>Preview text, see inclusion reasons, inspect folder sizes and check estimated export bytes and tokens.</p></article>
+            <article class="step"><h3>Copy or export</h3><p>Copy the generated context or save it as Markdown. A fixed export folder can make repeat exports one click.</p></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="content" id="features">
+        <div class="wrap">
+          <div class="section-heading">
+            <p class="eyebrow">Made for careful selection</p>
+            <h2>Enough visibility to make a useful export.</h2>
+            <p>ContextPick focuses on gathering and reviewing local files. It does not try to become an editor or an AI chat app.</p>
+          </div>
+          <div class="feature-grid">
+            <article class="feature"><span class="feature-mark" aria-hidden="true">⌕</span><h3>Searchable project tree</h3><p>Find files in a virtualized tree that stays responsive across larger workspaces. Expand folders and select individual files.</p></article>
+            <article class="feature"><span class="feature-mark" aria-hidden="true">✓</span><h3>Clear selection states</h3><p>Understand what is included, filtered, force-included, or blocked by a hard safety rule before exporting.</p></article>
+            <article class="feature"><span class="feature-mark" aria-hidden="true">Aa</span><h3>Text inclusion controls</h3><p>Include eligible text files or choose a compact set of common extensions. `.gitignore` rules are respected by default.</p></article>
+            <article class="feature"><span class="feature-mark" aria-hidden="true">↗</span><h3>Readable Markdown</h3><p>Files are emitted with stable relative paths and safe code fences, making one document easier to scan and hand off.</p></article>
+            <article class="feature"><span class="feature-mark" aria-hidden="true">KB</span><h3>Know the size first</h3><p>See logical content sizes on folders, estimated export bytes, and an approximate local token count.</p></article>
+            <article class="feature"><span class="feature-mark" aria-hidden="true">↻</span><h3>Repeatable exports</h3><p>Keep a chosen output folder in Settings. Optional overwrite replaces that one generated file after you explicitly enable it.</p></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="content screens" aria-labelledby="screens-title">
+        <div class="wrap">
+          <div class="section-heading">
+            <p class="eyebrow">See the app</p>
+            <h2 id="screens-title">Review the details before the handoff.</h2>
+            <p>These screenshots were captured from the Windows desktop app with synthetic example files.</p>
+          </div>
+          <div class="screen-grid">
+            <figure>
+              <img src="site-assets/contextpick-extension-filters.png" alt="ContextPick filter view with All text and Selected extensions modes and grouped extension checkboxes." width="1920" height="1280" loading="lazy" />
+              <figcaption><strong>Choose the kinds of text to include</strong>Use all eligible text files, or choose common extensions in a compact grouped picker.</figcaption>
+            </figure>
+            <figure>
+              <img src="site-assets/contextpick-export-destination.png" alt="ContextPick Settings showing the saved export folder, Always export to this folder, and optional Always overwrite this file checkboxes." width="1920" height="1280" loading="lazy" />
+              <figcaption><strong>Make repeat exports straightforward</strong>Choose a default destination; opt in to replacing its generated file when that is your workflow.</figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="content privacy" id="privacy">
+        <div class="wrap">
+          <div class="section-heading">
+            <p class="eyebrow">Local-first by design</p>
+            <h2>Your project remains yours to review.</h2>
+            <p>ContextPick prepares a file on your computer. You choose whether and where to share the resulting text.</p>
+          </div>
+          <div class="privacy-grid">
+            <article class="privacy-card"><h3>No source upload</h3><p>The app has no cloud processing, account requirement or telemetry. It reads selected local files to preview and build an export.</p></article>
+            <article class="privacy-card"><h3>Sources stay read-only</h3><p>ContextPick does not edit project files. Export protections prevent replacing a source file inside the active workspace.</p></article>
+            <article class="privacy-card"><h3>Review before sending</h3><p>Inspect the selected files and generated output before copying or sharing it with an AI service.</p></article>
+            <article class="privacy-card"><h3>Local settings</h3><p>Workspace paths, selection choices and saved profiles are stored locally in the operating system’s app configuration area.</p></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="content">
+        <div class="wrap limits">
+          <div>
+            <div class="section-heading">
+              <p class="eyebrow">Know what it does</p>
+              <h2>Clear limits. No magic claims.</h2>
+            </div>
+            <p class="limits-copy">ContextPick helps organize text you choose. It does not determine what is relevant, remove secrets automatically, or increase the capacity of another tool. Always review the export for sensitive or unnecessary material.</p>
+          </div>
+          <ul class="limit-list">
+            <li><strong>Provider limits still apply.</strong> Supported upload types, file counts and context capacity depend on the current service, feature and plan.</li>
+            <li><strong>Token counts are approximate.</strong> ContextPick estimates with a local tokenizer; a provider may count the submitted prompt differently.</li>
+            <li><strong>Git ignore is not secret scanning.</strong> `.gitignore` is respected by default, but it does not identify every sensitive file.</li>
+            <li><strong>Text only.</strong> Binary and unsupported content is not silently converted into readable source text.</li>
+            <li><strong>Windows preview.</strong> The current published installer is an unsigned Windows x64 preview. Other platform distribution is not yet verified.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="content faq" id="faq">
+        <div class="wrap">
+          <div class="section-heading">
+            <p class="eyebrow">Frequently asked</p>
+            <h2>Questions before you try it.</h2>
+          </div>
+          <div class="faq-list">
+            <details><summary>Does ContextPick send my files to ChatGPT, Claude or Gemini?</summary><p>No. ContextPick creates a local Markdown document and has no integration that uploads source files. You decide whether to share the export with another service.</p></details>
+            <details><summary>Can it include hundreds of files in one export?</summary><p>The app can gather many selected files into one Markdown output, subject to its bounded workspace scan and content safeguards. The receiving service may impose its own limits on the size or format of that document.</p></details>
+            <details><summary>Does it select files automatically for me?</summary><p>No. Eligible files start selected, and you can refine the selection in the tree. Extension filtering and `.gitignore` help narrow what is eligible; you remain responsible for reviewing the result.</p></details>
+            <details><summary>Can I overwrite the same export file each time?</summary><p>Yes. Choose a fixed export folder in Settings and optionally enable “Always overwrite this file.” Overwrite is deliberately limited to the generated output outside the active workspace.</p></details>
+            <details><summary>Which platforms can I download it for today?</summary><p>The current public preview is an unsigned Windows x64 installer. macOS packaging and distribution have not been verified for this release.</p></details>
+          </div>
+        </div>
+      </section>
+
+      <section class="download" id="download">
+        <div class="wrap">
+          <div class="download-card">
+            <div><h2>Bring the useful files together.</h2><p>Try the current Windows preview, inspect the project source, or read the release notes and checksum before installing.</p></div>
+            <a class="button" href="https://github.com/Sam7/ContentPick/releases/download/v0.1.0/ContextPick_0.1.0_x64-setup.exe">Get the Windows preview <span aria-hidden="true">→</span></a>
+          </div>
+          <p class="fine-print">Version 0.1.0 preview · Unsigned installer · Check the <a href="https://github.com/Sam7/ContentPick/releases/tag/v0.1.0">release page</a> for notes and SHA-256 checksum. Use the <a href="https://github.com/Sam7/ContentPick/blob/main/LICENSE">project license</a> and source repository for details.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap footer-inner">
+        <span>© 2026 ContextPick · Open source, local-first project context</span>
+        <div class="footer-links"><a href="https://github.com/Sam7/ContentPick">GitHub repository</a><a href="https://github.com/Sam7/ContentPick/releases">All releases</a><a href="https://github.com/Sam7/ContentPick/blob/main/README.md">README</a></div>
+      </div>
+    </footer>
+  </body>
+</html>

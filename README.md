@@ -2,6 +2,8 @@
 
 ### Select code. Export AI context.
 
+[![Latest release](https://img.shields.io/github/v/release/Sam7/ContentPick?display_name=tag&label=latest)](https://github.com/Sam7/ContentPick/releases/latest) · [Visit the ContextPick product site](https://sam7.github.io/ContentPick/) · [Download the current release](https://github.com/Sam7/ContentPick/releases/latest)
+
 Useful project context is scattered across source files, documentation and configuration. Gathering it for an AI assistant can mean opening files, deciding what matters, and attaching them one by one. ContextPick gives you a faster, reviewable way to collect the parts of a local project that matter into one organized Markdown file.
 
 Choose a project folder, select the relevant files, preview the text, and check the estimated export size and token count. Then copy the context or export it as Markdown for ChatGPT, Gemini, Claude, or another tool that accepts text. You decide what goes in and where it goes next.
