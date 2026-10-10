@@ -300,6 +300,8 @@ test('native fixed-folder export persists settings, suffixes collisions, and ove
   await expect(overwrite).toBeDisabled();
   await fixedFolder.click();
   await expect(fixedFolder).toBeChecked();
+  await native.resizeWindow(1536, 1024);
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-export-destination.png') });
   const output = path.join(persistedFolder, `${path.basename(native.root)}.md`);
   await page.getByRole('button', { name: 'All' }).click();
   const exportButton = page.getByRole('button', { name: 'Export Markdown' });
@@ -792,6 +794,7 @@ test('native startup safely resets legacy filters and reports the verified setti
   await expect(page.getByRole('textbox', { name: /path/i })).toHaveCount(0);
   await page.getByRole('radio', { name: 'Selected extensions' }).check();
   await expect(page.getByText('No extensions selected, so no files are eligible.')).toBeVisible();
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-selected-extensions.png') });
   const typescript = page.getByRole('checkbox', { name: '.ts', exact: true });
   await typescript.check();
   await expect(page.locator('.metric-primary strong')).not.toHaveText('0');
@@ -817,7 +820,7 @@ test('native startup safely resets legacy filters and reports the verified setti
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-720x520-scrolled.png') });
 
   const settings = await native.readSettings();
-  expect(settings.version).toBe(4);
+  expect(settings.version).toBe(5);
   const workspaces = settings.workspaces as Record<string, { policy: Record<string, unknown>; intents: Record<string, string> }>;
   const migrated = workspaces[native.root];
   expect(migrated.policy.includeMode).toBe('allText');
