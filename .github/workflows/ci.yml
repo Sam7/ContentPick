@@ -165,7 +165,6 @@ jobs:
 
   installed-windows-smoke:
     name: Fresh Windows installer lifecycle (windows-2025)
-    if: github.event_name == 'push'
     needs: checks
     runs-on: windows-2025
     timeout-minutes: 35
@@ -242,7 +241,7 @@ jobs:
 
       - name: Install, smoke test, and uninstall candidate
         shell: pwsh
-        run: .\scripts\run-installed-smoke-restricted.ps1 -InstallerPath $env:CONTEXTPICK_CANDIDATE_INSTALLER
+        run: .\scripts\test-installed.ps1 -InstallerPath $env:CONTEXTPICK_CANDIDATE_INSTALLER -AllowElevatedRunner
 
       - name: Retain installed-app failure diagnostics
         if: failure()
