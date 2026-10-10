@@ -79,7 +79,7 @@ function Wait-ForProcessTreeExit {
     return $false
 }
 
-if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 or newer is required.' }
+if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw 'PowerShell 7.4 or newer is required.' }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
     throw 'The temporary standard-user installer smoke is reserved for a GitHub-hosted Windows runner.'
 }
@@ -153,21 +153,58 @@ try {
     $testScript = Join-Path $PSScriptRoot 'test-installed.ps1'
     $pwshPath = (Get-Process -Id $PID).Path
     $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
-    $environment = [ordered]@{
+    $profileRoot = [Environment]::ExpandEnvironmentVariables((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').ProfilesDirectory)
+    $userProfile = Join-Path $profileRoot $userName
+    $systemDrive = [System.IO.Path]::GetPathRoot($systemRoot).TrimEnd('\')
+    $environment = @{}
+    foreach ($variable in Get-ChildItem Env:) {
+        $environment[$variable.Name] = $null
+    }
+    $testEnvironment = @{
+        ALLUSERSPROFILE = Join-Path $systemDrive 'ProgramData'
+        APPDATA = Join-Path $userProfile 'AppData\Roaming'
         CI = 'true'
+        CommonProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonProgramFiles)
+        'CommonProgramFiles(x86)' = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonProgramFilesX86)
+        COMSPEC = Join-Path $systemRoot 'System32\cmd.exe'
+        COMPUTERNAME = $env:COMPUTERNAME
         CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR = $resultsDir
         COREPACK_HOME = $corepackDir
         COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
         GITHUB_ACTIONS = 'true'
+        HOMEDRIVE = $systemDrive
+        HOMEPATH = $userProfile.Substring($systemDrive.Length)
+        LOCALAPPDATA = Join-Path $userProfile 'AppData\Local'
+        OS = 'Windows_NT'
+        PATH = "$nodeHome;$PSHOME;$systemRoot\System32;$systemRoot"
+        PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+        PROCESSOR_ARCHITECTURE = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Machine')
+        ProgramData = Join-Path $systemDrive 'ProgramData'
+        ProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+        'ProgramFiles(x86)' = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+        ProgramW6432 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+        PUBLIC = Join-Path $systemDrive 'Users\Public'
         RUNNER_ENVIRONMENT = 'github-hosted'
         RUNNER_OS = 'Windows'
-        PATH = "$nodeHome;$PSHOME;$systemRoot\System32;$systemRoot"
+        SystemDrive = $systemDrive
+        SystemRoot = $systemRoot
         TEMP = $tempDir
         TMP = $tempDir
+        USERDOMAIN = $env:COMPUTERNAME
+        USERNAME = $userName
+        USERPROFILE = $userProfile
+        WINDIR = $systemRoot
+    }
+    foreach ($entry in $testEnvironment.GetEnumerator()) {
+        $environment[$entry.Key] = $entry.Value
     }
     $bootstrapLines = [System.Collections.Generic.List[string]]::new()
     foreach ($entry in $environment.GetEnumerator()) {
-        $bootstrapLines.Add('$env:' + $entry.Key + ' = ' + (ConvertTo-PowerShellLiteral ([string]$entry.Value)))
+        if ($null -ne $entry.Value) {
+            $bootstrapLines.Add('[Environment]::SetEnvironmentVariable(' +
+                (ConvertTo-PowerShellLiteral $entry.Key) + ', ' +
+                (ConvertTo-PowerShellLiteral ([string]$entry.Value)) + ", 'Process')")
+        }
     }
     $bootstrapLines.Add('& ' + (ConvertTo-PowerShellLiteral $testScript) + ' -InstallerPath ' + (ConvertTo-PowerShellLiteral $installer))
     $bootstrapLines.Add('exit $LASTEXITCODE')
@@ -176,11 +213,17 @@ try {
     $parseErrors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrap, [ref]$parseTokens, [ref]$parseErrors)
     if ($parseErrors.Count -gt 0) { throw "Could not parse the standard-user smoke bootstrap: $($parseErrors[0].Message)" }
-    $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+    $bootstrapPath = Join-Path $candidateRoot 'standard-user-smoke-bootstrap.ps1'
+    [System.IO.File]::WriteAllText($bootstrapPath, $bootstrap, [Text.UTF8Encoding]::new($false))
+    $childArguments = '-NoLogo -NoProfile -File "' + $bootstrapPath + '"'
+    $childCommandLineLength = ('"' + $pwshPath + '" ' + $childArguments).Length
+    if ($childCommandLineLength -ge 1024) {
+        throw "Standard-user smoke launch command line exceeds the CreateProcessWithLogonW 1,024-character limit ($childCommandLineLength)."
+    }
 
     $child = Start-Process -FilePath $pwshPath `
-        -ArgumentList @('-NoLogo', '-NoProfile', '-EncodedCommand', $encodedBootstrap) `
-        -Credential $credential -LoadUserProfile -UseNewEnvironment `
+        -ArgumentList $childArguments `
+        -Credential $credential -LoadUserProfile -Environment $environment `
         -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
 
