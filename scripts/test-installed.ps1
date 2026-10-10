@@ -1,14 +1,12 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$InstallerPath,
-    [switch]$AllowElevatedRunner
+    [string]$ExpectedUserSid,
+    [uint32]$ExpectedSessionId
 )
 
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 or newer is required for bounded process-tree cleanup.' }
-if ($AllowElevatedRunner -and ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows')) {
-    throw 'AllowElevatedRunner is reserved for a GitHub-hosted Windows runner.'
-}
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
 $uninstallRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
@@ -147,9 +145,22 @@ try {
     Write-Output "Installer: $installer"
     Write-Output "SHA-256: $hash"
     $isElevated = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    Write-Output "Elevated token: $isElevated"
-    if ($AllowElevatedRunner -and -not $isElevated) { throw 'The hosted-runner mode requires the administrator token supplied by GitHub Actions.' }
-    if ($isElevated -and -not $AllowElevatedRunner) { throw 'Run this current-user NSIS smoke test from a standard, non-elevated user token.' }
+    Write-Output "Administrator role enabled: $isElevated"
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sessionId = [uint32][Diagnostics.Process]::GetCurrentProcess().SessionId
+    if ([string]::IsNullOrWhiteSpace($ExpectedUserSid)) { $ExpectedUserSid = $identity.User.Value }
+    if (-not $PSBoundParameters.ContainsKey('ExpectedSessionId')) { $ExpectedSessionId = $sessionId }
+    $groupsCsv = & whoami.exe /groups /fo csv /nh
+    if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the lifecycle token integrity level.' }
+    $mediumIntegrity = @($groupsCsv | Where-Object { $_ -match 'S-1-16-8192' }).Count -gt 0
+    Write-Output "User SID: $($identity.User.Value)"
+    Write-Output "Session ID: $sessionId"
+    Write-Output "Medium integrity (S-1-16-8192): $mediumIntegrity"
+    Write-Output 'Token context: reduced-token lifecycle test; this is not a security sandbox.'
+    if ($identity.User.Value -ne $ExpectedUserSid) { throw "Lifecycle SID $($identity.User.Value) does not match parent SID $ExpectedUserSid." }
+    if ($sessionId -ne $ExpectedSessionId) { throw "Lifecycle session $sessionId does not match parent session $ExpectedSessionId." }
+    if ($isElevated) { throw 'The installed-app lifecycle must run without the Administrators role.' }
+    if (-not $mediumIntegrity) { throw 'The installed-app lifecycle must run at medium integrity (S-1-16-8192).' }
 
     $installationAttempted = $true
     $installExitCode = Invoke-BoundedProcess -FilePath $installer -ArgumentList @('/S') -Operation 'Silent NSIS install' -TimeoutSeconds 1200
