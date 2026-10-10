@@ -208,18 +208,20 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
 .footer-metrics { min-width: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; }
 .export-button { min-width: 152px; }
 .cancel-button { color: #866345; border-color: #eadfce; background: #fffaf3; }
-.sidebar-filter-form { display: flex; flex-direction: column; gap: 10px; margin: 2px 1px 8px; padding: 10px 9px; border: 1px solid #edf0f3; border-radius: 8px; background: #fbfcfc; }
+.workspace-filter-editor { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; min-height: 0; margin: 0; padding: 12px 14px; overflow: auto; }
 .filter-toggle { display: flex; align-items: center; gap: 7px; color: #526174; font-size: 9px; }
 .filter-toggle input { accent-color: var(--green); }
-.filter-grid { display: grid; grid-template-columns: 1fr; gap: 9px; }
+.filter-grid { width: min(100%, 760px); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .filter-grid label { min-width: 0; display: flex; flex-direction: column; gap: 4px; color: #526174; font-size: 10px; font-weight: 600; }
 .filter-grid input { width: 100%; min-width: 0; height: 29px; padding: 0 7px; border: 1px solid #e2e8ed; border-radius: 6px; color: #526174; font-size: 9px; }
 .filter-grid input::placeholder { color: #657487; opacity: 1; }
 .filter-hints { display: flex; flex-direction: column; gap: 4px; color: #526174; font-size: 9px; line-height: 1.45; }
 .filter-hints small { font-size: inherit; }
 .filter-hints code { color: #526174; font-size: 9px; }
-.filter-actions { display: flex; flex-direction: column; gap: 6px; }
-.filter-actions .button { width: 100%; min-height: 30px; height: auto; padding: 6px; font-size: 9px; }
+.filter-update-status { margin: 0; color: #526174; font-size: 10px; line-height: 1.5; }
+.filter-update-status.is-failed { color: #8a3e39; }
+.filter-actions { display: flex; align-items: center; gap: 8px; }
+.filter-actions .button { min-height: 32px; height: auto; padding: 6px 12px; font-size: 10px; }
 .filter-actions .button-secondary { border: 1px solid #dfe6eb; color: #657487; background: #fff; }
 .icon-button { width: 26px; height: 26px; border: 0; border-radius: 6px; color: #85919d; background: transparent; font-size: 20px; line-height: 1; cursor: pointer; }
 .icon-button:hover { background: #f1f4f5; }

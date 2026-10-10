@@ -995,12 +995,11 @@ describe('ContextPick workspace UI', () => {
     expect(within(estimates).getByText('≈ 6.2 KB')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Filters' }));
     await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.md');
-    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
-
-    expect(within(estimates).getByText('1', { selector: 'strong' })).toBeInTheDocument();
+    await waitFor(() => expect(within(estimates).getByText('1', { selector: 'strong' })).toBeInTheDocument());
     expect(within(estimates).getByText('≈ 923 B')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy context' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'All' }));
     await user.click(screen.getByRole('checkbox', { name: 'Select README.md' }));
 
     expect(within(estimates).getByText('0', { selector: 'strong' })).toBeInTheDocument();
@@ -1211,6 +1210,33 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByRole('option', { name: 'Notes' })).toBeInTheDocument();
   });
 
+  it('keeps a pending filter edit alive when loading a saved profile fails', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    let policyCalls = 0;
+    const bridge = {
+      ...base,
+      set_policy: async (args: Parameters<typeof base.set_policy>[0]) => {
+        policyCalls += 1;
+        return base.set_policy(args);
+      },
+      load_profile: async () => { throw new Error('Profile could not be loaded.'); },
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Saved profile' }), 'Documentation');
+    await user.click(screen.getByRole('button', { name: 'Filters' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Respect .gitignore' }));
+    expect(await screen.findByText('Updating selection and estimates…')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Load profile' }));
+    expect(await screen.findByText('Profile could not be loaded.')).toBeInTheDocument();
+    await waitFor(() => expect(policyCalls).toBe(1), { timeout: 2_000 });
+    await user.click(screen.getByRole('button', { name: 'Filters' }));
+    await waitFor(() => expect(screen.queryByText('Updating selection and estimates…')).not.toBeInTheDocument());
+  });
+
   it('preserves the preview and tree search while loading a profile', async () => {
     const user = userEvent.setup();
     render(<App bridge={createBrowserBridge()} fixtureMode />);
@@ -1258,9 +1284,14 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByText('Rust', { selector: 'strong' })).toBeInTheDocument();
   });
 
-  it('reopens collapsed filters on the first click and preserves unsubmitted drafts', async () => {
+  it('reopens collapsed filters on the first click and preserves its current policy', async () => {
     const user = userEvent.setup();
-    render(<App bridge={createBrowserBridge()} />);
+    const base = createBrowserBridge();
+    const bridge = {
+      ...base,
+      set_policy: async ({ policy }: { policy: FilterPolicy }) => ({ ...(await base.choose_workspace())!, policy }),
+    };
+    render(<App bridge={bridge} />);
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
     await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.rs');
@@ -1272,13 +1303,14 @@ describe('ContextPick workspace UI', () => {
     await user.keyboard('{Enter}');
 
     expect(screen.getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument();
-    expect(screen.getByRole('form', { name: 'Filter settings' })).toBeInTheDocument();
+    const editor = screen.getByRole('region', { name: 'Filter settings' });
+    expect(editor).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('.rs');
-    expect(screen.getByRole('form', { name: 'Filter settings' }).closest('aside')).toBeInTheDocument();
+    expect(editor.closest('aside')).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
-    expect(screen.getByRole('form', { name: 'Filter settings' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Filter settings' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('.rs');
   });
 
@@ -1335,13 +1367,13 @@ describe('ContextPick workspace UI', () => {
     const includeExtensions = screen.getByRole('textbox', { name: 'Include extensions' });
     await user.type(includeExtensions, '<none>');
     expect(screen.getByText('Use <none> to include files with no extension.')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
+    await waitFor(() => expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['']));
     expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['']);
 
     expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('<none>');
   });
 
-  it('offers include extensions and resets filters without resetting selection intent', async () => {
+  it('shows filters in the main pane and applies edits automatically without resetting selection intent', async () => {
     const user = userEvent.setup();
     const base = createBrowserBridge();
     const initial = await base.choose_workspace();
@@ -1363,16 +1395,20 @@ describe('ContextPick workspace UI', () => {
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
 
-    const filterForm = screen.getByRole('form', { name: 'Filter settings' });
-    expect(filterForm.closest('aside')).toBeInTheDocument();
-    expect(screen.getByRole('tree', { name: 'Workspace files' })).toBeInTheDocument();
+    const filterEditor = screen.getByRole('region', { name: 'Filter settings' });
+    expect(filterEditor.closest('aside')).not.toBeInTheDocument();
+    expect(filterEditor.closest('.file-panel')).toHaveAttribute('aria-label', 'Filter editor');
+    expect(screen.queryByRole('button', { name: 'Apply filters' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tree', { name: 'Workspace files' })).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: /exclude extensions/i })).not.toBeInTheDocument();
     await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.rs');
+    await waitFor(() => expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['.rs']));
     await user.click(screen.getByRole('button', { name: 'Reset filters' }));
-
-    expect(submittedPolicies).toEqual([{ gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] }]);
+    await waitFor(() => expect(submittedPolicies.at(-1)).toEqual({ gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] }));
+    expect(submittedPolicies).toHaveLength(2);
     expect(resetSelectionsCalls).toBe(0);
     expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('');
+    await user.click(screen.getByRole('button', { name: 'All' }));
     expect(screen.getByRole('checkbox', { name: 'Select README.md' })).toBeChecked();
   });
 
@@ -1395,8 +1431,58 @@ describe('ContextPick workspace UI', () => {
     const includeExtensions = screen.getByRole('textbox', { name: 'Include extensions' });
     await user.type(includeExtensions, 'rs, ts');
     expect(includeExtensions).toHaveValue('rs, ts');
-    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
-    expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['rs', 'ts']);
+    await waitFor(() => expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['rs', 'ts']));
+  });
+
+  it('does not let a pending filter debounce supersede a folder change', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const initial = (await base.choose_workspace())!;
+    const nextWorkspace = deferred<WorkspaceView | null>();
+    const submittedPolicies: FilterPolicy[] = [];
+    let chooseCalls = 0;
+    const bridge = {
+      ...base,
+      choose_workspace: async () => {
+        chooseCalls += 1;
+        return chooseCalls === 1 ? initial : nextWorkspace.promise;
+      },
+      set_policy: async ({ policy }: { policy: FilterPolicy }) => {
+        submittedPolicies.push(structuredClone(policy));
+        return { ...initial, policy };
+      },
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Filters' }));
+    await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.rs');
+    await user.click(screen.getByRole('button', { name: 'Change folder' }));
+
+    nextWorkspace.resolve({ ...initial, root: '/workspace/next' });
+    expect(await screen.findByText('/workspace/next')).toBeInTheDocument();
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 350)); });
+    expect(submittedPolicies).toEqual([]);
+  });
+
+  it('shows pending and failed filter updates without claiming the policy was applied', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    let rejectPolicy!: (cause: Error) => void;
+    let policyStarted = false;
+    const bridge = {
+      ...base,
+      set_policy: () => new Promise<WorkspaceView>((_resolve, reject) => { policyStarted = true; rejectPolicy = reject; }),
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Filters' }));
+    await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.bad');
+
+    expect(await screen.findByText('Updating selection and estimates…')).toBeInTheDocument();
+    await waitFor(() => expect(policyStarted).toBe(true));
+    await act(async () => { rejectPolicy(new Error('Invalid extension pattern')); });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Invalid extension pattern');
+    expect(screen.getByText('Filter update failed. Review the error message and edit a filter to retry.')).toBeInTheDocument();
   });
 
   it('shows the first workspace page immediately and appends later pages in order', async () => {
@@ -2000,13 +2086,14 @@ describe('ContextPick workspace UI', () => {
     expect(cancelled).toEqual(['stale-watch-ticket']);
   });
 
-  it('hydrates saved policy on folder open and keeps edits until Apply is accepted', async () => {
+  it('hydrates saved policy on folder open and applies edits after a debounce', async () => {
     const user = userEvent.setup();
     const savedPolicy: FilterPolicy = { gitignore: false, includeExtensions: ['.md'], includePaths: ['docs/**'], excludePaths: ['dist/**'] };
     const nextPolicy: FilterPolicy = { gitignore: true, includeExtensions: ['.rs'], includePaths: ['core/**'], excludePaths: ['build/**'] };
     const base = createBrowserBridge();
     const initial = { ...(await base.choose_workspace())!, policy: savedPolicy };
     let folderChoice = 0;
+    const appliedPolicies: FilterPolicy[] = [];
     const bridge = {
       ...base,
       choose_workspace: async () => {
@@ -2014,7 +2101,10 @@ describe('ContextPick workspace UI', () => {
         return folderChoice === 1 ? initial : { ...initial, root: '/workspace/next', policy: nextPolicy };
       },
       set_intent: async () => initial,
-      set_policy: async ({ policy }: { policy: FilterPolicy }) => ({ ...initial, policy }),
+      set_policy: async ({ policy }: { policy: FilterPolicy }) => {
+        appliedPolicies.push(structuredClone(policy));
+        return { ...initial, policy };
+      },
     };
     render(<App bridge={bridge} />);
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
@@ -2026,12 +2116,12 @@ describe('ContextPick workspace UI', () => {
 
     await user.clear(includeExtensions);
     await user.type(includeExtensions, '.tsx');
-    await user.click(screen.getByRole('checkbox', { name: 'Select README.md' }));
+    expect(appliedPolicies).toHaveLength(0);
+    await waitFor(() => expect(appliedPolicies.at(-1)?.includeExtensions).toEqual(['.tsx']));
     expect(includeExtensions).toHaveValue('.tsx');
     expect(screen.getByLabelText('Exclude paths')).toHaveValue('dist/**');
 
-    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
-    expect(await screen.findByRole('textbox', { name: 'Include extensions' })).toHaveValue('.tsx');
+    expect(appliedPolicies.at(-1)?.includePaths).toEqual(['docs/**']);
     expect(screen.getByLabelText('Include paths')).toHaveValue('docs/**');
     expect(screen.getByLabelText('Exclude paths')).toHaveValue('dist/**');
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
 import { IconAlertTriangle, IconArrowRight, IconChevronLeft, IconChevronRight, IconCode, IconCopy, IconEye, IconFileExport, IconFileText, IconFolderOpen, IconHash, IconInfoCircle, IconPlus, IconSearch, IconSettings, IconX } from '@tabler/icons-react';
 import type { ContextPickBridge, Entry, ExportResult, FilterPolicy, Preview, ProfileCatalog, SelectionIntent, SensitiveWarningSummary, TokenEstimate, WatchHealth, WorkspacePage, WorkspaceView } from './bridge';
 import { ProjectTree } from './ProjectTree';
@@ -122,10 +122,15 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const [renameProfileName, setRenameProfileName] = useState('');
   const [policy, setPolicy] = useState<FilterPolicy>(DEFAULT_FILTER_POLICY);
   const [policyDrafts, setPolicyDrafts] = useState(() => draftsFromPolicy(policy));
+  const [policyUpdateState, setPolicyUpdateState] = useState<'idle' | 'pending' | 'failed'>('idle');
   const policyDirty = useRef(false);
+  const policyDebounceTimer = useRef<number | null>(null);
+  const policyRevision = useRef(0);
   const [hasUnappliedPolicy, setHasUnappliedPolicy] = useState(false);
   const [busy, setBusyState] = useState<string | null>('restore');
   const busyOperation = useRef<string | null>('restore');
+  const workspaceStaleRef = useRef(false);
+  const cancellingRef = useRef(false);
   const setBusy = useCallback((value: string | null) => {
     busyOperation.current = value;
     setBusyState(value);
@@ -231,6 +236,13 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     const prompt = sensitivePromptRef.current;
     if (prompt) void bridge.cancel_sensitive_output({ ticket: prompt.ticket }).catch(() => {});
   }, [bridge]);
+
+  useEffect(() => () => {
+    if (policyDebounceTimer.current !== null) window.clearTimeout(policyDebounceTimer.current);
+  }, []);
+
+  useEffect(() => { workspaceStaleRef.current = workspaceStale; }, [workspaceStale]);
+  useEffect(() => { cancellingRef.current = cancelling; }, [cancelling]);
 
   const updateWatchHealth = useCallback((health: WatchHealth, listenerVerified = false) => {
     if (health.root !== activeRoot.current || health.epoch < watchEpoch.current) return;
@@ -508,7 +520,10 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       }
       if (result) await loadWorkspacePages(result, stillCurrent);
     } catch (cause) {
-      if (stillCurrent()) setError(errorMessage(cause, 'The request could not be completed.'));
+      if (stillCurrent()) {
+        setError(errorMessage(cause, 'The request could not be completed.'));
+        if (name === 'policy') setPolicyUpdateState('failed');
+      }
     } finally {
       if (busyRequestId.current === requestId) setBusy(null);
     }
@@ -591,6 +606,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       setPolicyDrafts(draftsFromPolicy(result.policy));
       policyDirty.current = false;
       setHasUnappliedPolicy(false);
+      setPolicyUpdateState('idle');
     }
     if (rootChanged) {
       activeRoot.current = result.root;
@@ -653,6 +669,11 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     const root = workspace.root;
     const requestId = ++workspaceRequestId.current;
     void runWorkspaceCommand('profile', () => bridge.load_profile({ name: selectedProfileName }), (result) => {
+      if (policyDebounceTimer.current !== null) window.clearTimeout(policyDebounceTimer.current);
+      policyDebounceTimer.current = null;
+      policyRevision.current += 1;
+      policyDirty.current = false;
+      setHasUnappliedPolicy(false);
       commitWorkspace(result, true, true);
       setStatus(`Loaded profile: ${selectedProfileName}`);
     }, () => requestId === workspaceRequestId.current && workspace?.root === root);
@@ -675,7 +696,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   }
 
   function openWorkspace() {
-    if (cancelling) return;
+    if (cancelling || busyOperation.current === 'copy' || busyOperation.current === 'export' || busyOperation.current === 'open') return;
     const requestId = ++workspaceRequestId.current;
     void runWorkspaceCommand('open', () => bridge.choose_workspace(), (result) => {
       if (!result) return;
@@ -752,21 +773,34 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     }, () => requestId === workspaceRequestId.current);
   }
 
-  function submitPolicy(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (workspaceStale || cancelling) return;
-    const requestId = ++workspaceRequestId.current;
-    void runWorkspaceCommand('policy', () => bridge.set_policy({ policy }), (result) => commitWorkspace(result, true), () => requestId === workspaceRequestId.current);
+  function queuePolicyUpdate(nextPolicy: FilterPolicy) {
+    policyDirty.current = true;
+    setHasUnappliedPolicy(true);
+    setPolicyUpdateState('pending');
+    setError('');
+    setPolicy(nextPolicy);
+    if (policyDebounceTimer.current !== null) window.clearTimeout(policyDebounceTimer.current);
+    const revision = ++policyRevision.current;
+    const root = workspace?.root;
+    const applyWhenReady = () => {
+      if (!root || activeRoot.current !== root || revision !== policyRevision.current) return;
+      if (workspaceStaleRef.current || cancellingRef.current || busyOperation.current !== null) {
+        policyDebounceTimer.current = window.setTimeout(applyWhenReady, 300);
+        return;
+      }
+      policyDebounceTimer.current = null;
+      const requestId = ++workspaceRequestId.current;
+      void runWorkspaceCommand('policy', () => bridge.set_policy({ policy: nextPolicy }), (result) => commitWorkspace(result, true), () => requestId === workspaceRequestId.current && revision === policyRevision.current && activeRoot.current === root);
+    };
+    policyDebounceTimer.current = window.setTimeout(() => {
+      applyWhenReady();
+    }, 300);
   }
 
   function resetFilters() {
     if (!workspace || workspaceStale || cancelling) return;
-    const requestId = ++workspaceRequestId.current;
-    const policy = { ...DEFAULT_FILTER_POLICY };
-    void runWorkspaceCommand('policy', () => bridge.set_policy({ policy }), (result) => {
-      commitWorkspace(result, true);
-      setStatus('Filters reset to defaults.');
-    }, () => requestId === workspaceRequestId.current);
+    setPolicyDrafts(draftsFromPolicy(DEFAULT_FILTER_POLICY));
+    queuePolicyUpdate({ ...DEFAULT_FILTER_POLICY });
   }
 
   function toggleSidebar() {
@@ -885,15 +919,13 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   }
 
   function updateTextPolicy(field: 'includeExtensions' | 'includePaths' | 'excludePaths', draft: string) {
-    policyDirty.current = true;
-    setHasUnappliedPolicy(true);
     setPolicyDrafts((current) => ({ ...current, [field]: draft }));
     const values = draft
       .split(',')
       .map((value) => value.trim())
       .filter(Boolean)
       .map((value) => field === 'includeExtensions' && value.toLocaleLowerCase() === '<none>' ? '' : value);
-    setPolicy((current) => ({ ...current, [field]: values }));
+    queuePolicyUpdate({ ...policy, [field]: values });
   }
 
   function toggleExpanded(entry: Entry) {
@@ -988,7 +1020,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       <WorkspaceToolbar
         root={workspace?.root ?? null}
         refreshDisabled={!workspace || busy !== null || cancelling}
-        openDisabled={busy === 'open' || cancelling}
+        openDisabled={busy === 'copy' || busy === 'export' || busy === 'open' || cancelling}
         onRefresh={refresh}
         onOpen={openWorkspace}
       />
@@ -1000,7 +1032,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
           collapsed={sidebarCollapsed}
           view={fileView}
           settingsOpen={settingsOpen}
-          filtersOpen={policyOpen && !sidebarCollapsed}
+          filtersOpen={policyOpen}
           allItems={workspace.entryCount}
           selectedFiles={workspace.selectedCount}
           ignoredFiles={ignoredFileCount}
@@ -1019,18 +1051,18 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
             }
           }}
           onSettings={() => { setPolicyOpen(false); setSettingsOpen((open) => !open); }}
-        >{policyOpen && <WorkspaceFilters
+        />}
+        <section className="panel file-panel" aria-label={policyOpen ? 'Filter editor' : settingsOpen ? 'Workspace settings' : 'Project files'}>
+          <div className="panel-heading"><div><h2>{policyOpen ? 'Filters' : settingsOpen ? 'Settings' : fileView === 'selected' ? 'Selected files' : fileView === 'ignored' ? 'Git-ignored files' : 'Project files'}</h2><p>{workspace ? indexLoading ? `${workspace.entries.length} of ${workspace.entryCount} items loaded` : `${workspace.entryCount} items discovered` : 'Open a folder to get started'}</p></div><div className="scan-statuses">{workspace && !settingsOpen && !policyOpen && <><span className="refresh-badge" title={busy === 'refresh' ? 'Revalidating workspace files.' : watchStatusUnavailable || watchListenerUnavailable ? 'Watcher status or notifications could not be verified. Refresh before continuing.' : watchHealth?.root === workspace.root ? watchHealth.message ?? (watchHealth.state === 'watching' ? 'Watching workspace files.' : watchHealth.state === 'stale' ? 'Files changed. Refresh to update the workspace.' : 'Watcher unavailable. Refresh manually to update the workspace.') : 'Automatic file watching is unavailable in this browser fixture. Refresh after changing files.'}>{busy === 'refresh' ? 'Updating' : watchStatusUnavailable || watchListenerUnavailable ? 'Status unavailable' : watchHealth?.root === workspace.root ? watchHealth.state === 'watching' ? 'Watching' : watchHealth.state === 'stale' ? 'Files changed' : 'Watcher unavailable' : 'Manual refresh'}</span></>}{workspace?.incomplete && <span className="scan-badge"><span className="scan-dot" /> Partial scan</span>}</div></div>
+          {workspace ? policyOpen ? <WorkspaceFilters
           gitignore={policy.gitignore}
           drafts={policyDrafts}
           disabled={!workspace || workspaceStale || busy !== null || cancelling}
-          onGitignoreChange={(enabled) => { policyDirty.current = true; setHasUnappliedPolicy(true); setPolicy((current) => ({ ...current, gitignore: enabled })); }}
+          updateState={policyUpdateState}
+          onGitignoreChange={(enabled) => queuePolicyUpdate({ ...policy, gitignore: enabled })}
           onTextChange={updateTextPolicy}
           onReset={resetFilters}
-          onSubmit={submitPolicy}
-        />}</WorkspaceSidebar>}
-        <section className="panel file-panel" aria-label="Project files">
-          <div className="panel-heading"><div><h2>{settingsOpen ? 'Settings' : fileView === 'selected' ? 'Selected files' : fileView === 'ignored' ? 'Git-ignored files' : 'Project files'}</h2><p>{workspace ? indexLoading ? `${workspace.entries.length} of ${workspace.entryCount} items loaded` : `${workspace.entryCount} items discovered` : 'Open a folder to get started'}</p></div><div className="scan-statuses">{workspace && !settingsOpen && <><span className="refresh-badge" title={busy === 'refresh' ? 'Revalidating workspace files.' : watchStatusUnavailable || watchListenerUnavailable ? 'Watcher status or notifications could not be verified. Refresh before continuing.' : watchHealth?.root === workspace.root ? watchHealth.message ?? (watchHealth.state === 'watching' ? 'Watching workspace files.' : watchHealth.state === 'stale' ? 'Files changed. Refresh to update the workspace.' : 'Watcher unavailable. Refresh manually to update the workspace.') : 'Automatic file watching is unavailable in this browser fixture. Refresh after changing files.'}>{busy === 'refresh' ? 'Updating' : watchStatusUnavailable || watchListenerUnavailable ? 'Status unavailable' : watchHealth?.root === workspace.root ? watchHealth.state === 'watching' ? 'Watching' : watchHealth.state === 'stale' ? 'Files changed' : 'Watcher unavailable' : 'Manual refresh'}</span></>}{workspace?.incomplete && <span className="scan-badge"><span className="scan-dot" /> Partial scan</span>}</div></div>
-          {workspace ? settingsOpen ? <section className="settings-content" aria-label="Settings">
+          /> : settingsOpen ? <section className="settings-content" aria-label="Settings">
             <div className="settings-icon"><UiIcon icon={IconSettings} /></div>
             <h3>Local workspace settings</h3>
             <p>Workspace path, filters, and file selection choices are saved locally on this device.</p>
@@ -1053,7 +1085,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
                 <button className="button button-secondary" onClick={loadProfile} disabled={!selectedProfileName || !profileCatalog?.names.includes(selectedProfileName) || busy !== null || workspaceStale || cancelling}>Load profile</button>
                 <button className="button button-secondary" onClick={updateProfile} disabled={!selectedProfileName || !profileCatalog?.names.includes(selectedProfileName) || busy !== null || workspaceStale || cancelling || hasUnappliedPolicy}>Update profile</button>
               </div>
-              {hasUnappliedPolicy && <p className="profile-note">Apply filter edits before saving or updating a profile. Loading a profile replaces unapplied filter edits.</p>}
+              {hasUnappliedPolicy && <p className="profile-note">Filter changes are applied automatically. Wait for the update to finish before saving a profile; loading a profile replaces pending filter edits.</p>}
               <label className="profile-field">
                 <span>New profile name</span>
                 <input value={newProfileName} maxLength={80} onChange={(event) => setNewProfileName(event.target.value)} placeholder="e.g. Documentation" />

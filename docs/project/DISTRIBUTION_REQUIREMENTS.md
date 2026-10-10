@@ -2,7 +2,9 @@
 
 **Research checked:** 2026-10-09. Official-source links below were checked against the current project documentation on that date; package-manager policies can change, so recheck before submission.
 
-This is a compatibility brief for roadmap M5.5/M5.6, not evidence that ContextPick currently produces acceptable packages or has been accepted by any repository. These public community channels do not require a paid app-store listing. Validate all installer-specific details against the actual release artifacts. Official repositories review and may decline submissions even when documented criteria appear satisfied.
+**Project priority:** the user has moved WinGet, Chocolatey, Homebrew/macOS packaging and Gatekeeper work to the indefinite backlog while product refinements are completed. This document remains the evidence checklist for the deferred M5.5.3/M5.6 work; do not start submissions or package-manager validation unless the user reprioritizes it. The Windows `v0.1.0` GitHub preview is already downloadable.
+
+This is a compatibility brief, not evidence that ContextPick currently produces acceptable packages or has been accepted by any repository. These public community channels do not require a paid app-store listing. Validate all installer-specific details against the actual release artifacts when distribution work resumes. Official repositories review and may decline submissions even when documented criteria appear satisfied.
 
 ## Precedent: Whisper Desk v0.1.0
 

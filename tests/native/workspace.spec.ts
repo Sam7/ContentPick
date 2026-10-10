@@ -152,15 +152,18 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await expect(selected).toHaveText('601');
   await page.getByRole('button', { name: 'Filters' }).click();
   await native.resizeWindow(1536, 1024);
-  await expect(page.getByRole('form', { name: 'Filter settings' })).toBeVisible();
+  const filterEditor = page.getByRole('region', { name: 'Filter settings' });
+  await expect(filterEditor).toBeVisible();
+  expect(await filterEditor.evaluate((editor) => editor.closest('aside') !== null)).toBe(false);
+  await expect(page.getByRole('tree', { name: 'Workspace files' })).toHaveCount(0);
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filters.png') });
   const gitignore = page.getByRole('checkbox', { name: 'Respect .gitignore' });
   await gitignore.uncheck();
-  await page.getByRole('button', { name: 'Apply filters' }).click();
   await expect(selected).toHaveText('603');
+  await expect(gitignore).toBeEnabled();
   await gitignore.check();
-  await page.getByRole('button', { name: 'Apply filters' }).click();
   await expect(selected).toHaveText('601');
+  await page.getByRole('button', { name: 'All' }).click();
   await expect(page.getByRole('checkbox', { name: 'Select README.md' })).not.toBeChecked();
 
   await search.fill('dist');
@@ -190,6 +193,7 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await expect(page.locator('.metric-primary strong')).toHaveText('601');
   await page.getByRole('button', { name: 'Filters' }).click();
   await expect(page.getByRole('checkbox', { name: 'Respect .gitignore' })).toBeChecked();
+  await page.getByRole('button', { name: 'All' }).click();
   await expect(page.getByRole('checkbox', { name: 'Select README.md' })).not.toBeChecked();
   await page.getByRole('textbox', { name: 'Search files' }).fill('file-0599.ts');
   await expect(page.getByRole('button', { name: 'Preview src/file-0599.ts' })).toHaveCount(1);
@@ -666,19 +670,19 @@ test('native startup migrates version-1 extension exclusions into visible path r
   await expect(page.getByRole('textbox', { name: 'Exclude paths' })).toHaveValue('file-ext:ts');
   await expect(page.getByRole('textbox', { name: /exclude extensions/i })).toHaveCount(0);
   await page.setViewportSize({ width: 1536, height: 1024 });
-  const filters = page.getByRole('form', { name: 'Filter settings' });
+  const filters = page.getByRole('region', { name: 'Filter settings' });
   await expect(filters).toBeVisible();
-  expect(await filters.evaluate((form) => form.closest('aside') !== null)).toBe(true);
-  await expect(page.getByRole('heading', { name: 'Project files' })).toBeVisible();
+  expect(await filters.evaluate((editor) => editor.closest('aside') !== null)).toBe(false);
+  await expect(page.getByRole('heading', { name: 'Filters' })).toBeVisible();
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-migrated.png') });
   await page.setViewportSize({ width: 720, height: 520 });
   await expect(filters).toBeVisible();
   await expect(page.locator('.export-bar')).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-720x520.png') });
-  const apply = filters.getByRole('button', { name: 'Apply filters' });
-  await apply.scrollIntoViewIfNeeded();
-  await expect(apply).toBeInViewport();
+  const reset = filters.getByRole('button', { name: 'Reset filters' });
+  await reset.scrollIntoViewIfNeeded();
+  await expect(reset).toBeInViewport();
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-720x520-scrolled.png') });
 
   const settings = await native.readSettings();

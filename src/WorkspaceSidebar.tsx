@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import { IconAdjustmentsHorizontal, IconChevronLeft, IconChevronRight, IconCircleCheck, IconCircleDashed, IconLayoutList, IconSettings } from '@tabler/icons-react';
 import { UiIcon } from './UiIcon';
 import type { WorkspaceFileView } from './workspaceViews';
@@ -14,7 +13,6 @@ type WorkspaceSidebarProps = {
   unbrowsedIgnoredFolders: number;
   indexLoading: boolean;
   incomplete: boolean;
-  children?: ReactNode;
   onToggleCollapsed: () => void;
   onViewChange: (view: WorkspaceFileView) => void;
   onFilters: () => void;
@@ -32,7 +30,6 @@ export function WorkspaceSidebar({
   unbrowsedIgnoredFolders,
   indexLoading,
   incomplete,
-  children,
   onToggleCollapsed,
   onViewChange,
   onFilters,
@@ -72,10 +69,9 @@ export function WorkspaceSidebar({
       </nav>
       <section className="sidebar-tools" aria-label="Workspace tools">
         <div className="sidebar-group-label sidebar-tools-label">{!collapsed && 'TOOLS'}</div>
-        <button className={`sidebar-item${filtersOpen ? ' is-active' : ''}`} type="button" aria-label="Filters" aria-controls={filtersOpen && !collapsed ? 'workspace-filters' : undefined} aria-expanded={filtersOpen && !collapsed} title={collapsed ? 'Filters' : undefined} onClick={onFilters}>
+        <button className={`sidebar-item${filtersOpen ? ' is-active' : ''}`} type="button" aria-label="Filters" aria-controls={filtersOpen ? 'workspace-filters' : undefined} aria-expanded={filtersOpen} title={collapsed ? 'Filters' : undefined} onClick={onFilters}>
           <span className="sidebar-icon"><UiIcon icon={IconAdjustmentsHorizontal} /></span><span className="sidebar-text">Filters</span>
         </button>
-        {!collapsed && children}
         <button className={`sidebar-item${settingsOpen ? ' is-active' : ''}`} type="button" aria-label="Settings" aria-pressed={settingsOpen} title={collapsed ? 'Settings' : undefined} onClick={onSettings}>
           <span className="sidebar-icon"><UiIcon icon={IconSettings} /></span><span className="sidebar-text">Settings</span>
         </button>

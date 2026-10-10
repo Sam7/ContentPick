@@ -42,7 +42,7 @@ At first start, the root agent shall:
 **Success means all of the following:**
 
 1. On both Windows and macOS, a user can open a local folder and navigate a responsive directory tree while ignored or excluded content is visibly distinguished.
-2. Git ignore processing, custom path/extension filters, folder selection, individual file choices, and explicit overrides behave deterministically. A file's status is explainable; changing a global filter does not destroy prior explicit choices.
+2. Git ignore processing, the text/extension eligibility mode, folder/file selection and explicit overrides behave deterministically. A file's status is explainable; changing a global filter does not destroy prior explicit choices.
 3. The application exports the selected textual files to valid, deterministic, well-labelled Markdown, correctly handling nested code fences and pathological file paths. Copy-to-clipboard is available.
 4. A prominent **estimated export bytes, selected-file count, and estimated token count** update as selections and files change, without rereading the whole repository synchronously. Estimates are clearly labelled; actual export size is measured and reported.
 5. Scanning, preview, watchers, token analysis and exports are cancellable or bounded. Ignored subtrees are not recursively walked merely to display a muted folder. The UI never freezes waiting on filesystem work.
@@ -73,7 +73,7 @@ No cloud backend, authentication, payments, subscriptions, embeddings, model cal
 | WS-04 | P0 | File and folder selection; inherited intent | Folder choice applies to eligible descendants; nearest explicit choice resolves conflicts |
 | WS-05 | P0 | Explicit per-file/folder force-include and force-exclude | User can override filters intentionally; reason is displayed; safety still enforced |
 | FL-01 | P0 | Toggle `.gitignore` policy | Both states tested on nested ignore fixtures; explicit user intent persists |
-| FL-02 | P0 | Include-extension allowlist and include/exclude path rules | Empty allowlist imposes no extension filter; normalized extensions and extensionless files behave deterministically; no exclude-extension feature; existing saved exclusions migrate visibly to path rules without losing intent |
+| FL-02 | P0 | Text eligibility and include-only extension policy | Empty extension allowlist keeps existing default text classification; nonempty values restrict eligible files; normalization, extensionless files and mixed-case suffixes are deterministic; no extension-exclusion policy remains active |
 | FL-03 | P0 | Explain every exclusion | UI displays effective reason and source rule when known |
 | FL-04 | P0 | Hidden files and `.ignore` policy explicit | No accidental undisclosed matcher defaults |
 | SC-01 | P0 | Fast, bounded metadata-first scanning | No eager full-file loading; no synchronous UI scan |
@@ -99,6 +99,14 @@ No cloud backend, authentication, payments, subscriptions, embeddings, model cal
 | UX-03 | P1 | Collapsible/resizable preview and splitter | Preview can collapse/restore; export controls remain visible at supported window sizes |
 | UX-04 | P1 | Compact desktop shell with collapsible sidebar, minimal Settings destination and persistent footer | Workspace toolbar, sidebar, tree, read-only preview and estimates/actions fit one window; panes scroll independently; Settings adds no speculative preferences; no marketing/dashboard chrome |
 | UX-05 | P1 | All / Selected / Ignored file views | Views filter one indexed workspace and one selection state; Ignored means Git-ignored; unknown counts stay partial |
+| UX-06 | P1 | Main-pane filter editor and compact two-mode eligibility picker | Sidebar Filter opens in the main work area; `All text` or `Selected extensions` replaces free-form/path-rule editing; common suffixes fit in a categorized multi-column grid without scrolling; no Apply button; eligibility and estimates update after a short debounce; keyboard focus and pending/error states remain clear |
+| UX-07 | P1 | Legible tree hierarchy | Children are visibly indented from parents with subtle connector guides; expansion, virtualization, selection, keyboard navigation and supported window sizes remain correct |
+| MT-05 | P1 | Per-folder discovered file-size totals | Folder rows show human-readable logical-byte sums for safely discovered regular files, whether selected or eligible; checked folders are prioritized, existing per-file metadata is reused with ancestor-only invalidation, totals expose partial/unscanned states, and calculation is debounced, cancellable, bounded and stale-result safe |
+| PR-03 | P1 | Optional fixed export folder | User can enable a persisted destination folder in Settings or keep Save As; fixed-folder export uses a safe workspace-derived `.md` name and never overwrites a source or escapes the chosen destination |
+| PR-04 | P1 | Optional repeat overwrite for fixed exports | A separate, disabled-by-default preference allows every export to replace the same workspace-named output file without another prompt; when off, collisions receive a safe non-overwriting suffix |
+| EX-04 | P1 | Explain fixed export target before use | Hover/focus on Export Markdown explains the exact target and whether each export will replace it; destination and failures are reported truthfully |
+| DOC-01 | P1 | Product-facing README and current download link | README explains the local workflow and supported use, labels preview version accurately, and links to verified public release assets without promising AI outcomes or universal file caps |
+| DOC-02 | P1 | Public GitHub Pages product site | A polished, accessible long-form product page at `docs/index.html` explains the product, workflow, benefits and limitations with real screenshots and current download links; it is served at the repository’s GitHub Pages URL |
 | BR-01 | P1 | Approved ContextPick vector brand and application icons | Editable path-based SVG artwork matches the approved logo; generated platform icons remain legible at required sizes and are used by the app |
 | MT-04 | P2 | User-defined token budget/indicator | Budget warnings without false exactness |
 | GI-01 | P2 | Git changed-files selection | Optional status-based selection; Git CLI/library compatibility verified |
@@ -115,7 +123,7 @@ Use the approved compact desktop layout shown in [`docs/design/design-draft.png`
 
 Header: approved ContextPick mark/wordmark, chosen local workspace path, Change Folder and Refresh. Show only real scan state; do not invent watcher status.
 
-Sidebar: mutually exclusive All / Selected / Ignored view filters; a collapsible Filters section for `.gitignore`, Include Extensions and ordered path rules; Settings contains only existing settings/actions and does not duplicate filter state. Selected and Ignored are projections over the same workspace index, not separate selection stores. Ignored means `.gitignore` policy only.
+Sidebar: mutually exclusive All / Selected / Ignored views and a Filter destination; selecting Filter opens the editor in the main work area. Settings contains the optional fixed export-folder preference. Selected and Ignored are projections over the same workspace index, not separate selection stores. Ignored means `.gitignore` policy only.
 
 Tree: search bar; disclosure arrows; tri-state checkboxes; file/folder icons; selected/excluded/muted styles; reason detail; counts only when known. Existing domain and bridge results remain authoritative.
 
@@ -141,7 +149,7 @@ UI states must be designed for: no folder chosen; empty folder; scanning; scan c
 
 Five conceptual states: Included, Excluded by user, Partially selected, Filtered/ignored (muted), Force included (distinct badge or marker). Selection and eligibility must not be conflated. Use icons/labels as well as colour. A directory with unknown, unexpanded excluded descendants must not display false exact child counts.
 
-Check a normal folder -> select **eligible** descendants, not indiscriminately bypass policy. Uncheck folder -> exclude descendants by inherited intent. Use a named menu command (not an ambiguous checkbox) for `Force include despite filter`. Display why a file is filtered: e.g., `.gitignore (dist/)`, `custom exclude (**/*.snap)`, `binary`, `unreadable`, or `size policy`. Provide `Reset override` and `Reset selections to defaults` separately.
+Check a normal folder -> select **eligible** descendants, not indiscriminately bypass policy. Uncheck folder -> exclude descendants by inherited intent. Use a named menu command (not an ambiguous checkbox) for `Force include despite filter`. Display why a file is filtered: e.g., `.gitignore (dist/)`, `extension not selected`, `binary`, `unreadable`, or `size policy`. Provide `Reset override` and `Reset selections to defaults` separately.
 
 Keyboard navigation should cover tree expansion, selection, search, filters, and export. Follow WCAG-relevant desktop UI principles: focus rings, accessible labels, non-colour-only states, screen-reader announcements for scan/export results, and sensible tab order.
 
@@ -157,7 +165,7 @@ Keyboard navigation should cover tree expansion, selection, search, filters, and
 - **Selection intent:** User's explicit include/exclude instruction for a path or subtree; distinct from effective selection.
 - **Override:** An intentional bypass of ordinary filtering, subject to hard safety checks.
 - **Effective selection:** Pure evaluation of eligibility, inherited/user intent and overrides at a version of the workspace index.
-- **Policy:** Git-ignore handling, extension/path filtering, safety limits, text classification and hidden-file handling.
+- **Policy:** Git-ignore handling, text/extension eligibility, safety limits, text classification and hidden-file handling.
 - **Scan generation:** Immutable version token for one index update; stale generations cannot publish UI state.
 - **Content snapshot / export manifest:** Frozen set of paths, expected metadata and output order used for one export.
 - **Estimate:** A labelled, potentially stale or incomplete approximate count of bytes/tokens.
@@ -169,7 +177,7 @@ Keyboard navigation should cover tree expansion, selection, search, filters, and
 | Context/module | Owns | Must not own |
 |---|---|---|
 | Workspace Discovery | Root validation, directory enumeration, metadata, snapshot/index, lazy placeholders | Checkboxes, UI components, Markdown |
-| Selection & Policy | User intent, path/glob rules, ignore decision, reason resolution, effective-selection aggregate | Filesystem I/O, React state, export writing |
+| Selection & Policy | Explicit path-based user intent, extension eligibility, ignore decision, reason resolution, effective-selection aggregate | Filesystem I/O, React state, export writing |
 | Content & Export | Text classification adapter, bounded preview, streaming encoding, manifests and Markdown formatting | Selection UI, persistence implementation |
 | Context Metrics | File byte aggregates, approximate token counts, caches, freshness | Deciding which files user selected |
 | Change Monitoring | Watcher events, debounce, generation invalidation, rescan requests | Direct UI mutation or source edits |
@@ -194,14 +202,14 @@ evaluate_selection(path, entry_metadata, inherited_user_intent, policy, override
 
 1. **Hard safety/technical guard:** A path outside the workspace, unresolved unsafe link, directory masquerading as file, unreadable content or confirmed binary data cannot be exported. An override does not bypass hard guards.
 2. **Explicit force-exclude** a path always excludes it. For a directory, descendants inherit exclusion except where a more specific descendant intent exists **and its ancestor is safely traversable**.
-3. **Explicit force-include** bypasses *soft* Gitignore, extension and custom path rules for a chosen target/subtree; it never bypasses hard guards. If conflicting explicit intents exist, the *most specific path wins*; at identical specificity the latest user action wins.
+3. **Explicit force-include** bypasses *soft* Gitignore and extension eligibility for a chosen target/subtree; it never bypasses hard guards. If conflicting explicit intents exist, the *most specific path wins*; at identical specificity the latest user action wins.
 4. **Ordinary inherited manual include/exclude** selects/unselects only eligible content. Nearest explicit path decision wins; absent any decision use workspace/profile default.
-5. **Custom path and extension filters**, then **Git ignore rules**, then default text eligibility define *soft eligibility*. Custom-filter precedence must be documented and tested: explicit custom path exclude > custom include unless a **force** override exists; within rules of the same class use stable configured order with documented last-match semantics. Extensions should support allowlist, blocklist, extensionless and dotfiles without confusion.
+5. **Include-extension allowlist**, then **Git ignore rules**, then default text eligibility define *soft eligibility*. Empty extension selection means all otherwise eligible text. The filter UI has no custom include/exclude path or extension-exclusion rules; folder and file selection express user intent. Extensionless and dotfile behavior is explicit.
 6. If no manual intent is present, default **include eligible textual files**; files with uncertain type remain pending/excluded until validated. Make default conservative, configurable, and visible.
 
 The implementation should formalise the above into a **truth table** and property tests; do not attempt to infer these semantics ad hoc from checkbox events. Folder checkbox state is derived, not persisted as UI-specific state.
 
-**Special directory rule:** A force-included child inside an ignored directory requires explicit discovery of its ancestor path; don't recursively enumerate every skipped subtree to locate hypothetical overrides. Persist path rules and open only necessary ancestors. If a parent is excluded from traversal by a *hard* safety rule, no descendant may be exported.
+**Special directory rule:** A force-included child inside an ignored directory requires explicit discovery of its ancestor path; don't recursively enumerate every skipped subtree to locate hypothetical overrides. Persist explicit user selection intent and open only necessary ancestors. If a parent is excluded from traversal by a *hard* safety rule, no descendant may be exported.
 
 **Nested Gitignore rule:** Use real Git-compatible semantics for slash anchoring, `!` negation, nested rules, ignored-parent constraints, global and repository excludes where configured, and paths outside Git repositories. Git negation does not by itself guarantee discovery beneath an excluded parent; explicit *user* force include is a separate feature. Include fixtures compared to `git check-ignore` where meaningful. `.ignore`, hidden files, `.git/info/exclude`, global ignore and parent ignore have **separate explicit toggles** or explicit documented defaults; do not silently inherit all defaults of the chosen library.
 
@@ -468,7 +476,7 @@ Create disposable synthetic repositories and test these exact classes of behavio
 1. **Nested `.gitignore`:** root ignores `dist/`, nested ignore of `*.generated.ts`, nested negation, slash-anchored patterns, escaped spaces, and ignore effects when Gitignore toggle switches.
 2. **Parent ignored directory:** confirm `!nested/file` does not magically enumerate an ignored parent under normal Git semantics; explicit manual inclusion of a known file is separately supported by controlled path discovery.
 3. **Conflicting selection intent:** select root, unselect tests folder, include one specific test file; unselect root, include one nested directory; change filters and restore prior choices.
-4. **Glob precedence:** include-extension allowlist, path include/exclude, dotfiles, extensionless `Dockerfile`, mixed-case extension, wildcard metacharacters and overlapping custom rules. Test conversion of persisted exclude-extension rules as part of FL-02; no runtime exclude-extension policy remains after migration.
+4. **Eligibility and upgrade migration:** `All text` versus selected extension allowlist, extensionless `Dockerfile`, dotfiles and mixed-case extensions. M5.5.2 migration preserves explicit user intents and selected extensions, backs up and retires legacy path/exclusion rules, informs the user, and is atomic/idempotent across restart and failure.
 5. **Ignored large subtree:** generate an ignored subtree with tens of thousands of entries; test enumeration counter proving pruning, not merely checking screen appearance.
 6. **Binary/encoding:** UTF-8, UTF-8 BOM, UTF-16LE/BE BOM, CRLF, NUL-containing `.txt`, PNG renamed `.cs`, arbitrary extensionless text and invalid encodings.
 7. **Markdown injection/fencing:** source containing triple, quadruple and long backticks; Markdown-like headings; Unicode names; unusual spaces; file paths containing Markdown formatting characters.
@@ -535,9 +543,9 @@ This section defines the high-level milestone intent. Current milestone states, 
 
 ### M3.5 — Approved desktop UI and brand adoption
 
-**Deliver:** Implement the approved compact desktop composition and genuine vector logo in small, testable slices while reusing the M0–M3 workspace, selection, preview, estimate and export behaviours. Add the All / Selected / Ignored view projections, a minimal honest Settings destination, and a safe one-time migration from persisted exclude-extension settings to visible exclude-path rules. The detailed visual contract is [`CONTEXTPICK_UI_REDESIGN.md`](CONTEXTPICK_UI_REDESIGN.md); the single execution checklist and dependencies are [`docs/project/ROADMAP.md`](project/ROADMAP.md).
+**Deliver:** Implement the approved compact desktop composition and genuine vector logo in small, testable slices while reusing the M0–M3 workspace, selection, preview, estimate and export behaviours. Add the All / Selected / Ignored view projections, a minimal honest Settings destination, and a safe one-time migration from persisted exclude-extension settings. The detailed visual contract is [`CONTEXTPICK_UI_REDESIGN.md`](CONTEXTPICK_UI_REDESIGN.md); the single execution checklist and dependencies are [`docs/project/ROADMAP.md`](project/ROADMAP.md).
 
-**Gate:** Approved vector assets are used by the UI and app icon pipeline; all views and rules operate on the existing selection engine; saved user intent survives migration/restart; actual native screenshots match the supplied reference at large and compact supported sizes; UI and domain regression suites pass; independent review finds no duplicate selection/filter state or unnecessary UI framework. This closes revised FL-02 and triggers a final §10.3 P0 check; do not claim the MVP or proceed to M4 until that check passes. Tokenization, watchers and unrelated features remain outside this gate.
+**Gate:** Approved vector assets are used by the UI and app icon pipeline; all views and filters operate on the existing selection engine; saved user intent survives migration/restart; actual native screenshots match the supplied reference at large and compact supported sizes; UI and domain regression suites pass; independent review finds no duplicate selection/filter state or unnecessary UI framework. M3.5 closed the then-current FL-02 contract and triggered the original §10.3 P0 check; M5.5.2's newer filter interaction is a UX-06 follow-up and does not rewrite the historical M3.5 evidence. Tokenization, watchers and unrelated features remain outside this gate.
 
 ### M4 — Resilience and background freshness
 
@@ -549,7 +557,15 @@ This section defines the high-level milestone intent. Current milestone states, 
 
 **Deliver:** Profile UX, persistence migrations, secret warnings, complete fixture suite, platform-specific smoke tests, documentation, licensing/dependency audit, installer builds, release checklist, distributable artifacts where permitted.
 
-**Gate — architecture review #3 / release readiness:** Audit whole architecture, dependencies, test gaps, developer onboarding, binary size/memory/performance, failure UX and cross-platform correctness. Remove dead code/duplicate abstractions. Resolve all critical/high findings; explicitly record remaining limitations.
+### M5.5.2 — Filter and tree usability refinement
+
+**Deliver:** Move filter editing into the main pane; replace the free-form filter panel with an explicit `All text` / `Selected extensions` mode and a compact, categorized extension grid; remove custom path include/exclude controls and extension-exclusion rules; apply filter changes automatically after a short debounce; show safe per-folder discovered-file byte totals; improve tree indentation/guides; add an optional persistent fixed export folder with safe workspace-derived Markdown names and a clear target hint; refresh the README as a concise product page with accurate preview downloads. Preserve `.gitignore`, the Rust selection authority, explicit folder/file choices, source safety, token estimates and Save As when fixed-folder mode is off.
+
+**Migration:** A versioned settings migration must preserve a bounded recovery copy before changing storage. Preserve explicit file/folder intents and selected extensions; map an empty legacy extension list to `All text` and a nonempty list to `Selected extensions`. Legacy path patterns and migrated exclusion selectors have no equivalent in the new UI; remove them from active policy only after backup and show a one-time notice explaining the reset and recovery location. Migration is idempotent, restart-safe and never silently claims that an old pattern is still active.
+
+**Gate:** Each slice has focused failing behavior tests, independent review, relevant Rust/UI/browser/native regressions and actual screenshots at reference and minimum sizes. Folder-size work reuses metadata for safely discovered regular files (including non-text files), updates only affected ancestors on file changes, prioritizes selected folders, debounces/cancels stale requests and obeys scan bounds. It identifies logical size, not allocated disk use; pruned ignored or unscanned descendants remain partial/unknown. Fixed-folder output never escapes the chosen directory or overwrites silently. README links only to verified assets and describes third-party file limits as variable.
+
+**Gate — architecture review #3 / release readiness:** Audit whole architecture, dependencies, test gaps, developer onboarding, binary size/memory/performance, failure UX and cross-platform correctness. Remove dead code/duplicate abstractions. Resolve all critical/high findings; explicitly record remaining limitations. Distribution and macOS release tasks may remain backlogged if external requirements or authorization are unavailable; do not imply they passed.
 
 ### M6 — Optional expansion **only after feedback**
 
