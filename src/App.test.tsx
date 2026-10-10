@@ -1516,10 +1516,17 @@ describe('ContextPick workspace UI', () => {
     await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
     expect(screen.getByText('No extensions selected, so no files are eligible.')).toBeInTheDocument();
     await user.click(screen.getByRole('checkbox', { name: '.rs' }));
-    await waitFor(() => expect(submittedPolicies.at(-1)).toMatchObject({ includeMode: 'selectedExtensions', includeExtensions: ['.rs'] }));
+    const extensionPolicy = { gitignore: true, includeMode: 'selectedExtensions', includeExtensions: ['.rs'], includePaths: [], excludePaths: [] };
+    await waitFor(() => expect(submittedPolicies.at(-1)).toEqual(extensionPolicy));
     await user.click(screen.getByRole('button', { name: 'Reset filters' }));
-    await waitFor(() => expect(submittedPolicies.at(-1)).toEqual({ gitignore: true, includeMode: 'allText', includeExtensions: [], includePaths: [], excludePaths: [] }));
-    expect(submittedPolicies).toHaveLength(2);
+    const resetPolicy = { gitignore: true, includeMode: 'allText', includeExtensions: [], includePaths: [], excludePaths: [] };
+    await waitFor(() => expect(submittedPolicies.at(-1)).toEqual(resetPolicy));
+    const emptyExtensionPolicy = { ...resetPolicy, includeMode: 'selectedExtensions' as const };
+    expect(submittedPolicies).toEqual(
+      submittedPolicies.length === 3
+        ? [emptyExtensionPolicy, extensionPolicy, resetPolicy]
+        : [extensionPolicy, resetPolicy],
+    );
     expect(resetSelectionsCalls).toBe(0);
     expect(screen.getByRole('radio', { name: 'All text' })).toBeChecked();
     await user.click(screen.getByRole('button', { name: 'All' }));
