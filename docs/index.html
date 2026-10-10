@@ -69,7 +69,8 @@
       .topbar { border-bottom: 1px solid rgb(220 230 228 / 78%); background: rgb(255 255 255 / 78%); }
       .topbar-inner { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
       .brand { display: inline-flex; align-items: center; gap: 11px; text-decoration: none; color: var(--ink); font-weight: 750; letter-spacing: -0.04em; }
-      .brand img { width: 149px; height: 32px; object-fit: contain; object-position: left center; }
+      .brand-logo { position: relative; display: block; width: 149px; height: 30px; flex: 0 0 auto; overflow: hidden; }
+      .brand-logo img { position: absolute; top: -50px; left: -24px; width: 200px; max-width: none; height: auto; }
       nav { display: flex; align-items: center; gap: 25px; }
       nav a { color: var(--muted); font-size: 0.91rem; font-weight: 600; text-decoration: none; }
       nav .nav-download { color: #fff; background: var(--teal); padding: 10px 16px; border-radius: 4px; }
@@ -92,7 +93,7 @@
       .release-note { color: var(--soft); font-size: 0.86rem; }
       .hero-art { position: relative; }
       .hero-art::before { position: absolute; z-index: -1; inset: -26px -34px 24px 24px; border-radius: 9px; background: linear-gradient(135deg, #e0f4ed, #e9f0f2 68%, #f4f7f6); content: ""; }
-      .hero-art img { width: 100%; border: 1px solid #d4e0df; border-radius: 5px; background: white; box-shadow: var(--shadow); }
+      .hero-art img { width: 100%; height: auto; border: 1px solid #d4e0df; border-radius: 5px; background: white; box-shadow: var(--shadow); }
       .image-caption { margin: 11px 0 0; color: var(--soft); font-size: 0.82rem; text-align: right; }
 
       .trust-strip { border-block: 1px solid var(--line); background: #fff; }
@@ -123,10 +124,10 @@
       .feature p { margin-bottom: 0; color: var(--muted); font-size: 0.92rem; }
 
       .screens { padding-top: 28px !important; }
-      .screen-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-      figure { margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: white; box-shadow: 0 10px 30px rgb(19 48 57 / 5%); }
+      .screen-grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
+      figure { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(260px, 1fr); align-items: center; margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: white; box-shadow: 0 10px 30px rgb(19 48 57 / 5%); }
       figure img { width: 100%; height: auto; background: #fff; }
-      figcaption { padding: 15px 18px 17px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+      figcaption { padding: 20px 24px; border-left: 1px solid var(--line); color: var(--muted); font-size: 0.94rem; line-height: 1.6; }
       figcaption strong { display: block; margin-bottom: 3px; color: var(--ink); }
 
       .privacy { color: #eaf5f2; background: #173541; }
@@ -183,7 +184,8 @@
         .trust-items { grid-template-columns: 1fr; gap: 13px; padding: 19px 0; }
         section.content { padding: 64px 0; }
         .section-heading { margin-bottom: 27px; }
-        .steps, .feature-grid, .screen-grid, .privacy-grid { grid-template-columns: 1fr; }
+        .steps, .feature-grid, .screen-grid, .privacy-grid, figure { grid-template-columns: 1fr; }
+        figcaption { padding: 15px 18px 17px; border-top: 1px solid var(--line); border-left: 0; }
         .step { min-height: 0; }
         .download { padding: 54px 0; }
         .download-card { align-items: flex-start; flex-direction: column; padding: 27px 23px; }
@@ -199,7 +201,7 @@
     <header class="topbar" id="top">
       <div class="wrap topbar-inner">
         <a class="brand" href="#top" aria-label="ContextPick home">
-          <img src="site-assets/contextpick-brand.svg" alt="ContextPick" width="149" height="32" />
+          <span class="brand-logo"><img src="site-assets/contextpick-brand.svg" alt="ContextPick" width="200" height="133" /></span>
         </a>
         <nav aria-label="Main navigation">
           <a href="#how-it-works">How it works</a>
@@ -224,7 +226,7 @@
             <p class="release-note">Windows x64 · v0.9.0 · unsigned · Free and open source</p>
           </div>
           <div class="hero-art">
-            <img src="site-assets/contextpick-workspace.png" alt="ContextPick desktop app showing a searchable project tree, selected source file, read-only code preview, file sizes, and export estimates." width="1536" height="1024" fetchpriority="high" />
+            <img src="site-assets/contextpick-workspace.png" alt="ContextPick desktop app showing a searchable project tree, selected source file, read-only code preview, file sizes, and export estimates." width="3046" height="1978" fetchpriority="high" />
             <p class="image-caption">A real Windows app view. Your source stays on your device.</p>
           </div>
         </div>
@@ -295,12 +297,16 @@
           </div>
           <div class="screen-grid">
             <figure>
-              <img src="site-assets/contextpick-extension-filters.png" alt="ContextPick filter view with All text and Selected extensions modes and grouped extension checkboxes." width="1920" height="1280" loading="lazy" />
-              <figcaption><strong>Choose the kinds of text to include</strong>Use all eligible text files, or choose common extensions in a compact grouped picker.</figcaption>
+              <img src="site-assets/contextpick-tree-preview-detail.png" alt="Close-up of ContextPick's searchable project tree with an expanded source folder, selected file, size labels, and read-only code preview." width="2550" height="1050" loading="lazy" />
+              <figcaption><strong>Find a file, then review it locally</strong>Search and expand the project tree, see which files are included, and inspect a read-only preview before you export.</figcaption>
             </figure>
             <figure>
-              <img src="site-assets/contextpick-export-destination.png" alt="ContextPick Settings showing the saved export folder, Always export to this folder, and optional Always overwrite this file checkboxes." width="1920" height="1280" loading="lazy" />
-              <figcaption><strong>Make repeat exports straightforward</strong>Choose a default destination; opt in to replacing its generated file when that is your workflow.</figcaption>
+              <img src="site-assets/contextpick-extension-filters-detail.png" alt="Close-up of ContextPick's text filter settings, showing the Selected extensions option and grouped code, web, documentation, and build file types." width="2020" height="700" loading="lazy" />
+              <figcaption><strong>Choose the kinds of text to include</strong>Use all eligible text files, or narrow the selection with common extensions grouped by type. `.gitignore` remains respected.</figcaption>
+            </figure>
+            <figure>
+              <img src="site-assets/contextpick-export-destination-detail.png" alt="Close-up of ContextPick Settings showing the export destination controls and the option to always overwrite the generated file." width="1550" height="560" loading="lazy" />
+              <figcaption><strong>Make repeat exports straightforward</strong>Choose a default destination and, when it fits your workflow, opt in to overwriting the generated file on each export.</figcaption>
             </figure>
           </div>
         </div>

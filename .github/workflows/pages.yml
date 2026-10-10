@@ -33,7 +33,6 @@ jobs:
           mkdir -p site-dist/site-assets
           cp docs/index.html site-dist/index.html
           cp docs/site-assets/* site-dist/site-assets/
-          cp docs/design/contextpick-brand.svg site-dist/site-assets/contextpick-brand.svg
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site-dist
