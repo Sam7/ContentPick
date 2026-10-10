@@ -54,6 +54,7 @@ export type SelectionIntent = 'include' | 'exclude' | 'forceInclude' | 'forceExc
 
 export type FilterPolicy = {
   gitignore: boolean;
+  includeMode: 'allText' | 'selectedExtensions';
   includeExtensions: string[];
   includePaths: string[];
   excludePaths: string[];
@@ -155,7 +156,7 @@ const fixtureWorkspace: WorkspaceView = {
   nextOffset: null,
   selectedCount: 3,
   estimatedBytes: 6240,
-  policy: { gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] },
+  policy: { gitignore: true, includeMode: 'allText', includeExtensions: [], includePaths: [], excludePaths: [] },
   profileCatalog: { root: '/workspace/patchwork', generation: 1, names: ['Documentation', 'Rust'], activeProfile: 'Rust' },
   incomplete: true,
   diagnostics: [],

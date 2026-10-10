@@ -994,7 +994,8 @@ describe('ContextPick workspace UI', () => {
     expect(within(estimates).getByText('3', { selector: 'strong' })).toBeInTheDocument();
     expect(within(estimates).getByText('≈ 6.2 KB')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Filters' }));
-    await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.md');
+    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    await user.click(screen.getByRole('checkbox', { name: '.md' }));
     await waitFor(() => expect(within(estimates).getByText('1', { selector: 'strong' })).toBeInTheDocument());
     expect(within(estimates).getByText('≈ 923 B')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy context' })).toBeEnabled();
@@ -1294,7 +1295,8 @@ describe('ContextPick workspace UI', () => {
     render(<App bridge={bridge} />);
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
-    await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.rs');
+    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    await user.click(screen.getByRole('checkbox', { name: '.rs' }));
 
     await user.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     const collapsedFilters = screen.getByRole('button', { name: 'Filters' });
@@ -1305,13 +1307,14 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument();
     const editor = screen.getByRole('region', { name: 'Filter settings' });
     expect(editor).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('.rs');
+    expect(screen.getByRole('radio', { name: 'Selected extensions' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: '.rs' })).toBeChecked();
     expect(editor.closest('aside')).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
     expect(screen.getByRole('region', { name: 'Filter settings' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('.rs');
+    expect(screen.getByRole('checkbox', { name: '.rs' })).toBeChecked();
   });
 
   it('only enumerates an ignored folder after the explicit browse command', async () => {
@@ -1348,7 +1351,7 @@ describe('ContextPick workspace UI', () => {
     expect(selectedCount).toHaveTextContent('3');
   });
 
-  it('submits and restores the extensionless extension sentinel', async () => {
+  it('submits the extensionless choice in Selected extensions mode', async () => {
     const user = userEvent.setup();
     const base = createBrowserBridge();
     const submittedPolicies: FilterPolicy[] = [];
@@ -1364,13 +1367,10 @@ describe('ContextPick workspace UI', () => {
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
 
-    const includeExtensions = screen.getByRole('textbox', { name: 'Include extensions' });
-    await user.type(includeExtensions, '<none>');
-    expect(screen.getByText('Use <none> to include files with no extension.')).toBeInTheDocument();
-    await waitFor(() => expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['']));
-    expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['']);
-
-    expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('<none>');
+    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    await user.click(screen.getByRole('checkbox', { name: 'No extension' }));
+    await waitFor(() => expect(submittedPolicies.at(-1)).toMatchObject({ includeMode: 'selectedExtensions', includeExtensions: [''] }));
+    expect(screen.getByRole('checkbox', { name: 'No extension' })).toBeChecked();
   });
 
   it('shows filters in the main pane and applies edits automatically without resetting selection intent', async () => {
@@ -1400,19 +1400,21 @@ describe('ContextPick workspace UI', () => {
     expect(filterEditor.closest('.file-panel')).toHaveAttribute('aria-label', 'Filter editor');
     expect(screen.queryByRole('button', { name: 'Apply filters' })).not.toBeInTheDocument();
     expect(screen.queryByRole('tree', { name: 'Workspace files' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: /exclude extensions/i })).not.toBeInTheDocument();
-    await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.rs');
-    await waitFor(() => expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['.rs']));
+    expect(screen.queryByRole('textbox', { name: /extension/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    expect(screen.getByText('No extensions selected, so no files are eligible.')).toBeInTheDocument();
+    await user.click(screen.getByRole('checkbox', { name: '.rs' }));
+    await waitFor(() => expect(submittedPolicies.at(-1)).toMatchObject({ includeMode: 'selectedExtensions', includeExtensions: ['.rs'] }));
     await user.click(screen.getByRole('button', { name: 'Reset filters' }));
-    await waitFor(() => expect(submittedPolicies.at(-1)).toEqual({ gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] }));
+    await waitFor(() => expect(submittedPolicies.at(-1)).toEqual({ gitignore: true, includeMode: 'allText', includeExtensions: [], includePaths: [], excludePaths: [] }));
     expect(submittedPolicies).toHaveLength(2);
     expect(resetSelectionsCalls).toBe(0);
-    expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('');
+    expect(screen.getByRole('radio', { name: 'All text' })).toBeChecked();
     await user.click(screen.getByRole('button', { name: 'All' }));
     expect(screen.getByRole('checkbox', { name: 'Select README.md' })).toBeChecked();
   });
 
-  it('keeps a trailing separator while typing multiple extension filters', async () => {
+  it('supports selecting a compact set of common extension choices', async () => {
     const user = userEvent.setup();
     const base = createBrowserBridge();
     const submittedPolicies: FilterPolicy[] = [];
@@ -1428,10 +1430,12 @@ describe('ContextPick workspace UI', () => {
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
 
-    const includeExtensions = screen.getByRole('textbox', { name: 'Include extensions' });
-    await user.type(includeExtensions, 'rs, ts');
-    expect(includeExtensions).toHaveValue('rs, ts');
-    await waitFor(() => expect(submittedPolicies.at(-1)?.includeExtensions).toEqual(['rs', 'ts']));
+    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    await user.click(screen.getByRole('checkbox', { name: '.rs' }));
+    await user.click(screen.getByRole('checkbox', { name: '.ts' }));
+    await waitFor(() => expect(submittedPolicies.at(-1)).toMatchObject({ includeMode: 'selectedExtensions', includeExtensions: ['.rs', '.ts'] }));
+    expect(screen.getByRole('group', { name: 'Text inclusion' })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: /path/i })).not.toBeInTheDocument();
   });
 
   it('does not let a pending filter debounce supersede a folder change', async () => {
@@ -1455,7 +1459,8 @@ describe('ContextPick workspace UI', () => {
     render(<App bridge={bridge} fixtureMode />);
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
-    await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.rs');
+    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    await user.click(screen.getByRole('checkbox', { name: '.rs' }));
     await user.click(screen.getByRole('button', { name: 'Change folder' }));
 
     nextWorkspace.resolve({ ...initial, root: '/workspace/next' });
@@ -1476,7 +1481,8 @@ describe('ContextPick workspace UI', () => {
     render(<App bridge={bridge} fixtureMode />);
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
-    await user.type(screen.getByRole('textbox', { name: 'Include extensions' }), '.bad');
+    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    await user.click(screen.getByRole('checkbox', { name: '.rs' }));
 
     expect(await screen.findByText('Updating selection and estimates…')).toBeInTheDocument();
     await waitFor(() => expect(policyStarted).toBe(true));
@@ -1591,7 +1597,7 @@ describe('ContextPick workspace UI', () => {
     const initial = await base.choose_workspace();
     const oldWorkspace = { ...initial!, root: '/workspace/a', entries: [{ ...initial!.entries[1]!, path: 'a.ts' }], entryCount: 1, nextOffset: null };
     const pendingChoose = deferred<WorkspaceView | null>();
-    const policyB: FilterPolicy = { gitignore: false, includeExtensions: ['.b'], includePaths: ['b/**'], excludePaths: [] };
+    const policyB: FilterPolicy = { gitignore: false, includeMode: 'selectedExtensions', includeExtensions: ['.b'], includePaths: [], excludePaths: [] };
     const authoritative = {
       ...oldWorkspace,
       root: '/workspace/backend-b', generation: 3,
@@ -1630,7 +1636,8 @@ describe('ContextPick workspace UI', () => {
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     expect(await screen.findByText('/workspace/a')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Filters' }));
-    await user.type(screen.getByRole('textbox', { name: 'Include paths' }), 'a/**');
+    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    await user.click(screen.getByRole('checkbox', { name: '.rs' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
     const search = screen.getByRole('textbox', { name: 'Search files' });
     await user.type(search, 'a.ts');
@@ -1643,8 +1650,8 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByRole('textbox', { name: 'Search files' })).toHaveValue('');
     await user.click(screen.getByRole('button', { name: 'Filters' }));
     expect(screen.getByRole('checkbox', { name: 'Respect .gitignore' })).not.toBeChecked();
-    expect(screen.getByRole('textbox', { name: 'Include extensions' })).toHaveValue('.b');
-    expect(screen.getByRole('textbox', { name: 'Include paths' })).toHaveValue('b/**');
+    expect(screen.getByRole('checkbox', { name: '.b' })).toBeChecked();
+    expect(screen.queryByRole('textbox', { name: /path/i })).not.toBeInTheDocument();
 
     pendingChoose.resolve({ ...oldWorkspace, root: '/workspace/backend-b', generation: 2, entries: [{ ...oldWorkspace.entries[0]!, path: 'late-choose.ts' }] });
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Preview late-choose.ts' })).not.toBeInTheDocument());
@@ -1805,7 +1812,7 @@ describe('ContextPick workspace UI', () => {
     }));
     const largeWorkspace: WorkspaceView = {
       root: '/workspace/large', generation: 1, entries, entryCount: entries.length, nextOffset: null, selectedCount: 0, estimatedBytes: 0, incomplete: false, diagnostics: [],
-      policy: { gitignore: true, includeExtensions: [], includePaths: [], excludePaths: [] },
+      policy: { gitignore: true, includeMode: 'allText', includeExtensions: [], includePaths: [], excludePaths: [] },
       profileCatalog: { root: '/workspace/large', generation: 1, names: [], activeProfile: null },
     };
     const bridge = {
@@ -2088,8 +2095,8 @@ describe('ContextPick workspace UI', () => {
 
   it('hydrates saved policy on folder open and applies edits after a debounce', async () => {
     const user = userEvent.setup();
-    const savedPolicy: FilterPolicy = { gitignore: false, includeExtensions: ['.md'], includePaths: ['docs/**'], excludePaths: ['dist/**'] };
-    const nextPolicy: FilterPolicy = { gitignore: true, includeExtensions: ['.rs'], includePaths: ['core/**'], excludePaths: ['build/**'] };
+    const savedPolicy: FilterPolicy = { gitignore: false, includeMode: 'selectedExtensions', includeExtensions: ['.md'], includePaths: [], excludePaths: [] };
+    const nextPolicy: FilterPolicy = { gitignore: true, includeMode: 'selectedExtensions', includeExtensions: ['.rs'], includePaths: [], excludePaths: [] };
     const base = createBrowserBridge();
     const initial = { ...(await base.choose_workspace())!, policy: savedPolicy };
     let folderChoice = 0;
@@ -2110,26 +2117,20 @@ describe('ContextPick workspace UI', () => {
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
     await user.click(screen.getByRole('button', { name: 'Filters' }));
     expect(screen.getByRole('checkbox', { name: 'Respect .gitignore' })).not.toBeChecked();
-    const includeExtensions = screen.getByLabelText('Include extensions');
-    expect(includeExtensions).toHaveValue('.md');
-    expect(screen.queryByLabelText('Exclude extensions')).not.toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Selected extensions' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: '.md' })).toBeChecked();
+    expect(screen.queryByRole('textbox', { name: /path/i })).not.toBeInTheDocument();
 
-    await user.clear(includeExtensions);
-    await user.type(includeExtensions, '.tsx');
+    await user.click(screen.getByRole('checkbox', { name: '.md' }));
+    await user.click(screen.getByRole('checkbox', { name: '.tsx' }));
     expect(appliedPolicies).toHaveLength(0);
     await waitFor(() => expect(appliedPolicies.at(-1)?.includeExtensions).toEqual(['.tsx']));
-    expect(includeExtensions).toHaveValue('.tsx');
-    expect(screen.getByLabelText('Exclude paths')).toHaveValue('dist/**');
-
-    expect(appliedPolicies.at(-1)?.includePaths).toEqual(['docs/**']);
-    expect(screen.getByLabelText('Include paths')).toHaveValue('docs/**');
-    expect(screen.getByLabelText('Exclude paths')).toHaveValue('dist/**');
+    expect(screen.getByRole('checkbox', { name: '.tsx' })).toBeChecked();
 
     await user.click(screen.getByRole('button', { name: 'Change folder' }));
     expect(await screen.findByText('/workspace/next')).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Respect .gitignore' })).toBeChecked();
-    expect(screen.getByLabelText('Include extensions')).toHaveValue('.rs');
-    expect(screen.getByLabelText('Include paths')).toHaveValue('core/**');
-    expect(screen.getByLabelText('Exclude paths')).toHaveValue('build/**');
+    expect(screen.getByRole('checkbox', { name: '.rs' })).toBeChecked();
+    expect(screen.queryByRole('textbox', { name: /path/i })).not.toBeInTheDocument();
   });
 });

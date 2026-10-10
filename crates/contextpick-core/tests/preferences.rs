@@ -40,6 +40,66 @@ fn preferences_roundtrip_preserves_policy_and_intents() {
 }
 
 #[test]
+fn policy_mode_roundtrips_with_stable_serialized_values() {
+    use contextpick_core::workspace::IncludeMode;
+
+    let policy = FilterPolicy {
+        include_mode: IncludeMode::SelectedExtensions,
+        include_extensions: vec![".Rs".into()],
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&policy).unwrap();
+    assert_eq!(value["includeMode"], "selectedExtensions");
+    assert_eq!(
+        serde_json::from_value::<FilterPolicy>(value).unwrap(),
+        policy
+    );
+}
+
+#[test]
+fn v3_policy_reset_preserves_intents_and_allowlists_in_workspaces_and_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let original = r#"{"version":3,"recentRoot":"root","workspaces":{"root":{"policy":{"gitignore":false,"includeExtensions":[".Rs"],"includePaths":["src/**"],"excludePaths":["vendor/**"]},"intents":{"src":"forceInclude","secret.txt":"exclude"},"generatedOutputs":[],"profiles":{"Rust":{"policy":{"includeExtensions":[".TS"],"includePaths":["**/*.ts"],"excludePaths":["tmp/**"]},"intents":{"docs":"include"}}},"activeProfile":null}}}"#;
+    std::fs::write(&path, original).unwrap();
+
+    let recovered = Preferences::load_with_recovery(&path);
+
+    assert!(!recovered.saving_blocked);
+    let notice = recovered.notice.as_deref().unwrap();
+    assert!(notice.contains("custom filter settings"));
+    assert_eq!(recovered.preferences.version, 4);
+    let saved = &recovered.preferences.workspaces["root"];
+    assert_eq!(saved.policy.include_extensions, [".Rs"]);
+    assert_eq!(
+        saved.policy.include_mode,
+        contextpick_core::workspace::IncludeMode::SelectedExtensions
+    );
+    assert!(saved.policy.include_paths.is_empty());
+    assert!(saved.policy.exclude_paths.is_empty());
+    assert_eq!(saved.intents["src"], Intent::ForceInclude);
+    assert_eq!(saved.intents["secret.txt"], Intent::Exclude);
+    let profile = &saved.profiles["Rust"];
+    assert_eq!(profile.policy.include_extensions, [".TS"]);
+    assert_eq!(
+        profile.policy.include_mode,
+        contextpick_core::workspace::IncludeMode::SelectedExtensions
+    );
+    assert!(profile.policy.include_paths.is_empty());
+    assert!(profile.policy.exclude_paths.is_empty());
+    assert_eq!(profile.intents["docs"], Intent::Include);
+
+    let backup = std::fs::read_dir(dir.path().join("settings-recovery"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
+    assert!(Preferences::load_with_recovery(&path).notice.is_none());
+}
+
+#[test]
 fn v2_settings_migrate_once_and_preserve_every_workspace_field() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
@@ -48,16 +108,26 @@ fn v2_settings_migrate_once_and_preserve_every_workspace_field() {
 
     let migrated = Preferences::load_with_recovery(&path);
 
-    assert!(migrated.notice.is_none());
+    assert!(
+        migrated
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("custom filter settings")
+    );
     assert!(!migrated.saving_blocked);
-    assert_eq!(migrated.preferences.version, 3);
+    assert_eq!(migrated.preferences.version, 4);
     assert_eq!(migrated.preferences.recent_root.as_deref(), Some("root-a"));
     assert_eq!(migrated.preferences.workspaces.len(), 2);
     let first = &migrated.preferences.workspaces["root-a"];
     assert!(!first.policy.gitignore);
+    assert_eq!(
+        first.policy.include_mode,
+        contextpick_core::workspace::IncludeMode::SelectedExtensions
+    );
     assert_eq!(first.policy.include_extensions, [".rs"]);
-    assert_eq!(first.policy.include_paths, ["src/**"]);
-    assert_eq!(first.policy.exclude_paths, ["target/**"]);
+    assert!(first.policy.include_paths.is_empty());
+    assert!(first.policy.exclude_paths.is_empty());
     assert_eq!(first.intents["src"], Intent::ForceInclude);
     assert_eq!(first.intents["README.md"], Intent::Exclude);
     assert_eq!(
@@ -82,7 +152,7 @@ fn v2_settings_migrate_once_and_preserve_every_workspace_field() {
     );
 
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["version"], 3);
+    assert_eq!(saved["version"], 4);
     assert_eq!(
         saved["workspaces"]["root-a"]["generatedOutputs"][0],
         "out/context.md"
@@ -100,7 +170,7 @@ fn v2_settings_migrate_once_and_preserve_every_workspace_field() {
 
     let loaded_again = Preferences::load_with_recovery(&path);
     assert!(loaded_again.notice.is_none());
-    assert_eq!(loaded_again.preferences.version, 3);
+    assert_eq!(loaded_again.preferences.version, 4);
     assert_eq!(
         std::fs::read_dir(dir.path().join("settings-recovery"))
             .unwrap()
@@ -207,6 +277,7 @@ fn workspace_profiles_roundtrip_named_policy_and_intent_snapshots() {
     let first = prefs.workspaces.entry("root-a".into()).or_default();
     first.policy = FilterPolicy {
         gitignore: false,
+        include_mode: contextpick_core::workspace::IncludeMode::SelectedExtensions,
         include_extensions: vec![".rs".into()],
         include_paths: vec!["src/**".into()],
         exclude_paths: vec!["target/**".into()],
@@ -327,6 +398,7 @@ fn activating_profile_changes_only_policy_and_intents_and_restores_active_name()
     let mut workspace = SavedWorkspace {
         policy: FilterPolicy {
             gitignore: false,
+            include_mode: contextpick_core::workspace::IncludeMode::SelectedExtensions,
             include_extensions: vec![".rs".into()],
             include_paths: vec!["src/**".into()],
             ..Default::default()
@@ -460,16 +532,22 @@ fn saved_workspace_without_generated_outputs_loads_as_empty_registry() {
 }
 
 #[test]
-fn v1_excluded_extensions_migrate_to_file_targeted_path_rules_transactionally() {
+fn v1_custom_policy_is_reset_transactionally_while_allowlists_and_intents_survive() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let original = r#"{"version":1,"recentRoot":"legacy-root","workspaces":{"legacy-root":{"policy":{"gitignore":false,"includeExtensions":[".md"],"excludeExtensions":[".rS","rs","*?[",""],"includePaths":["src/**"],"excludePaths":["vendor/**","file-ext:literal","glob:foo"]},"intents":{"README.md":"include","src/generated":"exclude"},"generatedOutputs":["release/context.md"]}}}"#;
     std::fs::write(&path, original).unwrap();
 
     let recovered = Preferences::load_with_recovery(&path);
-    assert!(recovered.notice.is_none());
+    assert!(
+        recovered
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("custom filter settings")
+    );
     assert!(!recovered.saving_blocked);
-    assert_eq!(recovered.preferences.version, 3);
+    assert_eq!(recovered.preferences.version, 4);
     assert_eq!(
         recovered.preferences.recent_root.as_deref(),
         Some("legacy-root")
@@ -478,19 +556,13 @@ fn v1_excluded_extensions_migrate_to_file_targeted_path_rules_transactionally() 
     assert!(saved.profiles.is_empty());
     assert!(saved.active_profile.is_none());
     assert!(!saved.policy.gitignore);
-    assert_eq!(saved.policy.include_extensions, [".md"]);
-    assert_eq!(saved.policy.include_paths, ["src/**"]);
     assert_eq!(
-        saved.policy.exclude_paths,
-        [
-            "file-ext:rs",
-            "file-ext:%2A%3F%5B",
-            "file-ext:<none>",
-            "vendor/**",
-            "glob:file-ext:literal",
-            "glob:glob:foo"
-        ]
+        saved.policy.include_mode,
+        contextpick_core::workspace::IncludeMode::SelectedExtensions
     );
+    assert_eq!(saved.policy.include_extensions, [".md"]);
+    assert!(saved.policy.include_paths.is_empty());
+    assert!(saved.policy.exclude_paths.is_empty());
     assert_eq!(saved.intents["README.md"], Intent::Include);
     assert_eq!(saved.intents["src/generated"], Intent::Exclude);
     assert_eq!(
@@ -500,8 +572,11 @@ fn v1_excluded_extensions_migrate_to_file_targeted_path_rules_transactionally() 
 
     let persisted = std::fs::read_to_string(&path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&persisted).unwrap();
-    assert_eq!(json["version"], 3);
-    assert!(json["workspaces"]["legacy-root"]["policy"]["excludeExtensions"].is_null());
+    assert_eq!(json["version"], 4);
+    assert_eq!(
+        json["workspaces"]["legacy-root"]["policy"]["includeMode"],
+        "selectedExtensions"
+    );
     assert_eq!(
         Preferences::load(&path).unwrap().workspaces["legacy-root"]
             .policy
@@ -525,32 +600,55 @@ fn v1_excluded_extensions_migrate_to_file_targeted_path_rules_transactionally() 
 fn v1_settings_without_or_with_one_exclusion_migrate() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
-    for (settings, expected) in [
-        (
-            r#"{"version":1,"recentRoot":"root","workspaces":{"root":{"policy":{}}}}"#,
-            Vec::<String>::new(),
-        ),
-        (
-            r#"{"version":1,"recentRoot":"root","workspaces":{"root":{"policy":{"excludeExtensions":[".lock"]}}}}"#,
-            vec!["file-ext:lock".to_string()],
-        ),
+    for settings in [
+        r#"{"version":1,"recentRoot":"root","workspaces":{"root":{"policy":{}}}}"#,
+        r#"{"version":1,"recentRoot":"root","workspaces":{"root":{"policy":{"excludeExtensions":[".lock"]}}}}"#,
     ] {
         std::fs::write(&path, settings).unwrap();
         let recovered = Preferences::load_with_recovery(&path);
-        assert!(recovered.notice.is_none());
         assert!(!recovered.saving_blocked);
         assert_eq!(
             recovered.preferences.workspaces["root"]
                 .policy
                 .exclude_paths,
-            expected
+            Vec::<String>::new()
         );
-        assert_eq!(Preferences::load(&path).unwrap().version, 3);
+        let expected_mode = if settings.contains("includeExtensions") {
+            contextpick_core::workspace::IncludeMode::SelectedExtensions
+        } else {
+            contextpick_core::workspace::IncludeMode::AllText
+        };
+        assert_eq!(
+            recovered.preferences.workspaces["root"].policy.include_mode,
+            expected_mode
+        );
+        assert_eq!(
+            recovered.notice.is_some(),
+            settings.contains("excludeExtensions")
+        );
+        assert_eq!(Preferences::load(&path).unwrap().version, 4);
     }
 }
 
 #[test]
-fn failed_legacy_policy_validation_preserves_original_and_blocks_saving() {
+fn v2_settings_without_removed_filter_rules_do_not_show_reset_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"version":2,"recentRoot":"root","workspaces":{"root":{"policy":{"gitignore":true,"includeExtensions":[]},"intents":{},"generatedOutputs":[]}}}"#,
+    )
+    .unwrap();
+
+    let recovered = Preferences::load_with_recovery(&path);
+
+    assert!(!recovered.saving_blocked);
+    assert!(recovered.notice.is_none());
+    assert_eq!(recovered.preferences.version, 4);
+}
+
+#[test]
+fn invalid_legacy_exclusion_is_removed_and_allowlist_policy_migrates() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
     let original = format!(
@@ -561,12 +659,15 @@ fn failed_legacy_policy_validation_preserves_original_and_blocks_saving() {
 
     let recovered = Preferences::load_with_recovery(&path);
 
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-    assert_eq!(recovered.preferences.version, 3);
-    assert!(recovered.saving_blocked);
-    let notice = recovered.notice.unwrap().to_ascii_lowercase();
-    assert!(notice.contains("migration"));
-    assert!(notice.contains("preserved"));
+    assert!(!recovered.saving_blocked);
+    assert_eq!(recovered.preferences.version, 4);
+    assert!(
+        recovered.preferences.workspaces["root"]
+            .policy
+            .exclude_paths
+            .is_empty()
+    );
+    assert!(recovered.notice.unwrap().contains("custom filter settings"));
     assert_eq!(
         std::fs::read_dir(dir.path().join("settings-recovery"))
             .unwrap()
@@ -740,7 +841,7 @@ fn recovery_backs_up_corrupt_and_future_settings_before_starting_with_defaults()
     for text in invalid_settings {
         std::fs::write(&path, text).unwrap();
         let recovered = Preferences::load_with_recovery(&path);
-        assert_eq!(recovered.preferences.version, 3);
+        assert_eq!(recovered.preferences.version, 4);
         assert!(recovered.preferences.recent_root.is_none());
         assert!(recovered.preferences.workspaces.is_empty());
         assert!(!recovered.saving_blocked);
@@ -774,7 +875,7 @@ fn backup_failure_returns_defaults_with_actionable_notice_and_blocks_saving() {
 
     let recovered = Preferences::load_with_recovery(&path);
 
-    assert_eq!(recovered.preferences.version, 3);
+    assert_eq!(recovered.preferences.version, 4);
     assert!(recovered.preferences.recent_root.is_none());
     assert!(recovered.preferences.workspaces.is_empty());
     assert!(recovered.saving_blocked);
@@ -790,7 +891,7 @@ fn missing_settings_use_defaults_and_oversized_settings_fail() {
     let path = dir.path().join("settings.json");
     assert!(Preferences::load(&path).unwrap().recent_root.is_none());
     let recovery = Preferences::load_with_recovery(&path);
-    assert_eq!(recovery.preferences.version, 3);
+    assert_eq!(recovery.preferences.version, 4);
     assert!(recovery.preferences.recent_root.is_none());
     assert!(recovery.preferences.workspaces.is_empty());
     assert!(recovery.notice.is_none());

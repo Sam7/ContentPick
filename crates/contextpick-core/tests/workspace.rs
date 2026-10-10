@@ -1,7 +1,7 @@
 use contextpick_core::selection::Intent;
 use contextpick_core::{
     WorkspaceRoot,
-    workspace::{FilterPolicy, Workspace},
+    workspace::{FilterPolicy, IncludeMode, Workspace},
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
@@ -33,6 +33,43 @@ fn prunes_ignored_subtree_but_keeps_explainable_placeholder() {
     assert!(!view.entries.iter().any(|e| e.path.contains("generated")));
     assert_eq!(workspace.enumerated_entries, 3);
     assert!(view.incomplete);
+}
+
+#[test]
+fn selected_extensions_mode_with_empty_allowlist_selects_no_files() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("note.txt"), "text").unwrap();
+    std::fs::write(temp.path().join("README"), "extensionless").unwrap();
+    std::fs::create_dir(temp.path().join("folder")).unwrap();
+    std::fs::write(temp.path().join("folder/child.rs"), "rust").unwrap();
+
+    let workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy {
+            include_mode: IncludeMode::SelectedExtensions,
+            include_extensions: Vec::new(),
+            ..Default::default()
+        },
+        BTreeMap::new(),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let view = workspace.view(1);
+
+    assert!(
+        !view
+            .entries
+            .iter()
+            .any(|entry| entry.path == "note.txt" && entry.selected)
+    );
+    assert!(
+        !view
+            .entries
+            .iter()
+            .any(|entry| entry.path == "README" && entry.selected)
+    );
+    assert!(view.entries.iter().any(|entry| entry.path == "folder"));
 }
 
 #[test]

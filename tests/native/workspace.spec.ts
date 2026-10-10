@@ -660,15 +660,26 @@ test('native watcher failure reports unavailable and manual refresh recovers', a
   await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
 });
 
-test('native startup migrates version-1 extension exclusions into visible path rules', async ({ native }) => {
+test('native startup safely resets legacy filters and reports the verified settings backup', async ({ native }) => {
   await native.installLegacySettings();
   const page = await native.launch();
 
-  await expect(page.locator('.metric-primary strong')).toHaveText('1');
+  await expect(page.locator('.metric-primary strong')).toHaveText('601');
   await expect(page.getByRole('checkbox', { name: 'Select README.md' })).not.toBeChecked();
+  await expect(page.getByText(/Legacy custom filter settings were reset/)).toBeVisible();
   await page.getByRole('button', { name: 'Filters' }).click();
-  await expect(page.getByRole('textbox', { name: 'Exclude paths' })).toHaveValue('file-ext:ts');
-  await expect(page.getByRole('textbox', { name: /exclude extensions/i })).toHaveCount(0);
+  await expect(page.getByRole('radio', { name: 'All text' })).toBeChecked();
+  await expect(page.getByRole('textbox', { name: /path/i })).toHaveCount(0);
+  await page.getByRole('radio', { name: 'Selected extensions' }).check();
+  await expect(page.getByText('No extensions selected, so no files are eligible.')).toBeVisible();
+  const typescript = page.getByRole('checkbox', { name: '.ts', exact: true });
+  await typescript.check();
+  await expect(page.locator('.metric-primary strong')).not.toHaveText('0');
+  await typescript.uncheck();
+  await expect(page.locator('.metric-primary strong')).toHaveText('0');
+  await page.getByRole('button', { name: 'Reset filters' }).click();
+  await expect(page.getByRole('radio', { name: 'All text' })).toBeChecked();
+  await expect(page.locator('.metric-primary strong')).toHaveText('601');
   await page.setViewportSize({ width: 1536, height: 1024 });
   const filters = page.getByRole('region', { name: 'Filter settings' });
   await expect(filters).toBeVisible();
@@ -686,10 +697,12 @@ test('native startup migrates version-1 extension exclusions into visible path r
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-720x520-scrolled.png') });
 
   const settings = await native.readSettings();
-  expect(settings.version).toBe(3);
+  expect(settings.version).toBe(4);
   const workspaces = settings.workspaces as Record<string, { policy: Record<string, unknown>; intents: Record<string, string> }>;
   const migrated = workspaces[native.root];
-  expect(migrated.policy.excludePaths).toEqual(['file-ext:ts']);
+  expect(migrated.policy.includeMode).toBe('allText');
+  expect(migrated.policy.includePaths).toEqual([]);
+  expect(migrated.policy.excludePaths).toEqual([]);
   expect(migrated.policy).not.toHaveProperty('excludeExtensions');
   expect(migrated.intents).toEqual({ 'README.md': 'exclude' });
 });
@@ -803,6 +816,8 @@ test('native workspace layout adapts when the app window is resized', async ({ n
         actions: rect('.export-actions'),
         estimateValueLines,
         distNameClipped: distName.scrollWidth > distName.clientWidth,
+        distNameWidth: distName.clientWidth,
+        distNameScrollWidth: distName.scrollWidth,
         gitignoreNameClipped: gitignoreName.scrollWidth > gitignoreName.clientWidth,
         browseButton: rect('.browse-ignored'),
         browseIcon: rect('.browse-ignored .ui-icon'),
@@ -826,8 +841,8 @@ test('native workspace layout adapts when the app window is resized', async ({ n
     expect(layout.metrics.left).toBeGreaterThanOrEqual(layout.footer.left);
     expect(layout.actions.right).toBeLessThanOrEqual(layout.footer.right);
     expect(layout.estimateValueLines).toBeLessThanOrEqual(1.1);
-    expect(layout.distNameClipped).toBe(false);
-    if (width <= 760) expect(layout.gitignoreNameClipped).toBe(false);
+    expect(layout.distNameClipped, `${width}px: dist folder name should remain readable (${layout.distNameScrollWidth}px content in ${layout.distNameWidth}px)`).toBe(false);
+    if (width <= 760) expect(layout.gitignoreNameClipped, `${width}px: .gitignore name should remain readable`).toBe(false);
     expect(layout.browseButton.height).toBeLessThanOrEqual(34);
     expect(Math.abs((layout.browseIcon.top + layout.browseIcon.bottom) / 2 - (layout.browseButton.top + layout.browseButton.bottom) / 2)).toBeLessThanOrEqual(1);
     expect(layout.browseAccessibleName).toBe('Browse ignored files');

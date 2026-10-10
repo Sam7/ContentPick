@@ -55,10 +55,19 @@ impl Default for ScanLimits {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IncludeMode {
+    #[default]
+    AllText,
+    SelectedExtensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct FilterPolicy {
     pub gitignore: bool,
+    pub include_mode: IncludeMode,
     pub include_extensions: Vec<String>,
     pub include_paths: Vec<String>,
     pub exclude_paths: Vec<String>,
@@ -67,6 +76,7 @@ impl Default for FilterPolicy {
     fn default() -> Self {
         Self {
             gitignore: true,
+            include_mode: IncludeMode::AllText,
             include_extensions: vec![],
             include_paths: vec![],
             exclude_paths: vec![],
@@ -83,6 +93,7 @@ impl FilterPolicy {
 pub(crate) const FILE_EXTENSION_RULE_PREFIX: &str = "file-ext:";
 pub(crate) const LITERAL_GLOB_RULE_PREFIX: &str = "glob:";
 
+#[cfg(test)]
 pub(crate) fn migrated_extension_path_rule(legacy_extension: &str) -> String {
     let extension = legacy_extension
         .trim_start_matches('.')
@@ -188,12 +199,14 @@ impl CompiledPolicy {
             return Some("custom include: no matching path".into());
         }
         let extension = extension(path);
-        let include_matches = policy.include_extensions.iter().any(|rule| {
-            rule.trim_start_matches('.')
-                .eq_ignore_ascii_case(&extension)
-        });
-        if !policy.include_extensions.is_empty() && !include_matches {
-            return Some(format!("extension not allowed: {extension}"));
+        if policy.include_mode == IncludeMode::SelectedExtensions {
+            let include_matches = policy.include_extensions.iter().any(|rule| {
+                rule.trim_start_matches('.')
+                    .eq_ignore_ascii_case(&extension)
+            });
+            if !include_matches {
+                return Some(format!("extension not allowed: {extension}"));
+            }
         }
         None
     }

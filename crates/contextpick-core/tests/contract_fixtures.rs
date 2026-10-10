@@ -318,6 +318,7 @@ fn hidden_extensionless_and_env_text_files_follow_extension_filters_case_insensi
     let filtered = scan(
         temp.path(),
         FilterPolicy {
+            include_mode: contextpick_core::workspace::IncludeMode::SelectedExtensions,
             include_extensions: vec![".rS".into()],
             ..FilterPolicy::default()
         },

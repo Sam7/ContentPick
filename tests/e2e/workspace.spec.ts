@@ -237,43 +237,48 @@ test('sidebar projections, local Settings, and collapsed navigation preserve wor
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1536);
 });
 
-test('filter controls remain in the sidebar and keep readable contrast at supported desktop widths', async ({ page }) => {
+test('filter controls stay in the main pane and keep readable contrast at supported desktop widths', async ({ page }) => {
   for (const viewport of [{ width: 1536, height: 1024 }, { width: 720, height: 520 }]) {
     await page.setViewportSize(viewport);
     await page.goto('/');
     await page.getByRole('button', { name: 'Open folder' }).click();
     await page.getByRole('button', { name: 'Filters', exact: true }).click();
 
-    const form = page.getByRole('form', { name: 'Filter settings' });
+    const form = page.getByRole('region', { name: 'Filter settings' });
     await expect(form).toBeVisible();
-    expect(await form.evaluate((element) => element.closest('aside') !== null)).toBe(true);
-    await expect(page.getByRole('tree', { name: 'Workspace files' })).toBeVisible();
+    expect(await form.evaluate((element) => element.closest('aside') !== null)).toBe(false);
+    await expect(page.getByRole('tree', { name: 'Workspace files' })).toHaveCount(0);
     await expect(page.locator('.export-bar')).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
 
     const text = await form.evaluate((element) => {
-      const background = getComputedStyle(element).backgroundColor;
-      const content = Array.from(element.querySelectorAll('.filter-grid label, .filter-hints small')).map((node) => ({
+      const backgroundFor = (node: Element) => {
+        let current: Element | null = node;
+        while (current) {
+          const background = getComputedStyle(current).backgroundColor;
+          const channels = background.match(/[\d.]+/g);
+          if (channels && (channels.length < 4 || Number(channels[3]) > 0)) return background;
+          current = current.parentElement;
+        }
+        return getComputedStyle(document.body).backgroundColor;
+      };
+      const content = Array.from(element.querySelectorAll('.filter-toggle, .inclusion-mode label, .extension-option, .filter-hint')).map((node) => ({
+        label: node.textContent?.trim() ?? node.className,
         color: getComputedStyle(node).color,
-        background,
+        background: backgroundFor(node),
         size: Number.parseFloat(getComputedStyle(node).fontSize),
       }));
-      const placeholders = Array.from(element.querySelectorAll('.filter-grid input')).map((input) => ({
-        color: getComputedStyle(input, '::placeholder').color,
-        background: getComputedStyle(input).backgroundColor,
-        size: Number.parseFloat(getComputedStyle(input, '::placeholder').fontSize),
-      }));
-      return [...content, ...placeholders];
+      return content;
     });
     expect(text.length).toBeGreaterThan(0);
     for (const item of text) {
-      expect(contrastRatio(item.color, item.background)).toBeGreaterThanOrEqual(4.5);
-      expect(item.size).toBeGreaterThanOrEqual(9);
+      expect(contrastRatio(item.color, item.background), `${item.label}: ${item.color} on ${item.background}`).toBeGreaterThanOrEqual(4.5);
+      expect(item.size, item.label).toBeGreaterThanOrEqual(9);
     }
     if (viewport.width === 720) {
-      const apply = form.getByRole('button', { name: 'Apply filters' });
-      await apply.scrollIntoViewIfNeeded();
-      await expect(apply).toBeInViewport();
+      const reset = form.getByRole('button', { name: 'Reset filters' });
+      await reset.scrollIntoViewIfNeeded();
+      await expect(reset).toBeInViewport();
     }
 
     await page.getByRole('button', { name: 'Filters', exact: true }).click();

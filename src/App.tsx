@@ -4,7 +4,7 @@ import type { ContextPickBridge, Entry, ExportResult, FilterPolicy, Preview, Pro
 import { ProjectTree } from './ProjectTree';
 import { WorkspaceToolbar } from './WorkspaceToolbar';
 import { WorkspaceSidebar } from './WorkspaceSidebar';
-import { WorkspaceFilters, type FilterDrafts } from './WorkspaceFilters';
+import { WorkspaceFilters } from './WorkspaceFilters';
 import { formatBytes } from './format';
 import { UiIcon } from './UiIcon';
 import { projectEntries, type WorkspaceFileView } from './workspaceViews';
@@ -29,6 +29,7 @@ type SensitivePrompt = {
 };
 const DEFAULT_FILTER_POLICY: FilterPolicy = {
   gitignore: true,
+  includeMode: 'allText',
   includeExtensions: [],
   includePaths: [],
   excludePaths: [],
@@ -37,18 +38,6 @@ const DEFAULT_FILTER_POLICY: FilterPolicy = {
 function parentDirectories(path: string): string[] {
   const parts = path.split('/');
   return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/'));
-}
-
-function displayExtensions(extensions: string[]): string {
-  return extensions.map((extension) => extension === '' ? '<none>' : extension).join(', ');
-}
-
-function draftsFromPolicy(policy: FilterPolicy): FilterDrafts {
-  return {
-    includeExtensions: displayExtensions(policy.includeExtensions),
-    includePaths: policy.includePaths.join(', '),
-    excludePaths: policy.excludePaths.join(', '),
-  };
 }
 
 function errorMessage(cause: unknown, fallback: string): string {
@@ -121,7 +110,6 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const [newProfileName, setNewProfileName] = useState('');
   const [renameProfileName, setRenameProfileName] = useState('');
   const [policy, setPolicy] = useState<FilterPolicy>(DEFAULT_FILTER_POLICY);
-  const [policyDrafts, setPolicyDrafts] = useState(() => draftsFromPolicy(policy));
   const [policyUpdateState, setPolicyUpdateState] = useState<'idle' | 'pending' | 'failed'>('idle');
   const policyDirty = useRef(false);
   const policyDebounceTimer = useRef<number | null>(null);
@@ -559,7 +547,6 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       validateInitialWorkspace(restored);
       setWorkspace((current) => current && current.root === restored.root && current.generation > restored.generation ? current : restored);
       setPolicy(restored.policy);
-      setPolicyDrafts(draftsFromPolicy(restored.policy));
       setSelectedProfileName(restored.profileCatalog.activeProfile ?? restored.profileCatalog.names[0] ?? '');
       setRenameProfileName(restored.profileCatalog.activeProfile ?? '');
       policyDirty.current = false;
@@ -603,7 +590,6 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     const snapshotChanged = rootChanged || !workspace || workspace.generation !== result.generation;
     if (hydratePolicy || rootChanged) {
       setPolicy(result.policy);
-      setPolicyDrafts(draftsFromPolicy(result.policy));
       policyDirty.current = false;
       setHasUnappliedPolicy(false);
       setPolicyUpdateState('idle');
@@ -799,7 +785,6 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
 
   function resetFilters() {
     if (!workspace || workspaceStale || cancelling) return;
-    setPolicyDrafts(draftsFromPolicy(DEFAULT_FILTER_POLICY));
     queuePolicyUpdate({ ...DEFAULT_FILTER_POLICY });
   }
 
@@ -918,14 +903,22 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     }
   }
 
-  function updateTextPolicy(field: 'includeExtensions' | 'includePaths' | 'excludePaths', draft: string) {
-    setPolicyDrafts((current) => ({ ...current, [field]: draft }));
-    const values = draft
-      .split(',')
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .map((value) => field === 'includeExtensions' && value.toLocaleLowerCase() === '<none>' ? '' : value);
-    queuePolicyUpdate({ ...policy, [field]: values });
+  function updateExtensionMode(includeMode: FilterPolicy['includeMode']) {
+    queuePolicyUpdate({ ...policy, includeMode, includePaths: [], excludePaths: [] });
+  }
+
+  function toggleExtension(extension: string, included: boolean) {
+    const normalize = (value: string) => value.trim() ? `.${value.trim().replace(/^\.+/, '').toLocaleLowerCase()}` : '';
+    const extensions = new Set(policy.includeExtensions.map(normalize));
+    if (included) extensions.add(extension);
+    else extensions.delete(extension);
+    queuePolicyUpdate({
+      ...policy,
+      includeMode: 'selectedExtensions',
+      includeExtensions: [...extensions].sort((left, right) => left.localeCompare(right)),
+      includePaths: [],
+      excludePaths: [],
+    });
   }
 
   function toggleExpanded(entry: Entry) {
@@ -1027,7 +1020,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
 
       {fixtureMode && <div className="fixture-banner" role="note"><span>Browser fixture mode</span><span>Sample responses · no files are read</span></div>}
 
-        <section className={`workbench${workspace ? ' has-workspace' : ''}${workspace && !sidebarCollapsed ? ' has-sidebar' : ''}${workspace && sidebarCollapsed ? ' sidebar-collapsed' : ''}${previewCollapsed ? ' preview-collapsed' : ''}`} data-workspace-generation={workspace?.generation} style={workspace ? { '--preview-width': `${previewWidth}%` } as CSSProperties : undefined} aria-label="Project files and preview">
+        <section className={`workbench${workspace ? ' has-workspace' : ''}${workspace && !sidebarCollapsed ? ' has-sidebar' : ''}${workspace && sidebarCollapsed ? ' sidebar-collapsed' : ''}${previewCollapsed ? ' preview-collapsed' : ''}${policyOpen ? ' is-filtering' : ''}`} data-workspace-generation={workspace?.generation} style={workspace ? { '--preview-width': `${previewWidth}%` } as CSSProperties : undefined} aria-label="Project files and preview">
         {workspace && <WorkspaceSidebar
           collapsed={sidebarCollapsed}
           view={fileView}
@@ -1056,11 +1049,13 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
           <div className="panel-heading"><div><h2>{policyOpen ? 'Filters' : settingsOpen ? 'Settings' : fileView === 'selected' ? 'Selected files' : fileView === 'ignored' ? 'Git-ignored files' : 'Project files'}</h2><p>{workspace ? indexLoading ? `${workspace.entries.length} of ${workspace.entryCount} items loaded` : `${workspace.entryCount} items discovered` : 'Open a folder to get started'}</p></div><div className="scan-statuses">{workspace && !settingsOpen && !policyOpen && <><span className="refresh-badge" title={busy === 'refresh' ? 'Revalidating workspace files.' : watchStatusUnavailable || watchListenerUnavailable ? 'Watcher status or notifications could not be verified. Refresh before continuing.' : watchHealth?.root === workspace.root ? watchHealth.message ?? (watchHealth.state === 'watching' ? 'Watching workspace files.' : watchHealth.state === 'stale' ? 'Files changed. Refresh to update the workspace.' : 'Watcher unavailable. Refresh manually to update the workspace.') : 'Automatic file watching is unavailable in this browser fixture. Refresh after changing files.'}>{busy === 'refresh' ? 'Updating' : watchStatusUnavailable || watchListenerUnavailable ? 'Status unavailable' : watchHealth?.root === workspace.root ? watchHealth.state === 'watching' ? 'Watching' : watchHealth.state === 'stale' ? 'Files changed' : 'Watcher unavailable' : 'Manual refresh'}</span></>}{workspace?.incomplete && <span className="scan-badge"><span className="scan-dot" /> Partial scan</span>}</div></div>
           {workspace ? policyOpen ? <WorkspaceFilters
           gitignore={policy.gitignore}
-          drafts={policyDrafts}
+          includeMode={policy.includeMode}
+          includeExtensions={policy.includeExtensions}
           disabled={!workspace || workspaceStale || busy !== null || cancelling}
           updateState={policyUpdateState}
           onGitignoreChange={(enabled) => queuePolicyUpdate({ ...policy, gitignore: enabled })}
-          onTextChange={updateTextPolicy}
+          onModeChange={updateExtensionMode}
+          onExtensionChange={toggleExtension}
           onReset={resetFilters}
           /> : settingsOpen ? <section className="settings-content" aria-label="Settings">
             <div className="settings-icon"><UiIcon icon={IconSettings} /></div>

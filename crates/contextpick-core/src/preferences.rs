@@ -1,10 +1,7 @@
 use crate::{
     Error, Result,
     selection::Intent,
-    workspace::{
-        FILE_EXTENSION_RULE_PREFIX, FilterPolicy, LITERAL_GLOB_RULE_PREFIX,
-        migrated_extension_path_rule,
-    },
+    workspace::{FilterPolicy, IncludeMode},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -174,6 +171,26 @@ struct LegacyPreferencesV2 {
     workspaces: BTreeMap<String, LegacySavedWorkspaceV2>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyPreferencesV3 {
+    version: u32,
+    #[serde(default)]
+    recent_root: Option<String>,
+    #[serde(default)]
+    workspaces: BTreeMap<String, SavedWorkspace>,
+}
+
+impl LegacyPreferencesV3 {
+    fn into_preferences(self) -> Preferences {
+        Preferences {
+            version: self.version,
+            recent_root: self.recent_root,
+            workspaces: self.workspaces,
+        }
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 struct LegacySavedWorkspaceV2 {
@@ -217,6 +234,7 @@ enum ParsedPreferences {
     Current(Preferences),
     LegacyV1(LegacyPreferencesV1),
     LegacyV2(LegacyPreferencesV2),
+    LegacyV3(LegacyPreferencesV3),
     InvalidMigration { version: u32, error: String },
 }
 
@@ -231,7 +249,7 @@ pub struct PreferencesRecovery {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            version: 3,
+            version: 4,
             recent_root: None,
             workspaces: BTreeMap::new(),
         }
@@ -244,6 +262,26 @@ impl Preferences {
             Ok(parsed) => parsed,
             Err(error) => return recover_unreadable(path, error),
         };
+        let notice = migration_notice_if_policy_reset(match &parsed {
+            ParsedPreferences::LegacyV1(legacy) => legacy.workspaces.values().any(|workspace| {
+                let policy = &workspace.policy;
+                !policy.exclude_extensions.is_empty()
+                    || !policy.include_paths.is_empty()
+                    || !policy.exclude_paths.is_empty()
+            }),
+            ParsedPreferences::LegacyV2(legacy) => legacy
+                .workspaces
+                .values()
+                .any(|workspace| has_removed_filter_rules(&workspace.policy)),
+            ParsedPreferences::LegacyV3(legacy) => legacy.workspaces.values().any(|workspace| {
+                has_removed_filter_rules(&workspace.policy)
+                    || workspace
+                        .profiles
+                        .values()
+                        .any(|profile| has_removed_filter_rules(&profile.policy))
+            }),
+            ParsedPreferences::Current(_) | ParsedPreferences::InvalidMigration { .. } => false,
+        });
         let (source_version, migrated) = match parsed {
             ParsedPreferences::Current(preferences) => {
                 return PreferencesRecovery {
@@ -252,8 +290,12 @@ impl Preferences {
                     saving_blocked: false,
                 };
             }
-            ParsedPreferences::LegacyV1(legacy) => (1, migrate_v1(legacy).and_then(migrate_v2)),
-            ParsedPreferences::LegacyV2(legacy) => (2, migrate_v2(legacy)),
+            ParsedPreferences::LegacyV1(legacy) => (
+                1,
+                migrate_v1(legacy).and_then(migrate_v2).and_then(migrate_v3),
+            ),
+            ParsedPreferences::LegacyV2(legacy) => (2, migrate_v2(legacy).and_then(migrate_v3)),
+            ParsedPreferences::LegacyV3(legacy) => (3, migrate_v3(legacy.into_preferences())),
             ParsedPreferences::InvalidMigration { version, error } => {
                 return recover_failed_migration(path, version, error);
             }
@@ -267,6 +309,7 @@ impl Preferences {
             path,
             source_version,
             preferences,
+            notice,
             backup_original,
             |preferences, path| preferences.save(path),
         )
@@ -283,14 +326,18 @@ impl Preferences {
                 "version-2 settings require transactional migration; load them with recovery enabled"
                     .into(),
             )),
+            ParsedPreferences::LegacyV3(_) => Err(Error::Message(
+                "version-3 settings require transactional migration; load them with recovery enabled"
+                    .into(),
+            )),
             ParsedPreferences::InvalidMigration { error, .. } => Err(Error::Message(error)),
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if self.version != 3 {
+        if self.version != 4 {
             return Err(Error::Message(format!(
-                "only settings version 3 can be saved; found version {}",
+                "only settings version 4 can be saved; found version {}",
                 self.version
             )));
         }
@@ -320,6 +367,7 @@ fn persist_migration(
     path: &Path,
     source_version: u32,
     preferences: Preferences,
+    notice: Option<String>,
     backup_original: impl FnOnce(&Path) -> io::Result<PathBuf>,
     save: impl FnOnce(&Preferences, &Path) -> Result<()>,
 ) -> PreferencesRecovery {
@@ -339,7 +387,7 @@ fn persist_migration(
     match save(&preferences, path) {
         Ok(()) => PreferencesRecovery {
             preferences,
-            notice: None,
+            notice,
             saving_blocked: false,
         },
         Err(error) => PreferencesRecovery {
@@ -381,6 +429,12 @@ fn read_preferences(path: &Path) -> Result<ParsedPreferences> {
                 error: format!("version-2 settings are corrupt and cannot be migrated: {error}"),
             });
         }
+        Err(error) if contains_settings_version_marker(&bytes, 3) => {
+            return Ok(ParsedPreferences::InvalidMigration {
+                version: 3,
+                error: format!("version-3 settings are corrupt and cannot be migrated: {error}"),
+            });
+        }
         Err(error) => {
             return Err(Error::Message(format!(
                 "settings are corrupt: {error}; original file preserved"
@@ -403,7 +457,14 @@ fn read_preferences(path: &Path) -> Result<ParsedPreferences> {
                 error: format!("version-2 settings are invalid and cannot be migrated: {error}"),
             },
         }),
-        Some(3) => {
+        Some(3) => Ok(match serde_json::from_value::<LegacyPreferencesV3>(value) {
+            Ok(preferences) => ParsedPreferences::LegacyV3(preferences),
+            Err(error) => ParsedPreferences::InvalidMigration {
+                version: 3,
+                error: format!("version-3 settings are invalid and cannot be migrated: {error}"),
+            },
+        }),
+        Some(4) => {
             let preferences: Preferences = serde_json::from_value(value).map_err(|error| {
                 Error::Message(format!(
                     "settings are invalid: {error}; original file preserved"
@@ -426,6 +487,13 @@ fn read_preferences(path: &Path) -> Result<ParsedPreferences> {
             Ok(ParsedPreferences::InvalidMigration {
                 version: 2,
                 error: "version-2 settings use a non-integer schema version and cannot be migrated"
+                    .into(),
+            })
+        }
+        None if version_value.is_some_and(|version| is_non_integer_version(version, 3)) => {
+            Ok(ParsedPreferences::InvalidMigration {
+                version: 3,
+                error: "version-3 settings use a non-integer schema version and cannot be migrated"
                     .into(),
             })
         }
@@ -545,36 +613,19 @@ fn migrate_v1(legacy: LegacyPreferencesV1) -> Result<LegacyPreferencesV2> {
             include_paths,
             mut exclude_paths,
         } = workspace.policy;
-        for rule in &mut exclude_paths {
-            if rule.starts_with(FILE_EXTENSION_RULE_PREFIX)
-                || rule.starts_with(LITERAL_GLOB_RULE_PREFIX)
-            {
-                *rule = format!("{LITERAL_GLOB_RULE_PREFIX}{rule}");
-            }
-        }
-        let mut seen_generated = BTreeSet::new();
-        let mut migrated_extensions = Vec::new();
-        for extension in exclude_extensions {
-            let rule = migrated_extension_path_rule(&extension);
-            if seen_generated.insert(rule.clone()) {
-                migrated_extensions.push(rule);
-            }
-        }
-        // Version 1 evaluated path exclusions before extension exclusions. Keep
-        // those paths later so their prior explanation precedence survives.
-        migrated_extensions.append(&mut exclude_paths);
-        let exclude_paths = migrated_extensions;
+        exclude_paths.extend(exclude_extensions);
+        let include_mode = if include_extensions.is_empty() {
+            IncludeMode::AllText
+        } else {
+            IncludeMode::SelectedExtensions
+        };
         let policy = FilterPolicy {
             gitignore,
+            include_mode,
             include_extensions,
             include_paths,
             exclude_paths,
         };
-        policy.validate().map_err(|error| {
-            Error::Message(format!(
-                "migration of filters for workspace {root:?} failed validation: {error}"
-            ))
-        })?;
         workspaces.insert(
             root,
             LegacySavedWorkspaceV2 {
@@ -616,14 +667,46 @@ fn migrate_v2(legacy: LegacyPreferencesV2) -> Result<Preferences> {
         recent_root: legacy.recent_root,
         workspaces,
     };
-    validate_preferences(&migrated)?;
     Ok(migrated)
 }
 
+fn migrate_v3(mut legacy: Preferences) -> Result<Preferences> {
+    if legacy.version != 3 {
+        return Err(Error::Message("invalid version-3 settings schema".into()));
+    }
+    for workspace in legacy.workspaces.values_mut() {
+        reset_legacy_policy(&mut workspace.policy);
+        for profile in workspace.profiles.values_mut() {
+            reset_legacy_policy(&mut profile.policy);
+        }
+    }
+    legacy.version = 4;
+    validate_preferences(&legacy)?;
+    Ok(legacy)
+}
+
+fn reset_legacy_policy(policy: &mut FilterPolicy) {
+    policy.include_mode = if policy.include_extensions.is_empty() {
+        IncludeMode::AllText
+    } else {
+        IncludeMode::SelectedExtensions
+    };
+    policy.include_paths.clear();
+    policy.exclude_paths.clear();
+}
+
+fn has_removed_filter_rules(policy: &FilterPolicy) -> bool {
+    !policy.include_paths.is_empty() || !policy.exclude_paths.is_empty()
+}
+
+fn migration_notice_if_policy_reset(reset: bool) -> Option<String> {
+    reset.then(|| "Legacy custom filter settings were reset after creating a verified, size-limited recovery backup. Your saved selections and selected extension allowlists were preserved.".into())
+}
+
 fn validate_preferences(preferences: &Preferences) -> Result<()> {
-    if preferences.version != 3 {
+    if preferences.version != 4 {
         return Err(Error::Message(format!(
-            "unsupported settings version {}; expected version 3",
+            "unsupported settings version {}; expected version 4",
             preferences.version
         )));
     }
@@ -765,6 +848,16 @@ fn backup_original(path: &Path) -> io::Result<PathBuf> {
             "settings exceed the 4 MiB recovery backup limit",
         ));
     }
+    let mut original = Vec::with_capacity(metadata.len() as usize);
+    (&mut source)
+        .take(MAX_SETTINGS_BYTES + 1)
+        .read_to_end(&mut original)?;
+    if original.len() as u64 > MAX_SETTINGS_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "settings grew beyond the 4 MiB recovery backup limit while being read",
+        ));
+    }
 
     let parent = path
         .parent()
@@ -794,16 +887,21 @@ fn backup_original(path: &Path) -> io::Result<PathBuf> {
             Err(error) => return Err(error),
         };
         let copy_result = (|| {
-            let mut bounded_source = (&mut source).take(MAX_SETTINGS_BYTES + 1);
-            let copied = io::copy(&mut bounded_source, &mut destination)?;
-            if copied > MAX_SETTINGS_BYTES {
+            destination.write_all(&original)?;
+            destination.flush()?;
+            destination.sync_all()?;
+            let mut verification = Vec::with_capacity(original.len());
+            let backup_file = std::fs::File::open(&backup)?;
+            backup_file
+                .take(MAX_SETTINGS_BYTES + 1)
+                .read_to_end(&mut verification)?;
+            if verification != original {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "settings grew beyond the 4 MiB recovery backup limit while being copied",
+                    "settings recovery backup verification failed",
                 ));
             }
-            destination.flush()?;
-            destination.sync_all()
+            Ok(())
         })();
         if let Err(error) = copy_result {
             drop(destination);
@@ -831,11 +929,17 @@ mod tests {
         std::fs::write(&path, original).unwrap();
         let mut save_called = false;
 
-        let recovery =
-            persist_migration(&path, 2, Preferences::default(), backup_original, |_, _| {
+        let recovery = persist_migration(
+            &path,
+            2,
+            Preferences::default(),
+            None,
+            backup_original,
+            |_, _| {
                 save_called = true;
                 Err(Error::Message("injected migration save failure".into()))
-            });
+            },
+        );
 
         assert!(save_called);
         assert!(recovery.saving_blocked);
