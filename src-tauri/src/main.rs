@@ -5,9 +5,9 @@ mod watcher;
 
 use contextpick_core::{
     ManifestEntry, WorkspaceRoot, content,
-    destination::Destination,
+    destination::{Destination, plan_export_path},
     export::{self, ExportResult},
-    preferences::{Preferences, SavedWorkspace},
+    preferences::{ExportDestinationSettings, Preferences, SavedWorkspace},
     selection::Intent,
     sensitive::{SensitiveFileWarning, sensitive_file_warnings},
     token_count::{TokenEstimate, TokenEstimateCache},
@@ -15,6 +15,7 @@ use contextpick_core::{
 };
 use paging::{ProfileCatalog, WorkspacePage, WorkspaceResponse};
 use serde::Serialize;
+use std::path::PathBuf;
 #[cfg(debug_assertions)]
 use std::sync::Condvar;
 use std::{
@@ -76,6 +77,15 @@ struct TokenEstimateResponse {
     reused_files: usize,
     computed_files: usize,
     tokenizer_id: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportDestinationView {
+    settings: ExportDestinationSettings,
+    target_path: Option<String>,
+    replaces_existing: bool,
+    overwrite_allowed: bool,
 }
 
 struct TokenEstimateWork {
@@ -457,6 +467,166 @@ fn save_preferences(state: &mut Session, preferences: Preferences) -> CommandRes
         .map_err(|e| format!("Could not save preferences: {e}"))?;
     state.preferences = preferences;
     Ok(())
+}
+
+const IN_WORKSPACE_OVERWRITE_ERROR: &str = "Always overwrite is unavailable when the export folder is inside the active workspace. Choose a folder outside the workspace or turn off overwrite to protect source files.";
+
+fn validate_fixed_export_overwrite(
+    root: &WorkspaceRoot,
+    folder: &std::path::Path,
+) -> CommandResult<()> {
+    if Destination::is_within_workspace(root, folder).map_err(|error| error.to_string())? {
+        return Err(IN_WORKSPACE_OVERWRITE_ERROR.into());
+    }
+    Ok(())
+}
+
+fn export_destination_view(state: &Session) -> CommandResult<ExportDestinationView> {
+    let settings = state.preferences.export_destination.clone();
+    let Some(workspace) = state.workspace.as_ref() else {
+        return Ok(ExportDestinationView {
+            settings,
+            target_path: None,
+            replaces_existing: false,
+            overwrite_allowed: true,
+        });
+    };
+    if !settings.enabled {
+        return Ok(ExportDestinationView {
+            settings,
+            target_path: None,
+            replaces_existing: false,
+            overwrite_allowed: true,
+        });
+    }
+    let folder = settings
+        .folder
+        .as_deref()
+        .ok_or("fixed export-folder mode requires a selected folder")?;
+    if !PathBuf::from(folder).is_dir() {
+        return Err("The export folder is unavailable. Choose it again in Settings.".into());
+    }
+    let workspace_name = workspace
+        .root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("workspace");
+    let overwrite_allowed =
+        !Destination::is_within_workspace(&workspace.root_handle, &PathBuf::from(folder))
+            .map_err(|error| error.to_string())?;
+    let target = plan_export_path(
+        &PathBuf::from(folder),
+        workspace_name,
+        settings.always_overwrite,
+    )
+    .map_err(|error| error.to_string())?;
+    let replaces_existing = match std::fs::symlink_metadata(&target) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    let target_path = target
+        .to_str()
+        .ok_or("export target path is not valid Unicode")?
+        .to_owned();
+    Ok(ExportDestinationView {
+        settings,
+        target_path: Some(target_path),
+        replaces_existing,
+        overwrite_allowed,
+    })
+}
+
+fn persist_export_folder(
+    state: &mut Session,
+    selected: &std::path::Path,
+) -> CommandResult<ExportDestinationView> {
+    if !selected.is_dir() {
+        return Err("export destination must be an existing folder".into());
+    }
+    let canonical = selected
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve export folder: {error}"))?;
+    let folder = canonical
+        .to_str()
+        .ok_or("export folder path is not valid Unicode")?
+        .to_owned();
+    let mut preferences = state.preferences.clone();
+    preferences.export_destination.folder = Some(folder);
+    save_preferences(state, preferences)?;
+    export_destination_view(state)
+}
+
+#[tauri::command]
+fn get_export_destination(state: State<'_, Shared>) -> CommandResult<ExportDestinationView> {
+    let state = lock(state.inner())?;
+    export_destination_view(&state)
+}
+
+#[tauri::command]
+fn set_export_destination_mode(
+    enabled: bool,
+    always_overwrite: bool,
+    state: State<'_, Shared>,
+) -> CommandResult<ExportDestinationView> {
+    let mut state = lock(state.inner())?;
+    let mut preferences = state.preferences.clone();
+    if enabled
+        && preferences
+            .export_destination
+            .folder
+            .as_deref()
+            .is_none_or(|folder| !PathBuf::from(folder).is_dir())
+    {
+        return Err(
+            "Choose an available export folder before enabling fixed-folder exports.".into(),
+        );
+    }
+    if enabled
+        && always_overwrite
+        && let (Some(workspace), Some(folder)) = (
+            state.workspace.as_ref(),
+            preferences.export_destination.folder.as_deref(),
+        )
+    {
+        validate_fixed_export_overwrite(&workspace.root_handle, &PathBuf::from(folder))?;
+    }
+    preferences.export_destination.enabled = enabled;
+    preferences.export_destination.always_overwrite = enabled && always_overwrite;
+    save_preferences(&mut state, preferences)?;
+    export_destination_view(&state)
+}
+
+#[tauri::command]
+async fn choose_export_destination_folder(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+) -> CommandResult<Option<ExportDestinationView>> {
+    let shared = state.inner().clone();
+    blocking(move || {
+        let Some(path) = app
+            .dialog()
+            .file()
+            .set_title("Choose export folder")
+            .blocking_pick_folder()
+        else {
+            return Ok(None);
+        };
+        let path = path.into_path().map_err(|error| error.to_string())?;
+        let mut state = lock(&shared)?;
+        persist_export_folder(&mut state, &path).map(Some)
+    })
+    .await
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn debug_set_export_destination_folder(
+    folder: String,
+    state: State<'_, Shared>,
+) -> CommandResult<ExportDestinationView> {
+    let mut state = lock(state.inner())?;
+    persist_export_folder(&mut state, &PathBuf::from(folder))
 }
 
 fn persist_workspace(state: &mut Session, workspace: &Workspace) -> CommandResult<()> {
@@ -1032,6 +1202,7 @@ struct FrozenExport {
     root_display: String,
     watch_epoch: u64,
     watch_revision: u64,
+    export_destination: ExportDestinationSettings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1149,6 +1320,7 @@ fn manifest(shared: &Shared, watcher: &WatchService) -> CommandResult<FrozenExpo
         root_display: root_display.clone(),
         watch_epoch: health.epoch,
         watch_revision: health.revision,
+        export_destination: state.preferences.export_destination.clone(),
     };
     state.active_output = Some(ActiveOutput {
         cancel,
@@ -1447,20 +1619,49 @@ async fn run_export_frozen(
     );
     let outcome_watcher = Arc::clone(&watcher);
     let result = blocking(move || {
-        let Some(path) = app
-            .dialog()
-            .file()
-            .set_file_name("context.md")
-            .add_filter("Markdown", &["md"])
-            .blocking_save_file()
-        else {
-            return Ok(None);
+        let (destination, overwrite, save_as) = if frozen.export_destination.enabled {
+            let folder = frozen
+                .export_destination
+                .folder
+                .as_deref()
+                .ok_or("fixed export-folder mode requires a selected folder")?;
+            let workspace_name = frozen
+                .root
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("workspace");
+            if frozen.export_destination.always_overwrite {
+                validate_fixed_export_overwrite(&frozen.root, &PathBuf::from(folder))?;
+            }
+            (
+                plan_export_path(
+                    &PathBuf::from(folder),
+                    workspace_name,
+                    frozen.export_destination.always_overwrite,
+                )
+                .map_err(|error| error.to_string())?,
+                frozen.export_destination.always_overwrite,
+                false,
+            )
+        } else {
+            let Some(path) = app
+                .dialog()
+                .file()
+                .set_file_name("context.md")
+                .add_filter("Markdown", &["md"])
+                .blocking_save_file()
+            else {
+                return Ok(None);
+            };
+            let destination = path.into_path().map_err(|error| error.to_string())?;
+            let overwrite = destination.exists();
+            (destination, overwrite, true)
         };
-        let destination = path.into_path().map_err(|e| e.to_string())?;
-        let overwrite = destination.exists();
         let prepared = Destination::prepare(&frozen.root, &destination, overwrite)
             .map_err(|e| e.to_string())?;
-        if overwrite
+        if save_as
+            && overwrite
             && !app
                 .dialog()
                 .message("Replace the existing export file?")
@@ -1768,6 +1969,9 @@ fn main() {
         request_focus_reconcile,
         set_intent,
         set_policy,
+        get_export_destination,
+        set_export_destination_mode,
+        choose_export_destination_folder,
         create_profile,
         update_profile,
         rename_profile,
@@ -1785,6 +1989,7 @@ fn main() {
         reset_selections,
         workspace_page,
         debug_choose_workspace,
+        debug_set_export_destination_folder,
         debug_fail_watcher,
         debug_arm_copy_barrier,
         debug_copy_barrier_status,
@@ -1800,6 +2005,9 @@ fn main() {
         request_focus_reconcile,
         set_intent,
         set_policy,
+        get_export_destination,
+        set_export_destination_mode,
+        choose_export_destination_folder,
         create_profile,
         update_profile,
         rename_profile,
@@ -1878,6 +2086,44 @@ mod tests {
         let watcher = WatchService::new(move |health| handle_watch_health(&health_shared, &health));
         watcher.activate(std::path::Path::new(&response.view.root), generation);
         (response, watcher)
+    }
+
+    #[test]
+    fn export_folder_selection_persists_only_existing_canonical_folders() {
+        let config = tempfile::tempdir().unwrap();
+        let selected = tempfile::tempdir().unwrap();
+        let missing = config.path().join("missing-export-folder");
+        let mut state = Session {
+            settings_path: config.path().join("settings.json"),
+            ..Default::default()
+        };
+
+        let view = persist_export_folder(&mut state, selected.path()).unwrap();
+        let canonical = selected.path().canonicalize().unwrap();
+        assert_eq!(view.settings.folder.as_deref(), canonical.to_str());
+        let persisted = std::fs::read(&state.settings_path).unwrap();
+
+        assert!(persist_export_folder(&mut state, &missing).is_err());
+        assert_eq!(
+            state.preferences.export_destination.folder.as_deref(),
+            canonical.to_str()
+        );
+        assert_eq!(std::fs::read(&state.settings_path).unwrap(), persisted);
+    }
+
+    #[test]
+    fn silent_export_overwrite_is_allowed_only_outside_the_workspace() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = WorkspaceRoot::open(root_dir.path()).unwrap();
+        let inside = root_dir.path().join("exports");
+        std::fs::create_dir(&inside).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        assert!(validate_fixed_export_overwrite(&root, outside.path()).is_ok());
+        assert_eq!(
+            validate_fixed_export_overwrite(&root, &inside).unwrap_err(),
+            IN_WORKSPACE_OVERWRITE_ERROR
+        );
     }
 
     #[test]

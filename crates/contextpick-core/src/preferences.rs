@@ -14,6 +14,15 @@ use std::{
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_PROFILES_PER_WORKSPACE: usize = 20;
 pub const MAX_PROFILE_NAME_BYTES: usize = 80;
+pub const MAX_EXPORT_FOLDER_PATH_BYTES: usize = 32 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportDestinationSettings {
+    pub enabled: bool,
+    pub folder: Option<String>,
+    pub always_overwrite: bool,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -149,6 +158,8 @@ pub struct Preferences {
     pub version: u32,
     pub recent_root: Option<String>,
     pub workspaces: BTreeMap<String, SavedWorkspace>,
+    #[serde(default)]
+    pub export_destination: ExportDestinationSettings,
 }
 
 #[derive(Deserialize)]
@@ -181,12 +192,32 @@ struct LegacyPreferencesV3 {
     workspaces: BTreeMap<String, SavedWorkspace>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyPreferencesV4 {
+    version: u32,
+    recent_root: Option<String>,
+    workspaces: BTreeMap<String, SavedWorkspace>,
+}
+
 impl LegacyPreferencesV3 {
     fn into_preferences(self) -> Preferences {
         Preferences {
             version: self.version,
             recent_root: self.recent_root,
             workspaces: self.workspaces,
+            export_destination: ExportDestinationSettings::default(),
+        }
+    }
+}
+
+impl LegacyPreferencesV4 {
+    fn into_preferences(self) -> Preferences {
+        Preferences {
+            version: self.version,
+            recent_root: self.recent_root,
+            workspaces: self.workspaces,
+            export_destination: ExportDestinationSettings::default(),
         }
     }
 }
@@ -235,6 +266,7 @@ enum ParsedPreferences {
     LegacyV1(LegacyPreferencesV1),
     LegacyV2(LegacyPreferencesV2),
     LegacyV3(LegacyPreferencesV3),
+    LegacyV4(LegacyPreferencesV4),
     InvalidMigration { version: u32, error: String },
 }
 
@@ -249,9 +281,10 @@ pub struct PreferencesRecovery {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            version: 4,
+            version: 5,
             recent_root: None,
             workspaces: BTreeMap::new(),
+            export_destination: ExportDestinationSettings::default(),
         }
     }
 }
@@ -280,6 +313,7 @@ impl Preferences {
                         .values()
                         .any(|profile| has_removed_filter_rules(&profile.policy))
             }),
+            ParsedPreferences::LegacyV4(_) => false,
             ParsedPreferences::Current(_) | ParsedPreferences::InvalidMigration { .. } => false,
         });
         let (source_version, migrated) = match parsed {
@@ -292,10 +326,20 @@ impl Preferences {
             }
             ParsedPreferences::LegacyV1(legacy) => (
                 1,
-                migrate_v1(legacy).and_then(migrate_v2).and_then(migrate_v3),
+                migrate_v1(legacy)
+                    .and_then(migrate_v2)
+                    .and_then(migrate_v3)
+                    .and_then(migrate_v4),
             ),
-            ParsedPreferences::LegacyV2(legacy) => (2, migrate_v2(legacy).and_then(migrate_v3)),
-            ParsedPreferences::LegacyV3(legacy) => (3, migrate_v3(legacy.into_preferences())),
+            ParsedPreferences::LegacyV2(legacy) => (
+                2,
+                migrate_v2(legacy).and_then(migrate_v3).and_then(migrate_v4),
+            ),
+            ParsedPreferences::LegacyV3(legacy) => (
+                3,
+                migrate_v3(legacy.into_preferences()).and_then(migrate_v4),
+            ),
+            ParsedPreferences::LegacyV4(legacy) => (4, migrate_v4(legacy.into_preferences())),
             ParsedPreferences::InvalidMigration { version, error } => {
                 return recover_failed_migration(path, version, error);
             }
@@ -330,14 +374,18 @@ impl Preferences {
                 "version-3 settings require transactional migration; load them with recovery enabled"
                     .into(),
             )),
+            ParsedPreferences::LegacyV4(_) => Err(Error::Message(
+                "version-4 settings require transactional migration; load them with recovery enabled"
+                    .into(),
+            )),
             ParsedPreferences::InvalidMigration { error, .. } => Err(Error::Message(error)),
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if self.version != 4 {
+        if self.version != 5 {
             return Err(Error::Message(format!(
-                "only settings version 4 can be saved; found version {}",
+                "only settings version 5 can be saved; found version {}",
                 self.version
             )));
         }
@@ -464,7 +512,14 @@ fn read_preferences(path: &Path) -> Result<ParsedPreferences> {
                 error: format!("version-3 settings are invalid and cannot be migrated: {error}"),
             },
         }),
-        Some(4) => {
+        Some(4) => Ok(match serde_json::from_value::<LegacyPreferencesV4>(value) {
+            Ok(preferences) => ParsedPreferences::LegacyV4(preferences),
+            Err(error) => ParsedPreferences::InvalidMigration {
+                version: 4,
+                error: format!("version-4 settings are invalid and cannot be migrated: {error}"),
+            },
+        }),
+        Some(5) => {
             let preferences: Preferences = serde_json::from_value(value).map_err(|error| {
                 Error::Message(format!(
                     "settings are invalid: {error}; original file preserved"
@@ -666,6 +721,7 @@ fn migrate_v2(legacy: LegacyPreferencesV2) -> Result<Preferences> {
         version: 3,
         recent_root: legacy.recent_root,
         workspaces,
+        export_destination: ExportDestinationSettings::default(),
     };
     Ok(migrated)
 }
@@ -681,6 +737,14 @@ fn migrate_v3(mut legacy: Preferences) -> Result<Preferences> {
         }
     }
     legacy.version = 4;
+    Ok(legacy)
+}
+
+fn migrate_v4(mut legacy: Preferences) -> Result<Preferences> {
+    if legacy.version != 4 {
+        return Err(Error::Message("invalid version-4 settings schema".into()));
+    }
+    legacy.version = 5;
     validate_preferences(&legacy)?;
     Ok(legacy)
 }
@@ -704,11 +768,25 @@ fn migration_notice_if_policy_reset(reset: bool) -> Option<String> {
 }
 
 fn validate_preferences(preferences: &Preferences) -> Result<()> {
-    if preferences.version != 4 {
+    if preferences.version != 5 {
         return Err(Error::Message(format!(
-            "unsupported settings version {}; expected version 4",
+            "unsupported settings version {}; expected version 5",
             preferences.version
         )));
+    }
+    if preferences.export_destination.enabled && preferences.export_destination.folder.is_none() {
+        return Err(Error::Message(
+            "fixed export-folder mode requires a selected folder".into(),
+        ));
+    }
+    if let Some(folder) = &preferences.export_destination.folder {
+        if folder.is_empty()
+            || folder.len() > MAX_EXPORT_FOLDER_PATH_BYTES
+            || folder.contains('\0')
+            || !Path::new(folder).is_absolute()
+        {
+            return Err(Error::Message("export folder path is invalid".into()));
+        }
     }
     for (root, workspace) in &preferences.workspaces {
         workspace.policy.validate().map_err(|error| {

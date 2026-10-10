@@ -1,5 +1,6 @@
 use contextpick_core::preferences::{
-    MAX_PROFILE_NAME_BYTES, MAX_PROFILES_PER_WORKSPACE, Preferences, SavedProfile, SavedWorkspace,
+    ExportDestinationSettings, MAX_PROFILE_NAME_BYTES, MAX_PROFILES_PER_WORKSPACE, Preferences,
+    SavedProfile, SavedWorkspace,
 };
 use contextpick_core::{selection::Intent, workspace::FilterPolicy};
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,6 +11,11 @@ fn preferences_roundtrip_preserves_policy_and_intents() {
     let path = dir.path().join("settings.json");
     let mut prefs = Preferences {
         recent_root: Some("synthetic-root".into()),
+        export_destination: ExportDestinationSettings {
+            enabled: true,
+            folder: Some(dir.path().display().to_string()),
+            always_overwrite: true,
+        },
         ..Default::default()
     };
     prefs.workspaces.insert(
@@ -28,6 +34,7 @@ fn preferences_roundtrip_preserves_policy_and_intents() {
     prefs.save(&path).unwrap();
     let restored = Preferences::load(&path).unwrap();
     assert_eq!(restored.recent_root, prefs.recent_root);
+    assert_eq!(restored.export_destination, prefs.export_destination);
     assert!(!restored.workspaces["synthetic-root"].policy.gitignore);
     assert_eq!(
         restored.workspaces["synthetic-root"].intents["src"],
@@ -37,6 +44,65 @@ fn preferences_roundtrip_preserves_policy_and_intents() {
         restored.workspaces["synthetic-root"].generated_outputs,
         BTreeSet::from(["release/context.md".into()])
     );
+}
+
+#[test]
+fn v4_preferences_migrate_with_default_export_destination_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let original = r#"{"version":4,"recentRoot":"root","workspaces":{"root":{"policy":{"gitignore":true,"includeExtensions":[],"includeMode":"allText","includePaths":[],"excludePaths":[]},"intents":{"src":"include"},"generatedOutputs":["old.md"],"profiles":{},"activeProfile":null}}}"#;
+    std::fs::write(&path, original).unwrap();
+
+    let recovered = Preferences::load_with_recovery(&path);
+
+    assert!(!recovered.saving_blocked);
+    assert_eq!(recovered.preferences.version, 5);
+    assert_eq!(
+        recovered.preferences.export_destination,
+        ExportDestinationSettings::default()
+    );
+    assert_eq!(recovered.preferences.recent_root.as_deref(), Some("root"));
+    assert_eq!(
+        recovered.preferences.workspaces["root"].intents["src"],
+        Intent::Include
+    );
+    assert_eq!(
+        recovered.preferences.workspaces["root"].generated_outputs,
+        BTreeSet::from(["old.md".into()])
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["version"], 5);
+    assert!(saved["exportDestination"]["folder"].is_null());
+    assert_eq!(saved["exportDestination"]["enabled"], false);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("settings-recovery"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn export_destination_preferences_require_an_absolute_folder_when_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let original = b"preserve old settings";
+    std::fs::write(&path, original).unwrap();
+
+    let mut preferences = Preferences {
+        export_destination: ExportDestinationSettings {
+            enabled: true,
+            folder: None,
+            always_overwrite: false,
+        },
+        ..Default::default()
+    };
+    assert!(preferences.save(&path).is_err());
+    preferences.export_destination.folder = Some("relative/output".into());
+    assert!(preferences.save(&path).is_err());
+    preferences.export_destination.folder = Some(format!("{}\0bad", dir.path().display()));
+    assert!(preferences.save(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
 }
 
 #[test]
@@ -68,7 +134,7 @@ fn v3_policy_reset_preserves_intents_and_allowlists_in_workspaces_and_profiles()
     assert!(!recovered.saving_blocked);
     let notice = recovered.notice.as_deref().unwrap();
     assert!(notice.contains("custom filter settings"));
-    assert_eq!(recovered.preferences.version, 4);
+    assert_eq!(recovered.preferences.version, 5);
     let saved = &recovered.preferences.workspaces["root"];
     assert_eq!(saved.policy.include_extensions, [".Rs"]);
     assert_eq!(
@@ -116,7 +182,7 @@ fn v2_settings_migrate_once_and_preserve_every_workspace_field() {
             .contains("custom filter settings")
     );
     assert!(!migrated.saving_blocked);
-    assert_eq!(migrated.preferences.version, 4);
+    assert_eq!(migrated.preferences.version, 5);
     assert_eq!(migrated.preferences.recent_root.as_deref(), Some("root-a"));
     assert_eq!(migrated.preferences.workspaces.len(), 2);
     let first = &migrated.preferences.workspaces["root-a"];
@@ -152,7 +218,7 @@ fn v2_settings_migrate_once_and_preserve_every_workspace_field() {
     );
 
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["version"], 4);
+    assert_eq!(saved["version"], 5);
     assert_eq!(
         saved["workspaces"]["root-a"]["generatedOutputs"][0],
         "out/context.md"
@@ -170,7 +236,7 @@ fn v2_settings_migrate_once_and_preserve_every_workspace_field() {
 
     let loaded_again = Preferences::load_with_recovery(&path);
     assert!(loaded_again.notice.is_none());
-    assert_eq!(loaded_again.preferences.version, 4);
+    assert_eq!(loaded_again.preferences.version, 5);
     assert_eq!(
         std::fs::read_dir(dir.path().join("settings-recovery"))
             .unwrap()
@@ -547,7 +613,7 @@ fn v1_custom_policy_is_reset_transactionally_while_allowlists_and_intents_surviv
             .contains("custom filter settings")
     );
     assert!(!recovered.saving_blocked);
-    assert_eq!(recovered.preferences.version, 4);
+    assert_eq!(recovered.preferences.version, 5);
     assert_eq!(
         recovered.preferences.recent_root.as_deref(),
         Some("legacy-root")
@@ -572,7 +638,7 @@ fn v1_custom_policy_is_reset_transactionally_while_allowlists_and_intents_surviv
 
     let persisted = std::fs::read_to_string(&path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&persisted).unwrap();
-    assert_eq!(json["version"], 4);
+    assert_eq!(json["version"], 5);
     assert_eq!(
         json["workspaces"]["legacy-root"]["policy"]["includeMode"],
         "selectedExtensions"
@@ -626,7 +692,7 @@ fn v1_settings_without_or_with_one_exclusion_migrate() {
             recovered.notice.is_some(),
             settings.contains("excludeExtensions")
         );
-        assert_eq!(Preferences::load(&path).unwrap().version, 4);
+        assert_eq!(Preferences::load(&path).unwrap().version, 5);
     }
 }
 
@@ -644,7 +710,7 @@ fn v2_settings_without_removed_filter_rules_do_not_show_reset_notice() {
 
     assert!(!recovered.saving_blocked);
     assert!(recovered.notice.is_none());
-    assert_eq!(recovered.preferences.version, 4);
+    assert_eq!(recovered.preferences.version, 5);
 }
 
 #[test]
@@ -660,7 +726,7 @@ fn invalid_legacy_exclusion_is_removed_and_allowlist_policy_migrates() {
     let recovered = Preferences::load_with_recovery(&path);
 
     assert!(!recovered.saving_blocked);
-    assert_eq!(recovered.preferences.version, 4);
+    assert_eq!(recovered.preferences.version, 5);
     assert!(
         recovered.preferences.workspaces["root"]
             .policy
@@ -841,7 +907,7 @@ fn recovery_backs_up_corrupt_and_future_settings_before_starting_with_defaults()
     for text in invalid_settings {
         std::fs::write(&path, text).unwrap();
         let recovered = Preferences::load_with_recovery(&path);
-        assert_eq!(recovered.preferences.version, 4);
+        assert_eq!(recovered.preferences.version, 5);
         assert!(recovered.preferences.recent_root.is_none());
         assert!(recovered.preferences.workspaces.is_empty());
         assert!(!recovered.saving_blocked);
@@ -875,7 +941,7 @@ fn backup_failure_returns_defaults_with_actionable_notice_and_blocks_saving() {
 
     let recovered = Preferences::load_with_recovery(&path);
 
-    assert_eq!(recovered.preferences.version, 4);
+    assert_eq!(recovered.preferences.version, 5);
     assert!(recovered.preferences.recent_root.is_none());
     assert!(recovered.preferences.workspaces.is_empty());
     assert!(recovered.saving_blocked);
@@ -891,7 +957,7 @@ fn missing_settings_use_defaults_and_oversized_settings_fail() {
     let path = dir.path().join("settings.json");
     assert!(Preferences::load(&path).unwrap().recent_root.is_none());
     let recovery = Preferences::load_with_recovery(&path);
-    assert_eq!(recovery.preferences.version, 4);
+    assert_eq!(recovery.preferences.version, 5);
     assert!(recovery.preferences.recent_root.is_none());
     assert!(recovery.preferences.workspaces.is_empty());
     assert!(recovery.notice.is_none());

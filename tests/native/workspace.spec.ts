@@ -270,6 +270,121 @@ test('native selection profiles load and persist across restart', async ({ nativ
   await expect(page.locator('.profile-active strong')).toHaveText('Everything');
 });
 
+test('native fixed-folder export persists settings, suffixes collisions, and overwrites only when enabled', async ({ native }) => {
+  let page = native.page;
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Choose export folder' }).click();
+  await completeNativeDialog('Choose export folder', undefined, '{ESC}');
+  await expect(page.getByRole('checkbox', { name: 'Always export to this folder' })).toBeDisabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  const folder = path.join(path.dirname(native.root), 'fixed-exports');
+  await mkdir(folder, { recursive: true });
+  const destinationView = await page.evaluate(async (selectedFolder) => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    return internals.invoke('debug_set_export_destination_folder', { folder: selectedFolder });
+  }, folder);
+  const persistedFolder = (destinationView as { settings?: { folder?: string } }).settings?.folder ?? folder;
+
+  // The debug command persists the chosen folder outside React's state. Relaunch
+  // so this test exercises the same settings reload that happens next time users open the app.
+  await native.stop();
+  page = await native.launch();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const fixedFolder = page.getByRole('checkbox', { name: 'Always export to this folder' });
+  const overwrite = page.getByRole('checkbox', { name: 'Always overwrite this file' });
+  await expect(fixedFolder).not.toBeChecked();
+  await expect(overwrite).toBeDisabled();
+  await fixedFolder.click();
+  await expect(fixedFolder).toBeChecked();
+  const output = path.join(persistedFolder, `${path.basename(native.root)}.md`);
+  await page.getByRole('button', { name: 'All' }).click();
+  const exportButton = page.getByRole('button', { name: 'Export Markdown' });
+  await exportButton.focus();
+  await expect(page.getByRole('tooltip')).toContainText(output);
+  await expect(page.getByRole('tooltip')).toContainText('numbered filename');
+
+  await exportButton.click();
+  await expect(page.getByRole('status')).toContainText(`Export ready · 602 files`, { timeout: 30_000 });
+  expect(await readFile(output, 'utf8')).toContain('export const value599 = 599;');
+  const secondOutput = path.join(persistedFolder, `${path.basename(native.root)} (2).md`);
+  await page.getByRole('button', { name: 'Export Markdown' }).click();
+  await expect(page.getByRole('status')).toContainText(secondOutput, { timeout: 30_000 });
+  await expect.poll(async () => (await readFile(secondOutput)).length).toBeGreaterThan(100);
+
+  await writeFile(output, 'PREVIOUS_EXPORT_SENTINEL', 'utf8');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await overwrite.click();
+  await expect(overwrite).toBeChecked();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await exportButton.focus();
+  await expect(page.getByRole('tooltip')).toContainText(`Each click replaces ${output}.`);
+  await exportButton.click();
+  await expect(page.getByRole('status')).toContainText(output, { timeout: 30_000 });
+  expect(await readFile(output, 'utf8')).not.toContain('PREVIOUS_EXPORT_SENTINEL');
+  expect(await readFile(secondOutput, 'utf8')).toContain('export const value599 = 599;');
+
+  const saved = await native.readSettings();
+  const exportSettings = saved.exportDestination as { enabled: boolean; folder: string; alwaysOverwrite: boolean };
+  expect(exportSettings.enabled).toBe(true);
+  expect(exportSettings.folder).toBe(persistedFolder);
+  expect(exportSettings.alwaysOverwrite).toBe(true);
+
+  await native.stop();
+  page = await native.launch();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('checkbox', { name: 'Always export to this folder' })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Always overwrite this file' })).toBeChecked();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Export Markdown' }).focus();
+  await expect(page.getByRole('tooltip')).toContainText(`Each click replaces ${output}.`);
+
+  const inWorkspaceFolder = path.join(native.root, 'exports');
+  await mkdir(inWorkspaceFolder);
+  await page.evaluate(async (selectedFolder) => {
+    const internals = (window as Window & {
+      __TAURI_INTERNALS__?: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    if (!internals) throw new Error('Native Tauri command bridge is unavailable.');
+    return internals.invoke('debug_set_export_destination_folder', { folder: selectedFolder });
+  }, inWorkspaceFolder);
+  await native.stop();
+  page = await native.launch();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const inRootOverwrite = page.getByRole('checkbox', { name: 'Always overwrite this file' });
+  const inRootFixedFolder = page.getByRole('checkbox', { name: 'Always export to this folder' });
+  await expect(inRootOverwrite).toBeChecked();
+  await expect(page.getByText(/requires a folder outside the active workspace/i)).toBeVisible();
+  await inRootFixedFolder.click();
+  await expect(inRootFixedFolder).not.toBeChecked();
+  await expect(inRootOverwrite).not.toBeChecked();
+  await expect(inRootOverwrite).toBeDisabled();
+  await inRootFixedFolder.click();
+  await expect(inRootFixedFolder).toBeChecked();
+  await inRootOverwrite.click();
+  await expect(inRootOverwrite).not.toBeChecked();
+  await inRootOverwrite.click();
+  await expect(page.getByRole('alert')).toContainText('inside the active workspace');
+  await expect(inRootOverwrite).not.toBeChecked();
+
+  const inRootOutput = path.join(inWorkspaceFolder, `${path.basename(native.root)}.md`);
+  await page.getByRole('button', { name: 'All' }).click();
+  const numberedExportButton = page.getByRole('button', { name: 'Export Markdown' });
+  await numberedExportButton.focus();
+  await expect(page.getByRole('tooltip')).toContainText('numbered filename');
+  await numberedExportButton.click();
+  await expect(page.getByRole('status')).toContainText(inRootOutput, { timeout: 30_000 });
+  await writeFile(inRootOutput, 'IN_WORKSPACE_EXPORT_MUST_NOT_BE_REPLACED', 'utf8');
+  const inRootSecondOutput = path.join(inWorkspaceFolder, `${path.basename(native.root)} (2).md`);
+  await numberedExportButton.click();
+  await expect(page.getByRole('status')).toContainText(inRootSecondOutput, { timeout: 30_000 });
+  expect(await readFile(inRootOutput, 'utf8')).toBe('IN_WORKSPACE_EXPORT_MUST_NOT_BE_REPLACED');
+  expect(await readFile(inRootSecondOutput, 'utf8')).toContain('export const value599 = 599;');
+});
+
 test('native sensitive-file confirmation gates copy and export and rejects stale selection tickets', async ({ native }) => {
   const { page, root } = native;
   const marker = `SYNTHETIC_CONTEXT_PICK_${Date.now()}`;

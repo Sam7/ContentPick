@@ -1181,6 +1181,113 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByRole('button', { name: 'Save as profile' })).toBeInTheDocument();
   });
 
+  it('configures fixed-folder exports and explains the current generated target', async () => {
+    const user = userEvent.setup();
+    render(<App bridge={createBrowserBridge()} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    const fixedFolder = screen.getByRole('checkbox', { name: 'Always export to this folder' });
+    const overwrite = screen.getByRole('checkbox', { name: 'Always overwrite this file' });
+    expect(fixedFolder).not.toBeChecked();
+    expect(overwrite).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Choose export folder' }));
+    await user.click(fixedFolder);
+
+    const target = screen.getByRole('tooltip');
+    expect(target).toHaveTextContent('/workspace/exports/patchwork.md');
+    expect(target).toHaveTextContent('later exports will add a numbered filename');
+    const exportButton = screen.getByRole('button', { name: 'Export Markdown' });
+    expect(exportButton).toHaveAttribute('aria-describedby', target.id);
+    await user.click(overwrite);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Each click replaces /workspace/exports/patchwork.md.');
+  });
+
+  it('keeps the saved export folder when the native picker is canceled or rejects a choice', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const savedDestination = {
+      settings: { enabled: false, folder: 'C:/Exports', alwaysOverwrite: false },
+      targetPath: null,
+      replacesExisting: false,
+      overwriteAllowed: true,
+    };
+    let rejectChoice = false;
+    const bridge = {
+      ...base,
+      get_export_destination: async () => savedDestination,
+      choose_export_destination_folder: async () => {
+        if (rejectChoice) throw new Error('export folder must be an existing folder');
+        return null;
+      },
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await waitFor(() => expect(screen.getByText('C:/Exports')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Choose export folder' }));
+
+    expect(screen.getByText('C:/Exports')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Always export to this folder' })).not.toBeChecked();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    rejectChoice = true;
+    await user.click(screen.getByRole('button', { name: 'Choose export folder' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('export folder must be an existing folder');
+    expect(screen.getByText('C:/Exports')).toBeInTheDocument();
+  });
+
+  it('refuses silent replacement when the export folder is inside the workspace', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const destination = {
+      settings: { enabled: true, folder: '/workspace/exports', alwaysOverwrite: false },
+      targetPath: '/workspace/exports/workspace.md',
+      replacesExisting: false,
+      overwriteAllowed: false,
+    };
+    const bridge = {
+      ...base,
+      get_export_destination: async () => destination,
+      set_export_destination_mode: async ({ enabled, alwaysOverwrite }: { enabled: boolean; alwaysOverwrite: boolean }) => {
+        if (enabled && alwaysOverwrite) throw new Error('Always overwrite is unavailable when the export folder is inside the active workspace.');
+        destination.settings.enabled = enabled;
+        destination.settings.alwaysOverwrite = alwaysOverwrite;
+        return destination;
+      },
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    const overwrite = screen.getByRole('checkbox', { name: 'Always overwrite this file' });
+    await user.click(overwrite);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('inside the active workspace');
+    expect(overwrite).not.toBeChecked();
+  });
+
+  it('clears the overwrite preference when fixed-folder mode is turned off', async () => {
+    const user = userEvent.setup();
+    render(<App bridge={createBrowserBridge()} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Choose export folder' }));
+
+    const fixedFolder = screen.getByRole('checkbox', { name: 'Always export to this folder' });
+    const overwrite = screen.getByRole('checkbox', { name: 'Always overwrite this file' });
+    await user.click(fixedFolder);
+    await user.click(overwrite);
+    expect(overwrite).toBeChecked();
+    await user.click(fixedFolder);
+
+    expect(fixedFolder).not.toBeChecked();
+    expect(overwrite).not.toBeChecked();
+    expect(overwrite).toBeDisabled();
+    await user.click(fixedFolder);
+    expect(fixedFolder).toBeChecked();
+    expect(overwrite).not.toBeChecked();
+  });
+
   it('loads, updates, renames, deletes, and creates saved selection profiles', async () => {
     const user = userEvent.setup();
     render(<App bridge={createBrowserBridge()} fixtureMode />);

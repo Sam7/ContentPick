@@ -398,6 +398,7 @@ test('bounded scan diagnostics remain scrollable without collapsing the file tre
     testWindow.__TAURI_INTERNALS__ = {
       invoke: (command) => command === 'get_watch_status'
         ? Promise.resolve(null)
+        : command === 'get_export_destination' ? Promise.resolve({ settings: { enabled: false, folder: null, alwaysOverwrite: false }, targetPath: null, replacesExisting: false, overwriteAllowed: true })
         : command === 'plugin:event|listen' ? Promise.resolve(1) : Promise.resolve(workspace),
       transformCallback: () => 1,
     };
@@ -597,6 +598,7 @@ test('keeps pending-operation status and cancellation error above the footer at 
       invoke: (command) => {
         if (command === 'plugin:event|listen') return Promise.resolve(1);
         if (command === 'get_watch_status') return Promise.resolve(watchHealth);
+        if (command === 'get_export_destination') return Promise.resolve({ settings: { enabled: false, folder: null, alwaysOverwrite: false }, targetPath: null, replacesExisting: false, overwriteAllowed: true });
         if (command === 'restore_workspace') return Promise.resolve(null);
         if (command === 'choose_workspace') return Promise.resolve(workspace);
         if (command === 'export_markdown') return new Promise(() => undefined);

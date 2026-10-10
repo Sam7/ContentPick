@@ -63,6 +63,17 @@ export type FilterPolicy = {
 
 export type Preview = { text: string; truncated: boolean };
 export type ExportResult = { bytes: number; files: number; destination: string };
+export type ExportDestinationSettings = {
+  enabled: boolean;
+  folder: string | null;
+  alwaysOverwrite: boolean;
+};
+export type ExportDestinationView = {
+  settings: ExportDestinationSettings;
+  targetPath: string | null;
+  replacesExisting: boolean;
+  overwriteAllowed: boolean;
+};
 export type SensitiveWarning = {
   path: string;
   category: 'environmentFile' | 'pemMaterial' | 'privateKey' | 'credentialFile';
@@ -100,6 +111,9 @@ export type ContextPickBridge = {
   rename_profile(args: { currentName: string; newName: string }): Promise<ProfileCatalog>;
   delete_profile(args: { name: string }): Promise<ProfileCatalog>;
   load_profile(args: { name: string }): Promise<WorkspaceView>;
+  get_export_destination(): Promise<ExportDestinationView>;
+  set_export_destination_mode(args: { enabled: boolean; alwaysOverwrite: boolean }): Promise<ExportDestinationView>;
+  choose_export_destination_folder(): Promise<ExportDestinationView | null>;
   workspace_page(args: { generation: number; offset: number }): Promise<WorkspacePage>;
   preview_file(args: { path: string }): Promise<Preview>;
   estimate_tokens(args: { generation: number; requestId: string }): Promise<TokenEstimate>;
@@ -128,6 +142,9 @@ const nativeBridge: ContextPickBridge = {
   rename_profile: (args) => invoke('rename_profile', args),
   delete_profile: (args) => invoke('delete_profile', args),
   load_profile: (args) => invoke('load_profile', args),
+  get_export_destination: () => invoke('get_export_destination'),
+  set_export_destination_mode: (args) => invoke('set_export_destination_mode', args),
+  choose_export_destination_folder: () => invoke('choose_export_destination_folder'),
   workspace_page: (args) => invoke('workspace_page', args),
   preview_file: (args) => invoke('preview_file', args),
   estimate_tokens: (args) => invoke('estimate_tokens', args),
@@ -188,6 +205,7 @@ export type BrowserBridgeOptions = { cancelPicker?: boolean; failExport?: boolea
 /** Static, synthetic responses for UI development. This deliberately contains no selection/filter policy. */
 export function createBrowserBridge(options: BrowserBridgeOptions = {}): ContextPickBridge {
   const profileCatalog = structuredClone(fixtureWorkspace.profileCatalog);
+  const exportDestination: ExportDestinationSettings = { enabled: false, folder: null, alwaysOverwrite: false };
   let workspaceGeneration = fixtureWorkspace.generation;
   const withCatalog = (view: WorkspaceView): WorkspaceView => ({
     ...structuredClone(view),
@@ -195,6 +213,12 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
     profileCatalog: { ...structuredClone(profileCatalog), generation: workspaceGeneration },
   });
   const profileResponse = (): ProfileCatalog => ({ ...structuredClone(profileCatalog), generation: workspaceGeneration });
+  const exportDestinationResponse = (): ExportDestinationView => ({
+    settings: structuredClone(exportDestination),
+    targetPath: exportDestination.enabled && exportDestination.folder ? `${exportDestination.folder}/patchwork.md` : null,
+    replacesExisting: false,
+    overwriteAllowed: true,
+  });
   const currentWorkspace = () => withCatalog(fixtureWorkspace);
   const watchHealth: WatchHealth = {
     root: fixtureWorkspace.root,
@@ -254,6 +278,17 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
       workspaceGeneration += 1;
       return currentWorkspace();
     },
+    get_export_destination: async () => exportDestinationResponse(),
+    set_export_destination_mode: async ({ enabled, alwaysOverwrite }) => {
+      if (enabled && !exportDestination.folder) throw new Error('Choose an available export folder before enabling fixed-folder exports.');
+      exportDestination.enabled = enabled;
+      exportDestination.alwaysOverwrite = enabled && alwaysOverwrite;
+      return exportDestinationResponse();
+    },
+    choose_export_destination_folder: async () => {
+      exportDestination.folder = '/workspace/exports';
+      return exportDestinationResponse();
+    },
     workspace_page: async () => { throw new Error('The browser fixture does not paginate workspaces.'); },
     preview_file: async ({ path }) => {
       if (options.failPreview) throw new Error('Preview could not be read.');
@@ -283,7 +318,7 @@ export function createBrowserBridge(options: BrowserBridgeOptions = {}): Context
     },
     export_markdown: async () => {
       if (options.failExport) throw new Error('The fixture export failed.');
-      return { destination: '/workspace/patchwork/context.md', bytes: 6240, files: 3 };
+      return { destination: exportDestinationResponse().targetPath ?? '/workspace/patchwork/context.md', bytes: 6240, files: 3 };
     },
     copy_markdown: async () => ({ destination: 'clipboard', bytes: 6240, files: 3 }),
     confirm_sensitive_output: async () => ({ destination: 'clipboard', bytes: 6240, files: 3 }),

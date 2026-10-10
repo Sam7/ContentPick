@@ -1,9 +1,53 @@
-use contextpick_core::{WorkspaceRoot, destination::Destination};
+use contextpick_core::{
+    WorkspaceRoot,
+    destination::{Destination, plan_export_path},
+};
 use std::{
     fs,
     io::Write,
     sync::atomic::{AtomicBool, Ordering},
 };
+
+#[test]
+fn fixed_export_names_are_sanitized_and_collisions_get_stable_suffixes() {
+    let folder = tempfile::tempdir().unwrap();
+    let first = plan_export_path(folder.path(), "bad:name. ", false).unwrap();
+    assert_eq!(first.file_name().unwrap(), "bad_name.md");
+    fs::write(&first, "existing export").unwrap();
+    let second = plan_export_path(folder.path(), "bad:name. ", false).unwrap();
+    assert_eq!(second.file_name().unwrap(), "bad_name (2).md");
+    assert_eq!(
+        plan_export_path(folder.path(), "bad:name. ", true).unwrap(),
+        first
+    );
+}
+
+#[test]
+fn fixed_export_names_avoid_reserved_temporary_prefix_and_device_names() {
+    let folder = tempfile::tempdir().unwrap();
+    let temporary = plan_export_path(folder.path(), ".contextpick-export-cache", true).unwrap();
+    assert!(
+        !temporary
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".contextpick-export-")
+    );
+    let device = plan_export_path(folder.path(), "CON", true).unwrap();
+    assert_ne!(device.file_name().unwrap(), "CON.md");
+}
+
+#[test]
+fn export_folder_containment_uses_the_open_workspace_root() {
+    let root_dir = tempfile::tempdir().unwrap();
+    let root = WorkspaceRoot::open(root_dir.path()).unwrap();
+    let inside = root_dir.path().join("exports");
+    fs::create_dir(&inside).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+
+    assert!(Destination::is_within_workspace(&root, &inside).unwrap());
+    assert!(!Destination::is_within_workspace(&root, outside.path()).unwrap());
+}
 
 #[test]
 fn new_in_root_output_is_published_without_replacing_any_existing_path() {

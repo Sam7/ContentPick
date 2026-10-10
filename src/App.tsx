@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
 import { IconAlertTriangle, IconArrowRight, IconChevronLeft, IconChevronRight, IconCode, IconCopy, IconEye, IconFileExport, IconFileText, IconFolderOpen, IconHash, IconInfoCircle, IconPlus, IconSearch, IconSettings, IconX } from '@tabler/icons-react';
-import type { ContextPickBridge, Entry, ExportResult, FilterPolicy, Preview, ProfileCatalog, SelectionIntent, SensitiveWarningSummary, TokenEstimate, WatchHealth, WorkspacePage, WorkspaceView } from './bridge';
+import type { ContextPickBridge, Entry, ExportDestinationView, ExportResult, FilterPolicy, Preview, ProfileCatalog, SelectionIntent, SensitiveWarningSummary, TokenEstimate, WatchHealth, WorkspacePage, WorkspaceView } from './bridge';
 import { ProjectTree } from './ProjectTree';
 import { WorkspaceToolbar } from './WorkspaceToolbar';
 import { WorkspaceSidebar } from './WorkspaceSidebar';
@@ -107,6 +107,12 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [policyOpen, setPolicyOpen] = useState(false);
   const [selectedProfileName, setSelectedProfileName] = useState('');
+  const [exportDestination, setExportDestination] = useState<ExportDestinationView>({
+    settings: { enabled: false, folder: null, alwaysOverwrite: false },
+    targetPath: null,
+    replacesExisting: false,
+    overwriteAllowed: true,
+  });
   const [newProfileName, setNewProfileName] = useState('');
   const [renameProfileName, setRenameProfileName] = useState('');
   const [policy, setPolicy] = useState<FilterPolicy>(DEFAULT_FILTER_POLICY);
@@ -150,6 +156,14 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const estimateGeneration = workspace?.generation;
   const estimateSelectedCount = workspace?.selectedCount;
   const profileCatalog = workspace?.profileCatalog;
+  const activeWorkspaceRoot = workspace?.root;
+  const exportTargetHint = exportDestination.settings.enabled && exportDestination.targetPath
+    ? exportDestination.settings.alwaysOverwrite && !exportDestination.overwriteAllowed
+      ? `Cannot replace ${exportDestination.targetPath}: the export folder is inside this workspace. Choose a folder outside it or turn off overwrite to protect source files.`
+      : exportDestination.settings.alwaysOverwrite
+      ? `Each click replaces ${exportDestination.targetPath}.`
+      : `Exports to ${exportDestination.targetPath}; later exports will add a numbered filename.`
+    : null;
   const workspaceRequestId = useRef(0);
   const tokenEstimateSequence = useRef(0);
   const activeTokenEstimateRequest = useRef<string | null>(null);
@@ -566,6 +580,17 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     };
   }, [bridge, loadWorkspacePages, setBusy]);
 
+  useEffect(() => {
+    if (!activeWorkspaceRoot) return;
+    let active = true;
+    void bridge.get_export_destination().then((result) => {
+      if (active) setExportDestination(result);
+    }).catch((cause: unknown) => {
+      if (active) setError(errorMessage(cause, 'Export destination settings could not be loaded.'));
+    });
+    return () => { active = false; };
+  }, [activeWorkspaceRoot, bridge]);
+
   async function runCommand<T>(name: string, action: () => Promise<T>, onSuccess: (result: T) => void, isCurrent: () => boolean = () => true, onDiscard?: (result: T) => void) {
     const requestId = ++busyRequestId.current;
     const requestEpoch = cancellationEpoch.current;
@@ -792,6 +817,18 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     const nextCollapsed = !sidebarCollapsed;
     setSidebarCollapsed(nextCollapsed);
     if (nextCollapsed) setPolicyOpen(false);
+  }
+
+  function chooseExportFolder() {
+    if (busy !== null || workspaceStale || cancelling) return;
+    void runCommand('settings', () => bridge.choose_export_destination_folder(), (result) => {
+      if (result) setExportDestination(result);
+    }, () => !workspaceStaleRef.current);
+  }
+
+  function updateExportDestinationMode(enabled: boolean, alwaysOverwrite: boolean) {
+    if (busy !== null || workspaceStale || cancelling) return;
+    void runCommand('settings', () => bridge.set_export_destination_mode({ enabled, alwaysOverwrite }), setExportDestination, () => !workspaceStaleRef.current);
   }
 
   function exportContent(copied: boolean) {
@@ -1061,6 +1098,23 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
             <div className="settings-icon"><UiIcon icon={IconSettings} /></div>
             <h3>Local workspace settings</h3>
             <p>Workspace path, filters, and file selection choices are saved locally on this device.</p>
+            <section className="export-destination-settings" aria-labelledby="export-destination-heading">
+              <h3 id="export-destination-heading">Export destination</h3>
+              <div className="settings-action">
+                <div><strong>Export folder</strong><small>{exportDestination.settings.folder ?? 'Choose where fixed-folder exports should be saved.'}</small></div>
+                <button className="button button-secondary" onClick={chooseExportFolder} disabled={busy !== null || workspaceStale || cancelling}>Choose export folder</button>
+              </div>
+              <label className="settings-check">
+                <input type="checkbox" aria-label="Always export to this folder" checked={exportDestination.settings.enabled} onChange={(event) => updateExportDestinationMode(event.target.checked, exportDestination.settings.alwaysOverwrite)} disabled={busy !== null || workspaceStale || cancelling || !exportDestination.settings.folder} />
+                <span>Always export to this folder</span>
+              </label>
+              <label className="settings-check">
+                <input type="checkbox" aria-label="Always overwrite this file" checked={exportDestination.settings.alwaysOverwrite} onChange={(event) => updateExportDestinationMode(exportDestination.settings.enabled, event.target.checked)} disabled={!exportDestination.settings.enabled || busy !== null || workspaceStale || cancelling} />
+                <span>Always overwrite this file</span>
+              </label>
+              {exportDestination.settings.enabled && exportDestination.settings.alwaysOverwrite && !exportDestination.overwriteAllowed && <p className="export-destination-warning">Always overwrite requires a folder outside the active workspace. Turn it off to keep numbered exports here.</p>}
+              {exportDestination.settings.enabled && exportDestination.targetPath && <p className="export-target-preview">Current target: <code>{exportDestination.targetPath}</code></p>}
+            </section>
             <section className="profile-settings" aria-labelledby="profile-settings-heading">
               <h3 id="profile-settings-heading">Selection profiles</h3>
               <p>Save filters and file choices for this workspace. Profiles stay on this device.</p>
@@ -1154,7 +1208,10 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
           <div className="export-actions">
             {['restore', 'open', 'refresh', 'browse', 'export', 'copy'].includes(busy ?? '') && <button ref={cancelOperationButtonRef} className="button button-secondary cancel-button" onClick={cancelOperation} disabled={cancelling}>{cancelling ? 'Cancelling…' : 'Cancel operation'}</button>}
             <button className="button button-secondary" onClick={() => exportContent(true)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}><UiIcon icon={IconCopy} size={16} /> Copy context</button>
-            <button className="button button-primary export-button" onClick={() => exportContent(false)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling}>{busy === 'export' ? 'Preparing…' : 'Export Markdown'} <UiIcon icon={IconArrowRight} size={16} /></button>
+            <span className="export-button-wrap">
+              <button className="button button-primary export-button" onClick={() => exportContent(false)} disabled={!workspace || !watcherVerified || workspaceStale || workspace.selectedCount === 0 || busy !== null || cancelling} aria-describedby={exportTargetHint ? 'export-target-tooltip' : undefined}>{busy === 'export' ? 'Preparing…' : 'Export Markdown'} <UiIcon icon={IconArrowRight} size={16} /></button>
+              {exportTargetHint && <span className="export-target-tooltip" role="tooltip" id="export-target-tooltip">{exportTargetHint}</span>}
+            </span>
           </div>
         </footer>
       </div>
