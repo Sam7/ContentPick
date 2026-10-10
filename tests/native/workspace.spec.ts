@@ -874,6 +874,22 @@ test('native workspace layout adapts when the app window is resized', async ({ n
     await expect(page.locator('.refresh-badge')).toHaveText('Watching');
     await page.screenshot({ path: path.resolve(import.meta.dirname, `../../docs/testing/2026-10-10-window-resize-${width}x${height}.png`) });
   }
+
+  await search.fill('file-0599.ts');
+  const sourceRow = page.getByRole('treeitem').filter({ has: page.locator('.entry-name', { hasText: /^src$/ }) });
+  const nestedFile = page.getByRole('button', { name: 'Preview src/file-0599.ts' });
+  const nestedRow = nestedFile.locator('xpath=..');
+  await expect(nestedFile).toBeVisible();
+  const sourceLeft = await sourceRow.locator('.entry-main').evaluate((element) => element.getBoundingClientRect().left);
+  const nestedLeft = await nestedRow.locator('.entry-main').evaluate((element) => element.getBoundingClientRect().left);
+  expect(nestedLeft - sourceLeft).toBeGreaterThanOrEqual(14);
+  await expect(nestedRow.locator('.tree-indent-guides')).toBeVisible();
+  await native.resizeWindow(1536, 1024);
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-tree-hierarchy-1536x1024.png') });
+  await native.resizeWindow(960, 640);
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-tree-hierarchy-960x640.png') });
+  await native.resizeWindow(720, 520);
+  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-tree-hierarchy-720x520.png') });
 });
 
 test('native preview collapses accessibly and restores long-path content without changing selection', async ({ native }) => {

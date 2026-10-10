@@ -436,8 +436,16 @@ test('search reveals nested paths and clearing it restores collapsed ancestors',
 
   await search.fill('Picker');
   await expect(page.getByRole('button', { name: 'Preview src/components/Picker.tsx' })).toBeVisible();
-  await expect(page.getByRole('treeitem').filter({ has: page.getByText('src', { exact: true }) }).first()).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.getByRole('treeitem').filter({ has: page.getByText('components', { exact: true }) }).first()).toHaveAttribute('aria-expanded', 'true');
+  const source = page.getByRole('treeitem').filter({ has: page.locator('.entry-name', { hasText: /^src$/ }) }).first();
+  const components = page.getByRole('treeitem').filter({ has: page.locator('.entry-name', { hasText: /^components$/ }) }).first();
+  const picker = page.getByRole('treeitem').filter({ has: page.locator('.entry-name', { hasText: /^Picker\.tsx$/ }) }).first();
+  await expect(source).toHaveAttribute('aria-expanded', 'true');
+  await expect(components).toHaveAttribute('aria-expanded', 'true');
+  await expect(source.locator('.tree-indent-guides')).toHaveCount(0);
+  const left = async (row: typeof source) => row.locator('.entry-main').evaluate((element) => element.getBoundingClientRect().left);
+  expect(await left(components) - await left(source)).toBeGreaterThanOrEqual(12);
+  expect(await left(picker) - await left(components)).toBeGreaterThanOrEqual(12);
+  await expect(components.locator('.tree-indent-guides')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Collapse src', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Collapse src/components' })).toBeDisabled();
   await expect(selectedCount).toHaveText('3');

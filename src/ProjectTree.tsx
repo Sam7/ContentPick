@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import { IconBan, IconChevronDown, IconChevronRight, IconDotsVertical, IconFileText, IconFolder, IconFolderOpen } from '@tabler/icons-react';
@@ -184,6 +184,8 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
   const popoverRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const isDirectory = entry.kind === 'directory';
+  const depth = entry.path.split('/').length;
+  const visualDepth = Math.min(depth - 1, 6);
   const needsBrowse = isDirectory && !entry.enumerated && entry.reason !== null;
   const folderSizeUnknown = isDirectory && entry.sizePartial && entry.size === 0;
   const sizeTitle = entry.sizePartial
@@ -252,7 +254,8 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
       window.removeEventListener('resize', closeOnResize);
     };
   }, [actionOpen, onAction]);
-  return <><div className={`tree-row ${entry.selected ? 'is-selected' : ''} ${entry.reason ? 'is-muted' : ''}`} role="treeitem" tabIndex={tabStop ? 0 : -1} aria-keyshortcuts="Shift+F10" aria-level={entry.path.split('/').length} aria-posinset={posInSet} aria-setsize={setSize} aria-checked={entry.partial ? 'mixed' : entry.selected} aria-expanded={isDirectory && !needsBrowse ? displayedExpanded : undefined} onKeyDownCapture={onKeyDown} onFocusCapture={onFocus}>
+  return <><div className={`tree-row ${entry.selected ? 'is-selected' : ''} ${entry.reason ? 'is-muted' : ''}`} style={{ '--tree-depth': visualDepth } as CSSProperties} role="treeitem" tabIndex={tabStop ? 0 : -1} aria-keyshortcuts="Shift+F10" aria-level={depth} aria-posinset={posInSet} aria-setsize={setSize} aria-checked={entry.partial ? 'mixed' : entry.selected} aria-expanded={isDirectory && !needsBrowse ? displayedExpanded : undefined} onKeyDownCapture={onKeyDown} onFocusCapture={onFocus}>
+    {visualDepth > 0 && <span className="tree-indent-guides" aria-hidden="true" />}
     {isDirectory && !needsBrowse ? <button className="disclosure" tabIndex={-1} aria-label={`${displayedExpanded ? 'Collapse' : 'Expand'} ${entry.path}`} onClick={onExpand} disabled={searchRevealed} title={searchRevealed ? 'Search is temporarily revealing matching descendants.' : undefined}><UiIcon icon={displayedExpanded ? IconChevronDown : IconChevronRight} size={16} /></button> : <span className="disclosure-spacer" />}
     {checkbox}
     <button className="entry-main" tabIndex={-1} aria-label={entry.kind === 'file' ? `Preview ${entry.path}` : undefined} onClick={onPreview} disabled={entry.kind !== 'file' || previewDisabled}>
