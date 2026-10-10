@@ -1,5 +1,9 @@
 # Reviews
 
+## M5.5.2.6 README product page — 2026-10-10
+
+Refocused the README on the problem, product workflow, current local-first capabilities, honest service limits and the existing public Windows preview. Clarified fixed-folder exports and the opt-in overwrite behavior, and separated the current unsigned `v0.1.0` download from the later planned `0.9` release. The Gemini statement was checked against current official guidance; ChatGPT and Claude links point to their official upload documentation. All relative links resolve; GitHub release and exact installer URLs return 200; Playwright, Tauri and provider links were checked. Direct PowerShell access to OpenAI returned 403, but the current official article opened through the browser research result. `git diff --check` passed. No application code changed. Push and review the rendered GitHub page at normal reading width before closing this slice.
+
 ## M5.5.2.5 fixed export destination — 2026-10-10
 
 Added app-wide fixed-folder and separate opt-in overwrite preferences with a transactional settings v4→v5 migration. The core plans a sanitized `<workspace>.md` name and deterministic collision suffixes; the app uses its existing frozen manifest, watcher checks and transactional destination writer. Save As remains the default. The native folder picker cancellation is exercised on Windows; invalid selection handling leaves persisted settings unchanged. Actual WebView2 coverage checks external-folder repeat exports, suffixing, explicit replacement, target tooltip/focus behavior, restart persistence, and in-workspace numbered exports.
