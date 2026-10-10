@@ -1,5 +1,9 @@
 # Reviews
 
+## M5.5.2.9 GitHub Pages publication — 2026-10-10
+
+The initial deployment failed because the repository had no GitHub Pages site configured. Enabled Pages with `build_type: workflow`, then dispatched the existing workflow on `main`. Run [`38037210788`](https://github.com/Sam7/ContentPick/actions/runs/38037210788) completed successfully. The workflow stages only `docs/index.html` and the reviewed local site assets. Public verification returned HTTP 200 for `https://sam7.github.io/ContentPick/`; the page title and canonical URL match the product site, and its download links resolve to the current public `v0.1.0` Windows preview. Existing responsive Playwright checks and independent visual review are recorded under M5.5.2.9. The `0.9` release is still pending.
+
 ## M5.5.2.6 README product page — 2026-10-10
 
 Refocused the README on the problem, product workflow, current local-first capabilities, honest service limits and the existing public Windows preview. Clarified fixed-folder exports and the opt-in overwrite behavior, and separated the current unsigned `v0.1.0` download from the later planned `0.9` release. The Gemini statement was checked against current official guidance; ChatGPT and Claude links point to their official upload documentation. All relative links resolve; GitHub release and exact installer URLs return 200; Playwright, Tauri and provider links were checked. Direct PowerShell access to OpenAI returned 403, but the current official article opened through the browser research result. `git diff --check` passed. The pushed branch page rendered cleanly at 1280 px (`docs/testing/readme-github-render.png`); independent review found no material copy, accuracy or layout issue. No application code changed.
@@ -371,11 +375,11 @@ Windows `std::fs::canonicalize` can return extended-length paths such as `\\?\C:
 
 Independent Luna review found no material issue. `pnpm test` passed **92 Vitest + 7 script checks**; typecheck, lint, production build and the full actual Windows WebView2 suite passed (**16/16**), including assertions that user-facing paths omit `\\?\`. `git diff --check` passed. No filesystem or Tauri bridge path was rewritten.
 
-## M5.5.2.9 product site candidate — 2026-10-10
+## M5.5.2.9 product site candidate and first deployment attempt — 2026-10-10
 
 The one-page static site and selected local assets were reviewed independently; no material content or layout finding remains. Local Playwright inspection at 1440 px and 390 px confirmed HTTP 200, one H1, title/description, skip-link keyboard focus, no horizontal overflow, broken images, missing anchors or missing alt text, and no page errors. Desktop and mobile screenshots were inspected. The published bundle is under 700 KiB. The README links a dynamic latest-release badge and the product site; both currently describe/target the existing unsigned `v0.1.0` preview accurately.
 
-Pushed `53e57c9` triggered [Pages run `38024732139`](https://github.com/Sam7/ContentPick/actions/runs/38024732139), which failed at `actions/configure-pages@v5` because the repository has no Pages site configured; staging and deployment were skipped and the public URL still returns 404. Official action metadata says first-time enablement requires a token other than `GITHUB_TOKEN`, so the workflow cannot bootstrap the repository setting with its normal token. Configure repository Settings → Pages → Build and deployment source as GitHub Actions, then rerun and verify the live page before closing M5.5.2.9.
+Pushed `53e57c9` triggered [Pages run `38024732139`](https://github.com/Sam7/ContentPick/actions/runs/38024732139), which failed at `actions/configure-pages@v5` because no Pages site was configured; staging and deployment were skipped. This was resolved by enabling the site for workflow publishing and running the workflow successfully; see the [publication verification](#m5529-github-pages-publication--2026-10-10).
 
 ## Frontend CI test timing regression — 2026-10-10
 
