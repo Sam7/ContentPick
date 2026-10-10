@@ -103,7 +103,77 @@ async function availablePort(): Promise<number> {
   return address.port;
 }
 
-async function waitForCdp(port: number, child: ChildProcess): Promise<void> {
+async function captureCdpFailureDiagnostics(port: number, child: ChildProcess, webviewProfile: string): Promise<string> {
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$rootPid = [int]$env:CONTEXTPICK_DIAG_PID
+$port = [int]$env:CONTEXTPICK_DIAG_PORT
+$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine)
+$owned = [System.Collections.Generic.HashSet[int]]::new()
+$null = $owned.Add($rootPid)
+do {
+  $changed = $false
+  foreach ($item in $all) {
+    if ($owned.Contains([int]$item.ParentProcessId) -and $owned.Add([int]$item.ProcessId)) { $changed = $true }
+  }
+} while ($changed)
+$tree = @($all | Where-Object { $owned.Contains([int]$_.ProcessId) })
+$orderedTree = @(
+  $tree | Sort-Object @{ Expression = { if ([int]$_.ProcessId -eq $rootPid) { 0 } elseif ([string]$_.Name -ieq 'msedgewebview2.exe') { 1 } else { 2 } } }, ProcessId
+)
+$processes = @(
+  $orderedTree | Select-Object -First 32 | ForEach-Object {
+    $flags = [System.Collections.Generic.List[string]]::new()
+    $command = [string]$_.CommandLine
+    if ($command -match '--type=([^\s"]+)') { $flags.Add("--type=$($Matches[1])") }
+    if ($command -match '--remote-debugging-port=(\d+)') { $flags.Add("--remote-debugging-port=$($Matches[1])") }
+    if ($command -match '--remote-debugging-address=([^\s"]+)') { $flags.Add("--remote-debugging-address=$($Matches[1])") }
+    if ($command -match '--user-data-dir=') { $flags.Add('--user-data-dir=[present]') }
+    [pscustomobject]@{ pid=[int]$_.ProcessId; parent=[int]$_.ParentProcessId; name=[string]$_.Name; flags=@($flags) }
+  }
+)
+$window = $null
+try {
+  $process = Get-Process -Id $rootPid -ErrorAction Stop
+  $window = [pscustomobject]@{ handle=[string]$process.MainWindowHandle; title=[string]$process.MainWindowTitle }
+} catch { $window = [pscustomobject]@{ error=$_.Exception.GetType().Name } }
+$listeners = @()
+try {
+  $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop | ForEach-Object {
+    $owner = $all | Where-Object { [int]$_.ProcessId -eq [int]$_.OwningProcess } | Select-Object -First 1
+    [pscustomobject]@{ address=[string]$_.LocalAddress; pid=[int]$_.OwningProcess; name=[string]$owner.Name }
+  })
+} catch { }
+$profileExists = Test-Path -LiteralPath $env:CONTEXTPICK_DIAG_PROFILE
+$profileEntryCount = if ($profileExists) { @(Get-ChildItem -LiteralPath $env:CONTEXTPICK_DIAG_PROFILE -Force -ErrorAction SilentlyContinue).Count } else { 0 }
+[pscustomobject]@{ processes=$processes; processesTruncated=($tree.Count -gt $processes.Count); window=$window; listeners=$listeners; webviewProfileExists=$profileExists; webviewProfileTopLevelEntries=$profileEntryCount } | ConvertTo-Json -Compress -Depth 5
+`;
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      timeout: 8_000,
+      maxBuffer: 256_000,
+      env: {
+        ...process.env,
+        CONTEXTPICK_DIAG_PID: String(child.pid ?? 0),
+        CONTEXTPICK_DIAG_PORT: String(port),
+        CONTEXTPICK_DIAG_PROFILE: webviewProfile,
+      },
+    });
+    return stdout.trim().slice(0, 12_000);
+  } catch (error) {
+    return 'Process snapshot unavailable: ' + redactNativeDiagnostics(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function redactNativeDiagnostics(text: string): string {
+  let result = text.replaceAll(tempRoot, '[temp]').replaceAll(repoRoot, '[repo]');
+  const profile = process.env.USERPROFILE;
+  if (profile) result = result.replaceAll(profile, '[user-profile]');
+  return result.slice(-8_000);
+}
+
+async function waitForCdp(port: number, child: ChildProcess, webviewProfile: string, appOutput: () => string): Promise<void> {
   const spawnError = new Promise<never>((_resolve, reject) => child.once('error', reject));
   const readiness = async () => {
     const deadline = Date.now() + 30_000;
@@ -118,7 +188,12 @@ async function waitForCdp(port: number, child: ChildProcess): Promise<void> {
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    throw new Error(`Timed out waiting for the app's loopback WebView2 endpoint: ${String(lastError ?? '')}`);
+    const diagnostics = await captureCdpFailureDiagnostics(port, child, webviewProfile);
+    throw new Error([
+      `Timed out waiting for the app's loopback WebView2 endpoint: ${String(lastError ?? '')}`,
+      `Startup diagnostics (process paths and full command lines omitted; selected WebView2 flags retained): ${diagnostics}`,
+      `Captured app output (bounded): ${redactNativeDiagnostics(appOutput())}`,
+    ].join('\n'));
   };
   await Promise.race([readiness(), spawnError]);
 }
@@ -357,11 +432,12 @@ export const test = base.extend<NativeFixtures>({
       if (browser) await stop();
       const port = await availablePort();
       const startedAt = Date.now();
+      let appOutputTail = '';
       child = spawn(nativeExe, [], {
         cwd: repoRoot,
         shell: false,
         windowsHide: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: {
           ...process.env,
           ...(installedExe ? { CONTEXTPICK_NATIVE_CONFIG_DIR: settingsDir } : { CONTEXTPICK_CONFIG_DIR: config }),
@@ -369,8 +445,13 @@ export const test = base.extend<NativeFixtures>({
           WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}`,
         },
       });
+      const retainOutputTail = (chunk: Buffer) => {
+        appOutputTail = `${appOutputTail}${chunk.toString('utf8')}`.slice(-8_000);
+      };
+      child.stdout?.on('data', retainOutputTail);
+      child.stderr?.on('data', retainOutputTail);
       if (child.pid) memorySampler.start(child.pid, nativeExe);
-      await waitForCdp(port, child);
+      await waitForCdp(port, child, webviewProfile, () => appOutputTail);
       const connectedBrowser = await playwright.chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 10_000 });
       browser = connectedBrowser;
       const context = connectedBrowser.contexts()[0];
