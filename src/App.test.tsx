@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from './App';
@@ -10,7 +10,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe('ContextPick workspace UI', () => {
   it('opens a synthetic workspace and exposes a bounded file preview', async () => {
@@ -1567,14 +1570,22 @@ describe('ContextPick workspace UI', () => {
     };
     render(<App bridge={bridge} fixtureMode />);
     await user.click(screen.getByRole('button', { name: 'Open folder' }));
-    await user.click(screen.getByRole('button', { name: 'Filters' }));
-    await user.click(screen.getByRole('radio', { name: 'Selected extensions' }));
-    await user.click(screen.getByRole('checkbox', { name: '.rs' }));
-    await user.click(screen.getByRole('button', { name: 'Change folder' }));
+    expect(await screen.findByText('/workspace/patchwork')).toBeInTheDocument();
 
-    nextWorkspace.resolve({ ...initial, root: '/workspace/next' });
-    expect(await screen.findByText('/workspace/next')).toBeInTheDocument();
-    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 350)); });
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Selected extensions' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '.rs' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Change folder' }));
+
+    await act(async () => {
+      nextWorkspace.resolve({ ...initial, root: '/workspace/next' });
+      await nextWorkspace.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('/workspace/next')).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(350); });
     expect(submittedPolicies).toEqual([]);
   });
 
