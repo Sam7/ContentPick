@@ -1,12 +1,14 @@
 # ContextPick
 
-### Select code. Export AI context.
+### Your project, condensed into one context file.
 
 [![Latest release](https://img.shields.io/github/v/release/Sam7/ContentPick?display_name=tag&label=latest)](https://github.com/Sam7/ContentPick/releases/latest) · [Visit the ContextPick product site](https://sam7.github.io/ContentPick/) · [Download the current release](https://github.com/Sam7/ContentPick/releases/latest)
 
-Useful project context is scattered across source files, documentation and configuration. Gathering it for an AI assistant can mean opening files, deciding what matters, and attaching them one by one. ContextPick gives you a faster, reviewable way to collect the parts of a local project that matter into one organized Markdown file.
+Useful context is spread across a project’s source files, documentation and configuration. ContextPick lets you choose what matters and condense it into one organized Markdown file, instead of gathering files one by one. It works across large local projects, whether they contain dozens, hundreds or thousands of files.
 
-Choose a project folder, select the relevant files, preview the text, and check the estimated export size and token count. Then copy the context or export it as Markdown for ChatGPT, Gemini, Claude, or another tool that accepts text. You decide what goes in and where it goes next.
+Choose a project folder, review its file tree, preview text, and check estimated export size and token count. Then copy or export one context file for ChatGPT, Claude, Gemini, or another AI tool that accepts text. ContextPick is tool-agnostic: it prepares the project context for the assistant you already use.
+
+![ContextPick open on its own source repository, with a searchable file tree, selected files, a read-only code preview and export estimates](docs/site-assets/contextpick-workspace.png)
 
 ContextPick can save repetitive file-by-file preparation and keep related project material together. It does not choose content for you or promise a better model response. Upload rules, supported file types and context limits vary by service, plan and feature. [Gemini’s standard upload flow currently allows up to 10 files in one prompt, subject to availability, and documents a separate code-folder/repository workflow](https://support.google.com/gemini/answer/14903178?hl=en); check the current [ChatGPT upload guidance](https://help.openai.com/en/articles/8555545-file-uploads-faq) and [Claude document guidance](https://support.anthropic.com/en/articles/8241126-what-kinds-of-documents-can-i-upload-to-claude-ai) for their rules. A Markdown export does not bypass those rules or a model’s context window.
 
