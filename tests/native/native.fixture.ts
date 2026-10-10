@@ -1,7 +1,7 @@
 import { test as base, expect } from '@playwright/test';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import { access, copyFile, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, cp, lstat, mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Browser, Page } from '@playwright/test';
@@ -372,6 +372,25 @@ async function makeSyntheticWorkspace(root: string): Promise<void> {
   }
 }
 
+async function assertNoContextPickProcess(): Promise<void> {
+  const script = String.raw`
+$running = @(Get-CimInstance Win32_Process -Filter "Name='contextpick.exe'")
+if ($running.Count -gt 0) { throw 'Close every ContextPick app instance before running an installed-binary native test.' }
+`;
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 10_000 });
+}
+
+async function assertRegularConfigTree(directory: string): Promise<void> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const child = path.join(directory, entry.name);
+    const info = await lstat(child);
+    if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
+      throw new Error(`Installed-app settings contain a link or special file; refusing to snapshot: ${child}`);
+    }
+    if (info.isDirectory()) await assertRegularConfigTree(child);
+  }
+}
+
 async function makeScaleWorkspace(root: string): Promise<void> {
   const source = path.join(root, 'src');
   const ignored = path.join(root, 'ignored-scale');
@@ -401,16 +420,31 @@ export const test = base.extend<NativeFixtures>({
     const ownedDir = await mkdtemp(path.join(tempRoot, 'contextpick-native-playwright-'));
     const canonicalOwnedDir = await realpath(ownedDir);
     const config = path.join(ownedDir, 'config');
-    const root = path.join(ownedDir, 'workspace');
+    const listingCapturePath = path.join(repoRoot, 'tests', 'native', 'store-listing-assets.spec.ts');
+    const isStoreListingCapture = path.resolve(testInfo.file).toLowerCase() === listingCapturePath.toLowerCase();
+    const requestedWorkspace = isStoreListingCapture ? process.env.CONTEXTPICK_NATIVE_STORE_LISTING_ROOT?.trim() : undefined;
+    const root = requestedWorkspace ? path.resolve(requestedWorkspace) : path.join(ownedDir, 'workspace');
     const webviewProfile = path.join(ownedDir, 'webview2-profile');
     const appDir = path.join(ownedDir, 'app');
     const installedExe = process.env.CONTEXTPICK_NATIVE_EXECUTABLE?.trim();
     const nativeExe = installedExe ? path.resolve(installedExe) : path.join(appDir, 'contextpick.exe');
     const installedConfig = process.env.CONTEXTPICK_NATIVE_CONFIG_DIR?.trim();
     let settingsDir = config;
+    const installedConfigBackup = path.join(ownedDir, 'installed-config-backup');
+    let installedConfigExisted = false;
+    let installedConfigSnapshotReady = false;
     if (installedExe) {
       if (!installedConfig) throw new Error('CONTEXTPICK_NATIVE_CONFIG_DIR is required when testing an installed app.');
       settingsDir = path.resolve(installedConfig);
+      const appDataDir = process.env.APPDATA?.trim();
+      if (!appDataDir || settingsDir.toLowerCase() !== path.resolve(appDataDir, 'dev.contextpick.desktop').toLowerCase()) {
+        throw new Error('Installed-app tests may only snapshot and restore the current user’s ContextPick app config directory.');
+      }
+    }
+    if (requestedWorkspace) {
+      if (!installedExe) throw new Error('A real workspace root is permitted only with an explicitly installed executable.');
+      const [requestedRealPath, repoRealPath] = await Promise.all([realpath(root), realpath(repoRoot)]);
+      if (!requestedRealPath || requestedRealPath !== repoRealPath) throw new Error('The real-workspace fixture is restricted to the checked-out ContextPick repository.');
     }
     let child: ChildProcess | undefined;
     let browser: Browser | undefined;
@@ -418,6 +452,7 @@ export const test = base.extend<NativeFixtures>({
     let startupMs = 0;
     const memorySampler = createProcessTreeSampler();
     let cleanupViolation: string | undefined;
+    let testFailure: unknown;
 
     const stop = async () => {
       await browser?.close().catch(() => undefined);
@@ -460,7 +495,8 @@ export const test = base.extend<NativeFixtures>({
       page = context.pages()[0];
       if (!page) throw new Error('The native WebView2 page did not appear.');
       await page.locator('.workspace-path').waitFor({ state: 'visible', timeout: 30_000 });
-      await expect(page.locator('.workspace-path')).toContainText(path.basename(ownedDir));
+      if (requestedWorkspace) await expect(page.locator('.workspace-path')).toHaveAttribute('title', root);
+      else await expect(page.locator('.workspace-path')).toContainText(path.basename(ownedDir));
       await expect(page.getByRole('tree', { name: 'Workspace files' })).toBeVisible();
       await expect(page.locator('.panel-heading p').first()).toContainText('items discovered', { timeout: 60_000 });
       if (nativeScale) await expect(page.locator('.panel-heading p').first()).toHaveText('20004 items discovered', { timeout: 120_000 });
@@ -478,7 +514,24 @@ export const test = base.extend<NativeFixtures>({
 
     try {
       if (process.platform === 'win32') {
-        await Promise.all([mkdir(settingsDir, { recursive: true }), mkdir(root), mkdir(webviewProfile), mkdir(appDir)]);
+        if (installedExe) {
+          await assertNoContextPickProcess();
+          let configInfo;
+          try {
+            configInfo = await lstat(settingsDir);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') installedConfigSnapshotReady = true;
+            else throw error;
+          }
+          if (configInfo) {
+            if (!configInfo.isDirectory() || configInfo.isSymbolicLink()) throw new Error('Installed-app settings must be a regular directory before testing.');
+            await assertRegularConfigTree(settingsDir);
+            await cp(settingsDir, installedConfigBackup, { recursive: true, verbatimSymlinks: true, errorOnExist: true });
+            installedConfigExisted = true;
+            installedConfigSnapshotReady = true;
+          }
+        }
+        await Promise.all([mkdir(settingsDir, { recursive: true }), requestedWorkspace ? Promise.resolve() : mkdir(root), mkdir(webviewProfile), mkdir(appDir)]);
         if (installedExe) {
           await access(nativeExe);
         } else {
@@ -486,8 +539,10 @@ export const test = base.extend<NativeFixtures>({
           await copyFile(builtNativeExe, nativeExe);
           await copyFile(builtWebViewLoader, path.join(appDir, 'WebView2Loader.dll'));
         }
-        if (nativeScale) await makeScaleWorkspace(root);
-        else await makeSyntheticWorkspace(root);
+        if (!requestedWorkspace) {
+          if (nativeScale) await makeScaleWorkspace(root);
+          else await makeSyntheticWorkspace(root);
+        }
         const preferences = { version: 2, recentRoot: root, workspaces: {} };
         await writeFile(path.join(settingsDir, 'settings.json'), JSON.stringify(preferences), 'utf8');
         await launch();
@@ -512,12 +567,25 @@ export const test = base.extend<NativeFixtures>({
         if (!child?.pid) throw new Error('Native test process is not running.');
         await setNativeWindowSize(child.pid, nativeExe, width, height);
       }, stop, installLegacySettings, readSettings, memoryReport: memorySampler.report });
+    } catch (error) {
+      testFailure = error;
     } finally {
       let stopFailure: string | undefined;
       try {
         await stop();
       } catch (error) {
         stopFailure = error instanceof Error ? error.message : String(error);
+      }
+      if (installedExe && installedConfigSnapshotReady && !stopFailure) {
+        try {
+          await assertNoContextPickProcess();
+          await rm(settingsDir, { recursive: true, force: true });
+          if (installedConfigExisted) await cp(installedConfigBackup, settingsDir, { recursive: true, verbatimSymlinks: true, errorOnExist: true });
+        } catch (error) {
+          stopFailure = `Could not restore installed-app settings after the test: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      } else if (installedExe && installedConfigSnapshotReady && stopFailure) {
+        stopFailure = `Could not restore installed-app settings because native process cleanup failed; recovery snapshot retained at ${installedConfigBackup}: ${stopFailure}`;
       }
       const resolved = await realpath(ownedDir).catch(() => '');
       const withinTemp = resolved.startsWith(`${tempRoot}${path.sep}`);
@@ -526,11 +594,15 @@ export const test = base.extend<NativeFixtures>({
         await rm(canonicalOwnedDir, { recursive: true, force: true });
       } else {
         cleanupViolation = stopFailure
-          ? `Refusing to remove the native test directory because process cleanup failed: ${stopFailure}`
+          ? `Refusing to remove the native test directory because cleanup failed: ${stopFailure}`
           : `Refusing to remove unexpected native test directory: ${resolved}`;
       }
     }
-    if (cleanupViolation) throw new Error(cleanupViolation);
+    if (cleanupViolation) {
+      const originalFailure = testFailure instanceof Error ? ` Original test failure: ${testFailure.message}` : '';
+      throw new Error(`${cleanupViolation}${originalFailure}`);
+    }
+    if (testFailure) throw testFailure;
   },
 });
 

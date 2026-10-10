@@ -2,6 +2,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/native',
+  outputDir: process.env.CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR ?? 'test-results',
   testMatch: '**/*.spec.ts',
   testIgnore: ['**/*.scale.spec.ts', '**/installed-smoke.spec.ts'],
   fullyParallel: false,

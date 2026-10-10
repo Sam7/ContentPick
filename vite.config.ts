@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  cacheDir: process.env.CONTEXTPICK_VITE_CACHE_DIR || undefined,
   server: {
     port: 1420,
     strictPort: true,

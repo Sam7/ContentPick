@@ -6,6 +6,13 @@ import { promisify } from 'node:util';
 import { displayPath } from '../../src/pathDisplay';
 
 const execFileAsync = promisify(execFile);
+const defaultScreenshotDirectory = path.resolve(import.meta.dirname, '../../docs/testing');
+
+async function captureScreenshot(page: { screenshot: (options: { path: string }) => Promise<unknown> }, name: string): Promise<void> {
+  const directory = process.env.CONTEXTPICK_SCREENSHOT_DIR ?? defaultScreenshotDirectory;
+  await mkdir(directory, { recursive: true });
+  await page.screenshot({ path: path.join(directory, name) });
+}
 
 async function setClipboard(text: string): Promise<void> {
   const encoded = Buffer.from(text, 'utf8').toString('base64');
@@ -22,6 +29,7 @@ async function completeNativeDialog(title: string, text?: string, confirmKeys = 
   const escapedText = Array.from(text ?? '', (character) => '+^%~(){}[]'.includes(character) ? `{${character}}` : character).join('');
   const sendBase64 = Buffer.from(escapedText, 'utf8').toString('base64');
   const confirmBase64 = Buffer.from(confirmKeys, 'utf8').toString('base64');
+  const installedExecutableBase64 = Buffer.from(process.env.CONTEXTPICK_NATIVE_EXECUTABLE?.trim() ?? '', 'utf8').toString('base64');
   const script = `
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -51,10 +59,12 @@ public static class ContextPickNativeDialog {
   [StructLayout(LayoutKind.Sequential)] public struct HARDWAREINPUT { public uint Message; public ushort ParameterLow; public ushort ParameterHigh; }
   [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
   [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc callback, IntPtr parameter);
+  [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr dialog, IntPtr id);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 }
 '@
 $expected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${titleBase64}'))
+$expectedExe = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${installedExecutableBase64}'))
 $send = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${sendBase64}'))
 $confirmation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${confirmBase64}'))
 $deadline = [DateTime]::UtcNow.AddSeconds(12)
@@ -71,7 +81,13 @@ do {
     $owner = [uint32]0
     [void][ContextPickNativeDialog]::GetWindowThreadProcessId($window, [ref]$owner)
     $process = Get-Process -Id $owner -ErrorAction SilentlyContinue
-    if ($process -and $process.ProcessName -ieq 'contextpick' -and [IO.Path]::GetFullPath($process.Path).StartsWith($fixturePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    $processPath = if ($process) { [IO.Path]::GetFullPath($process.Path) } else { '' }
+    $isExpectedProcess = if ([string]::IsNullOrWhiteSpace($expectedExe)) {
+      $processPath.StartsWith($fixturePrefix, [StringComparison]::OrdinalIgnoreCase)
+    } else {
+      $processPath.Equals([IO.Path]::GetFullPath($expectedExe), [StringComparison]::OrdinalIgnoreCase)
+    }
+    if ($process -and $process.ProcessName -ieq 'contextpick' -and $isExpectedProcess) {
       [ContextPickNativeDialog]::FoundWindow = $window
       [ContextPickNativeDialog]::FoundProcess = $owner
       return $false
@@ -110,11 +126,19 @@ $buffer = [Text.StringBuilder]::new(512)
 $actual = $buffer.ToString()
 if ($foreground -ne $dialog -or $foregroundPid -ne $dialogProcess -or $actual.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "Refusing to send keys: dialog HWND=$dialog PID=$dialogProcess; foreground HWND=$foreground PID=$foregroundPid title='$actual'; SetForegroundWindow=$setResult SendInput=$sent." }
 $window = $dialog
-if ($send.Length -gt 0) {
+if ($send.Length -gt 0 -and $confirmation -ne 'UIA:SELECT_FOLDER') {
   [Windows.Forms.SendKeys]::SendWait('^a')
   [Windows.Forms.SendKeys]::SendWait($send)
 }
-if ($confirmation -eq 'UIA:OK') {
+if ($confirmation -eq 'UIA:SELECT_FOLDER') {
+  [Windows.Forms.SendKeys]::SendWait('^l')
+  [Windows.Forms.SendKeys]::SendWait($send)
+  [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+  Start-Sleep -Milliseconds 500
+  $selectFolder = [ContextPickNativeDialog]::GetDlgItem($dialog, [IntPtr]1)
+  if ($selectFolder -eq [IntPtr]::Zero) { throw 'Folder picker did not expose its Select Folder action.' }
+  [void][ContextPickNativeDialog]::SendMessage($selectFolder, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+} elseif ($confirmation -eq 'UIA:OK') {
   $controls = [System.Collections.Generic.List[object]]::new()
   $callback = [ContextPickNativeDialog+EnumChildProc] {
     param($child, $parameter)
@@ -157,7 +181,7 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await expect(filterEditor).toBeVisible();
   expect(await filterEditor.evaluate((editor) => editor.closest('aside') !== null)).toBe(false);
   await expect(page.getByRole('tree', { name: 'Workspace files' })).toHaveCount(0);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filters.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-filters.png');
   const gitignore = page.getByRole('checkbox', { name: 'Respect .gitignore' });
   await gitignore.uncheck();
   await expect(selected).toHaveText('603');
@@ -174,9 +198,9 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await search.fill('generated.ts');
   const ignoredFile = page.getByRole('button', { name: 'Preview dist/deep/generated.ts' });
   await expect(ignoredFile).toBeVisible();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-ignored-browsed.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-ignored-browsed.png');
   await page.getByRole('button', { name: 'More actions for dist/deep/generated.ts' }).click();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-row-actions.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-row-actions.png');
   await page.getByRole('button', { name: 'Force include' }).click();
   await expect(page.getByText('Override')).toBeVisible();
   await expect(selected).toHaveText('602');
@@ -187,7 +211,7 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await page.getByRole('button', { name: 'Copy context' }).click();
   await expect(page.getByRole('status')).toContainText(/Copied · 601 files · \d+(?:\.\d+)? KB/);
   await expect(page.getByRole('alert')).toHaveCount(0);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-6-native-copy.png') });
+  await captureScreenshot(page, '2026-10-09-m35-6-native-copy.png');
 
   await native.stop();
   page = await native.launch();
@@ -203,6 +227,36 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await expect(page.getByRole('button', { name: 'Preview dist/deep/generated.ts' })).toHaveCount(0);
 });
 
+test('native app exports a selected workspace through the operating system save picker', async ({ native }) => {
+  const { page, root } = native;
+  const output = path.join(path.dirname(root), 'store-package-export.md');
+  await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Export Markdown' }).click();
+  await completeNativeDialog('Save', output);
+  await expect(page.getByRole('status')).toContainText('Export ready · 602 files', { timeout: 30_000 });
+  const exported = await readFile(output, 'utf8');
+  expect(exported).toContain('# ContextPick export');
+  expect(exported).toContain('export const value599 = 599;');
+  expect(exported).not.toContain('generated = true');
+});
+
+test('native app changes workspaces through the operating system folder picker', async ({ native }) => {
+  const { page, root } = native;
+  const secondRoot = path.join(path.dirname(root), 'second-sample-project');
+  await mkdir(path.join(secondRoot, 'src'), { recursive: true });
+  await writeFile(path.join(secondRoot, 'README.md'), '# Second sample project\n', 'utf8');
+  await writeFile(path.join(secondRoot, 'src', 'entry.ts'), 'export const storePicker = true;\n', 'utf8');
+
+  await page.getByRole('button', { name: 'Change folder' }).click();
+  await completeNativeDialog('Select Folder', secondRoot, 'UIA:SELECT_FOLDER');
+  await expect(page.locator('.workspace-path')).toHaveAttribute('title', secondRoot, { timeout: 30_000 });
+  await expect(page.locator('.panel-heading p').first()).toHaveText('3 items discovered', { timeout: 30_000 });
+  await page.getByRole('button', { name: 'Expand src', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Preview src/entry.ts' })).toBeVisible();
+  await page.getByRole('button', { name: 'Preview src/entry.ts' }).click();
+  await expect(page.getByText('export const storePicker = true;')).toBeVisible();
+});
+
 test('native selection profiles load and persist across restart', async ({ native }, testInfo) => {
   let page = native.page;
   const rootBeforeLoad = await page.locator('.workspace-path').getAttribute('title');
@@ -214,7 +268,7 @@ test('native selection profiles load and persist across restart', async ({ nativ
 
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('.token-metric strong')).not.toHaveText('Calculating...', { timeout: 10_000 });
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-settings.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-settings.png');
   await native.resizeWindow(720, 520);
   await expect(page.locator('.export-bar')).toBeInViewport();
   const settingsHeadingBounds = await page.locator('.file-panel .panel-heading > div:first-child').boundingBox();
@@ -222,7 +276,7 @@ test('native selection profiles load and persist across restart', async ({ nativ
   expect(settingsHeadingBounds).not.toBeNull();
   expect(settingsBodyBounds).not.toBeNull();
   expect(Math.abs(settingsHeadingBounds!.x - settingsBodyBounds!.x)).toBeLessThanOrEqual(1);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-settings-720x520.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-settings-720x520.png');
   await native.resizeWindow(1536, 1024);
   await page.getByRole('textbox', { name: 'New profile name' }).fill('Baseline');
   await page.getByRole('button', { name: 'Save as profile' }).click();
@@ -303,7 +357,7 @@ test('native fixed-folder export persists settings, suffixes collisions, and ove
   await expect(fixedFolder).toBeChecked();
   await expect(page.locator('.export-destination-settings')).not.toContainText('\\\\?\\');
   await native.resizeWindow(1536, 1024);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-export-destination.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-export-destination.png');
   const output = path.join(persistedFolder, `${path.basename(native.root)}.md`);
   const displayedOutput = displayPath(output);
   await page.getByRole('button', { name: 'All' }).click();
@@ -412,7 +466,7 @@ test('native sensitive-file confirmation gates copy and export and rejects stale
   await expect(dialog.getByText('.env.local')).toBeVisible();
   await expect(dialog.getByText('Environment file')).toBeVisible();
   await expect(dialog.getByText(/file contents are not scanned/i)).toBeVisible();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m54-sensitive-confirmation-720x520.png') });
+  await captureScreenshot(page, '2026-10-09-m54-sensitive-confirmation-720x520.png');
   await dialog.getByRole('button', { name: 'Cancel Copy' }).click();
   await expect(dialog).toHaveCount(0);
   expect(await readClipboard()).toBe(sentinelClipboard);
@@ -585,7 +639,7 @@ test('native token estimates retotal selections, reuse unchanged files, and inva
   const afterRestart = await readyCount();
   expect(afterRestart).toBe(beforeRestart);
   await cacheProof(6, 602, 0);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m45-token-estimate-native.png') });
+  await captureScreenshot(page, '2026-10-09-m45-token-estimate-native.png');
 });
 
 test('native window focus regain revalidates the active workspace exactly once', async ({ native }) => {
@@ -603,7 +657,7 @@ test('native window focus regain revalidates the active workspace exactly once',
   await expect.poll(async () => Number(await workbench.getAttribute('data-workspace-generation'))).toBe(initialGeneration + 1);
   await expect(page.getByText('Watching', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m4-3-focus-recovered.png') });
+  await captureScreenshot(page, '2026-10-09-m4-3-focus-recovered.png');
 });
 
 test('native watcher automatically reconciles a burst of edits, rename intent, and gitignore changes', async ({ native }) => {
@@ -633,7 +687,7 @@ test('native watcher automatically reconciles a burst of edits, rename intent, a
   await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('button', { name: 'Copy context' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeDisabled();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m4-2-watcher-stale.png') });
+  await captureScreenshot(page, '2026-10-09-m4-2-watcher-stale.png');
 
   // No manual Refresh: require the watcher-driven reconciliation to reach a fresh snapshot.
   await expect(page.getByText('Watching', { exact: true })).toBeVisible({ timeout: 15_000 });
@@ -650,7 +704,7 @@ test('native watcher automatically reconciles a burst of edits, rename intent, a
   await search.fill('renamed.rs');
   await expect(page.getByRole('button', { name: 'Copy context' })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m4-2-watcher-fresh.png') });
+  await captureScreenshot(page, '2026-10-09-m4-2-watcher-fresh.png');
   await search.clear();
   await expect(selected).toHaveText('601');
 
@@ -798,7 +852,7 @@ test('native startup safely resets legacy filters and reports the verified setti
   await expect(page.getByRole('textbox', { name: /path/i })).toHaveCount(0);
   await page.getByRole('radio', { name: 'Selected extensions' }).check();
   await expect(page.getByText('No extensions selected, so no files are eligible.')).toBeVisible();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-selected-extensions.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-selected-extensions.png');
   const typescript = page.getByRole('checkbox', { name: '.ts', exact: true });
   await typescript.check();
   await expect(page.locator('.metric-primary strong')).not.toHaveText('0');
@@ -812,16 +866,16 @@ test('native startup safely resets legacy filters and reports the verified setti
   await expect(filters).toBeVisible();
   expect(await filters.evaluate((editor) => editor.closest('aside') !== null)).toBe(false);
   await expect(page.getByRole('heading', { name: 'Filters' })).toBeVisible();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-migrated.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-filter-settings-migrated.png');
   await page.setViewportSize({ width: 720, height: 520 });
   await expect(filters).toBeVisible();
   await expect(page.locator('.export-bar')).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-720x520.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-filter-settings-720x520.png');
   const reset = filters.getByRole('button', { name: 'Reset filters' });
   await reset.scrollIntoViewIfNeeded();
   await expect(reset).toBeInViewport();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-filter-settings-720x520-scrolled.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-filter-settings-720x520-scrolled.png');
 
   const settings = await native.readSettings();
   expect(settings.version).toBe(5);
@@ -838,7 +892,7 @@ test('native sidebar projections remain truthful and usable at standard and mini
   const page = native.page;
   const selectedCount = page.locator('.metric-primary strong');
   const views = page.getByRole('navigation', { name: 'Workspace views' });
-  const screenshot = (name: string) => page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing', name) });
+  const screenshot = (name: string) => captureScreenshot(page, name);
 
   await page.setViewportSize({ width: 1536, height: 1024 });
   await expect(selectedCount).toHaveText('602');
@@ -995,7 +1049,7 @@ test('native workspace layout adapts when the app window is resized', async ({ n
     expect(layout.footer.bottom).toBeLessThanOrEqual(layout.viewportHeight + 1);
     await expect(page.locator('.live-region')).toBeEmpty();
     await expect(page.locator('.refresh-badge')).toHaveText('Watching');
-    await page.screenshot({ path: path.resolve(import.meta.dirname, `../../docs/testing/2026-10-10-window-resize-${width}x${height}.png`) });
+    await captureScreenshot(page, `2026-10-10-window-resize-${width}x${height}.png`);
   }
 
   await search.fill('file-0599.ts');
@@ -1008,11 +1062,11 @@ test('native workspace layout adapts when the app window is resized', async ({ n
   expect(nestedLeft - sourceLeft).toBeGreaterThanOrEqual(14);
   await expect(nestedRow.locator('.tree-indent-guides')).toBeVisible();
   await native.resizeWindow(1536, 1024);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-tree-hierarchy-1536x1024.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-tree-hierarchy-1536x1024.png');
   await native.resizeWindow(960, 640);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-tree-hierarchy-960x640.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-tree-hierarchy-960x640.png');
   await native.resizeWindow(720, 520);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-tree-hierarchy-720x520.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-tree-hierarchy-720x520.png');
 });
 
 test('native preview collapses accessibly and restores long-path content without changing selection', async ({ native }) => {
@@ -1065,7 +1119,7 @@ test('native preview collapses accessibly and restores long-path content without
   let draggedWidth = Number(await splitter.getAttribute('aria-valuenow'));
   expect(draggedWidth).toBeGreaterThan(32);
   expect(draggedWidth).toBeLessThanOrEqual(50);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-resizable.png') });
+  await captureScreenshot(page, '2026-10-09-m35-5-native-preview-resizable.png');
 
   const search = page.getByRole('textbox', { name: 'Search files' });
   await search.fill('long-preview.ts');
@@ -1089,17 +1143,17 @@ test('native preview collapses accessibly and restores long-path content without
   expect(await page.locator('.preview-panel').evaluate((panel) => panel.scrollWidth <= panel.clientWidth)).toBe(true);
   await expect(page.locator('.metric-primary strong')).toHaveText('603');
   await page.setViewportSize({ width: 1536, height: 1024 });
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-long-path.png') });
+  await captureScreenshot(page, '2026-10-09-m35-5-native-preview-long-path.png');
   await page.setViewportSize({ width: 1200, height: 800 });
   await expect(page.locator('.export-bar')).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1200);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-1200x800.png') });
+  await captureScreenshot(page, '2026-10-09-m35-5-native-preview-1200x800.png');
 
   const views = page.getByRole('navigation', { name: 'Workspace views' });
   await views.getByRole('button', { name: 'Selected' }).click();
   await expect(page.getByRole('button', { name: `Preview ${relativePath}` })).toBeVisible();
   await expect(page.locator('.metric-primary strong')).toHaveText('603');
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-selected.png') });
+  await captureScreenshot(page, '2026-10-09-m35-5-native-preview-selected.png');
   await search.clear();
   await views.getByRole('button', { name: 'Ignored' }).click();
   await expect(views).toContainText('1 folders not browsed');
@@ -1110,7 +1164,7 @@ test('native preview collapses accessibly and restores long-path content without
   await search.fill('generated.ts');
   await expect(page.getByRole('button', { name: 'Preview dist/deep/generated.ts' })).toBeVisible();
   await expect(page.locator('.metric-primary strong')).toHaveText('603');
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-ignored.png') });
+  await captureScreenshot(page, '2026-10-09-m35-5-native-preview-ignored.png');
   await views.getByRole('button', { name: 'All' }).click();
   await search.fill('long-preview.ts');
   const longFile = page.getByRole('button', { name: `Preview ${relativePath}` });
@@ -1139,7 +1193,7 @@ test('native preview collapses accessibly and restores long-path content without
   expect(await page.locator('.code-preview').evaluate((panel) => panel.getBoundingClientRect().height)).toBeGreaterThan(80);
   await expect(page.locator('.export-bar')).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m35-5-native-preview-resizable-720x520.png') });
+  await captureScreenshot(page, '2026-10-09-m35-5-native-preview-resizable-720x520.png');
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('Shift+ArrowLeft');
   await page.keyboard.press('ArrowLeft');
@@ -1166,7 +1220,7 @@ test('native preview collapses accessibly and restores long-path content without
   await expect(expand).toBeFocused();
   await expect(page.getByRole('tree', { name: 'Workspace files' })).toBeVisible();
   await expect(page.locator('.metric-primary strong')).toHaveText('603');
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-preview-collapsed.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-preview-collapsed.png');
 
   await page.setViewportSize({ width: 720, height: 520 });
   await expect(page.locator('.export-bar')).toBeInViewport();
@@ -1194,12 +1248,12 @@ test('native preview collapses accessibly and restores long-path content without
   await assertNativeCollapsedPreviewIsReachable();
   await page.getByRole('button', { name: 'Collapse sidebar' }).click();
   await assertNativeCollapsedPreviewIsReachable();
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-preview-sidebar-collapsed-720x520.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-preview-sidebar-collapsed-720x520.png');
   await page.getByRole('button', { name: 'Expand sidebar' }).click();
   await expect(page.getByRole('button', { name: 'Expand preview' })).toBeVisible();
   await expect(page.getByRole('separator', { name: 'File preview' })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(720);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-preview-collapsed-720x520.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-preview-collapsed-720x520.png');
 
   await page.getByRole('button', { name: 'Expand preview' }).focus();
   await page.keyboard.press('Enter');
@@ -1210,7 +1264,7 @@ test('native preview collapses accessibly and restores long-path content without
   await expect(page.getByText('export const longPath = true;')).toBeVisible();
   expect(await page.locator('.preview-panel').evaluate((panel) => panel.scrollWidth <= panel.clientWidth)).toBe(true);
   await expect(page.locator('.metric-primary strong')).toHaveText('603');
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-preview-open-720x520.png') });
+  await captureScreenshot(page, '2026-10-10-design-review-preview-open-720x520.png');
 });
 
 test('native watcher reconciles a deleted source before allowing copy again', async ({ native }) => {
@@ -1225,5 +1279,5 @@ test('native watcher reconciles a deleted source before allowing copy again', as
   await expect(page.getByText('Watching', { exact: true })).toBeVisible();
   await expect(page.locator('.metric-primary strong')).toHaveText('601');
   await expect(page.getByRole('alert')).toHaveCount(0);
-  await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-09-m4-1-deleted-source-reconciled.png') });
+  await captureScreenshot(page, '2026-10-09-m4-1-deleted-source-reconciled.png');
 });
