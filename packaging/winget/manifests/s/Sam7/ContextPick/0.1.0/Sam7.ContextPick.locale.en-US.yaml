@@ -3,7 +3,7 @@
 PackageIdentifier: Sam7.ContextPick
 PackageVersion: 0.1.0
 PackageLocale: en-US
-Publisher: Sam7
+Publisher: contextpick
 PackageName: ContextPick
 License: MIT
 ShortDescription: Select project files and export context for AI tools.
