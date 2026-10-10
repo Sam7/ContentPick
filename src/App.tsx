@@ -7,6 +7,7 @@ import { WorkspaceSidebar } from './WorkspaceSidebar';
 import { WorkspaceFilters } from './WorkspaceFilters';
 import { formatBytes } from './format';
 import { UiIcon } from './UiIcon';
+import { displayPath } from './pathDisplay';
 import { projectEntries, type WorkspaceFileView } from './workspaceViews';
 import './app.css';
 
@@ -47,7 +48,7 @@ function errorMessage(cause: unknown, fallback: string): string {
 
 function exportSummary(result: ExportResult, copied: boolean): string {
   const action = copied ? 'Copied' : 'Export ready';
-  const destination = !copied && result.destination ? ` · ${result.destination}` : '';
+  const destination = !copied && result.destination ? ` · ${displayPath(result.destination)}` : '';
   return `${action} · ${result.files} files · ${formatBytes(result.bytes)}${destination}`;
 }
 
@@ -159,10 +160,10 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   const activeWorkspaceRoot = workspace?.root;
   const exportTargetHint = exportDestination.settings.enabled && exportDestination.targetPath
     ? exportDestination.settings.alwaysOverwrite && !exportDestination.overwriteAllowed
-      ? `Cannot replace ${exportDestination.targetPath}: the export folder is inside this workspace. Choose a folder outside it or turn off overwrite to protect source files.`
+      ? `Cannot replace ${displayPath(exportDestination.targetPath)}: the export folder is inside this workspace. Choose a folder outside it or turn off overwrite to protect source files.`
       : exportDestination.settings.alwaysOverwrite
-      ? `Each click replaces ${exportDestination.targetPath}.`
-      : `Exports to ${exportDestination.targetPath}; later exports will add a numbered filename.`
+      ? `Each click replaces ${displayPath(exportDestination.targetPath)}.`
+      : `Exports to ${displayPath(exportDestination.targetPath)}; later exports will add a numbered filename.`
     : null;
   const workspaceRequestId = useRef(0);
   const tokenEstimateSequence = useRef(0);
@@ -1101,7 +1102,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
             <section className="export-destination-settings" aria-labelledby="export-destination-heading">
               <h3 id="export-destination-heading">Export destination</h3>
               <div className="settings-action">
-                <div><strong>Export folder</strong><small>{exportDestination.settings.folder ?? 'Choose where fixed-folder exports should be saved.'}</small></div>
+                <div><strong>Export folder</strong><small>{exportDestination.settings.folder ? displayPath(exportDestination.settings.folder) : 'Choose where fixed-folder exports should be saved.'}</small></div>
                 <button className="button button-secondary" onClick={chooseExportFolder} disabled={busy !== null || workspaceStale || cancelling}>Choose export folder</button>
               </div>
               <label className="settings-check">
@@ -1113,7 +1114,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
                 <span>Always overwrite this file</span>
               </label>
               {exportDestination.settings.enabled && exportDestination.settings.alwaysOverwrite && !exportDestination.overwriteAllowed && <p className="export-destination-warning">Always overwrite requires a folder outside the active workspace. Turn it off to keep numbered exports here.</p>}
-              {exportDestination.settings.enabled && exportDestination.targetPath && <p className="export-target-preview">Current target: <code>{exportDestination.targetPath}</code></p>}
+              {exportDestination.settings.enabled && exportDestination.targetPath && <p className="export-target-preview">Current target: <code>{displayPath(exportDestination.targetPath)}</code></p>}
             </section>
             <section className="profile-settings" aria-labelledby="profile-settings-heading">
               <h3 id="profile-settings-heading">Selection profiles</h3>

@@ -1,6 +1,7 @@
 import brandLogoUrl from '../docs/design/ContextPickLogo.svg?url';
 import { IconFolderOpen, IconHome, IconRefresh } from '@tabler/icons-react';
 import { UiIcon } from './UiIcon';
+import { displayPath } from './pathDisplay';
 
 type WorkspaceToolbarProps = {
   root: string | null;
@@ -17,12 +18,13 @@ export function WorkspaceToolbar({
   onRefresh,
   onOpen,
 }: WorkspaceToolbarProps) {
+  const visibleRoot = root ? displayPath(root) : null;
   return (
     <header className="topbar workspace-toolbar" aria-label="Workspace toolbar">
       <div className="brand-lockup"><img className="brand-logo" src={brandLogoUrl} alt="ContextPick" /></div>
       <div className="workspace-location" role="group" aria-label="Current workspace">
         <span className="location-icon"><UiIcon icon={IconHome} /></span>
-        <span className={root ? 'workspace-path' : 'workspace-path workspace-empty'} title={root ?? 'No folder open'}>{root ?? 'No folder open'}</span>
+        <span className={root ? 'workspace-path' : 'workspace-path workspace-empty'} title={visibleRoot ?? 'No folder open'}>{visibleRoot ?? 'No folder open'}</span>
       </div>
       <div className="workspace-actions">
         <button className="button button-secondary" onClick={onRefresh} disabled={refreshDisabled}>

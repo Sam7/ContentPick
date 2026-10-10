@@ -3,6 +3,7 @@ import { access, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/prom
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { displayPath } from '../../src/pathDisplay';
 
 const execFileAsync = promisify(execFile);
 
@@ -300,21 +301,24 @@ test('native fixed-folder export persists settings, suffixes collisions, and ove
   await expect(overwrite).toBeDisabled();
   await fixedFolder.click();
   await expect(fixedFolder).toBeChecked();
+  await expect(page.locator('.export-destination-settings')).not.toContainText('\\\\?\\');
   await native.resizeWindow(1536, 1024);
   await page.screenshot({ path: path.resolve(import.meta.dirname, '../../docs/testing/2026-10-10-design-review-export-destination.png') });
   const output = path.join(persistedFolder, `${path.basename(native.root)}.md`);
+  const displayedOutput = displayPath(output);
   await page.getByRole('button', { name: 'All' }).click();
   const exportButton = page.getByRole('button', { name: 'Export Markdown' });
   await exportButton.focus();
-  await expect(page.getByRole('tooltip')).toContainText(output);
+  await expect(page.getByRole('tooltip')).toContainText(displayedOutput);
   await expect(page.getByRole('tooltip')).toContainText('numbered filename');
 
   await exportButton.click();
   await expect(page.getByRole('status')).toContainText(`Export ready · 602 files`, { timeout: 30_000 });
   expect(await readFile(output, 'utf8')).toContain('export const value599 = 599;');
   const secondOutput = path.join(persistedFolder, `${path.basename(native.root)} (2).md`);
+  const displayedSecondOutput = displayPath(secondOutput);
   await page.getByRole('button', { name: 'Export Markdown' }).click();
-  await expect(page.getByRole('status')).toContainText(secondOutput, { timeout: 30_000 });
+  await expect(page.getByRole('status')).toContainText(displayedSecondOutput, { timeout: 30_000 });
   await expect.poll(async () => (await readFile(secondOutput)).length).toBeGreaterThan(100);
 
   await writeFile(output, 'PREVIOUS_EXPORT_SENTINEL', 'utf8');
@@ -323,9 +327,9 @@ test('native fixed-folder export persists settings, suffixes collisions, and ove
   await expect(overwrite).toBeChecked();
   await page.getByRole('button', { name: 'Settings' }).click();
   await exportButton.focus();
-  await expect(page.getByRole('tooltip')).toContainText(`Each click replaces ${output}.`);
+  await expect(page.getByRole('tooltip')).toContainText(`Each click replaces ${displayedOutput}.`);
   await exportButton.click();
-  await expect(page.getByRole('status')).toContainText(output, { timeout: 30_000 });
+  await expect(page.getByRole('status')).toContainText(displayedOutput, { timeout: 30_000 });
   expect(await readFile(output, 'utf8')).not.toContain('PREVIOUS_EXPORT_SENTINEL');
   expect(await readFile(secondOutput, 'utf8')).toContain('export const value599 = 599;');
 
@@ -342,7 +346,7 @@ test('native fixed-folder export persists settings, suffixes collisions, and ove
   await expect(page.getByRole('checkbox', { name: 'Always overwrite this file' })).toBeChecked();
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Export Markdown' }).focus();
-  await expect(page.getByRole('tooltip')).toContainText(`Each click replaces ${output}.`);
+  await expect(page.getByRole('tooltip')).toContainText(`Each click replaces ${displayedOutput}.`);
 
   const inWorkspaceFolder = path.join(native.root, 'exports');
   await mkdir(inWorkspaceFolder);
@@ -878,6 +882,7 @@ test('native sidebar projections remain truthful and usable at standard and mini
 
 test('native workspace layout adapts when the app window is resized', async ({ native }) => {
   const { page } = native;
+  await expect(page.locator('.workspace-path')).not.toContainText('\\\\?\\');
   const search = page.getByRole('textbox', { name: 'Search files' });
   await search.fill('file-0599.ts');
   const file = page.getByRole('button', { name: 'Preview src/file-0599.ts' });
