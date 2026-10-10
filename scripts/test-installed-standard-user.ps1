@@ -153,6 +153,8 @@ try {
     $testScript = Join-Path $PSScriptRoot 'test-installed.ps1'
     $pwshPath = (Get-Process -Id $PID).Path
     $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = $env:SystemRoot }
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'Could not determine the Windows system directory for the smoke environment.' }
     $profileRoot = [Environment]::ExpandEnvironmentVariables((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').ProfilesDirectory)
     $userProfile = Join-Path $profileRoot $userName
     $systemDrive = [System.IO.Path]::GetPathRoot($systemRoot).TrimEnd('\')
