@@ -1,4 +1,5 @@
-import { copyFile, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -58,6 +59,56 @@ async function ensureNoReparsePoints(targetRoot, outputDir) {
   }
 }
 
+async function findWebView2Loader(root) {
+  const bundledLoader = path.join(root, 'target/release/WebView2Loader.dll');
+  const buildRoots = [
+    path.join(root, 'target/x86_64-pc-windows-msvc/release/build'),
+    path.join(root, 'target/release/build'),
+  ];
+  const cargoOutputs = [];
+  for (const buildRoot of buildRoots) {
+    let entries;
+    try {
+      entries = await readdir(buildRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith('webview2-com-sys-')) continue;
+      const candidate = path.join(buildRoot, entry.name, 'out/x64/WebView2Loader.dll');
+      try {
+        const info = await lstat(candidate);
+        if (info.isFile() && !info.isSymbolicLink()) cargoOutputs.push(candidate);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+  }
+
+  const candidates = [...cargoOutputs];
+  try {
+    const info = await lstat(bundledLoader);
+    if (info.isFile() && !info.isSymbolicLink()) candidates.push(bundledLoader);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  if (candidates.length > 0) {
+    const digests = new Map();
+    for (const candidate of candidates) {
+      const digest = createHash('sha256').update(await readFile(candidate)).digest('hex');
+      if (!digests.has(digest)) digests.set(digest, candidate);
+    }
+    if (digests.size !== 1) throw new Error(`Multiple different x64 WebView2 loader outputs were found: ${candidates.join(', ')}.`);
+    // Prefer the cross-target Cargo output when available; the root copy may be
+    // stale from an earlier build, so it is only accepted after hash equality.
+    return cargoOutputs[0] ?? bundledLoader;
+  }
+
+  throw new Error('The x64 WebView2 loader was not found in the Cargo build outputs or target/release bundle directory.');
+}
+
 export async function prepareMsixLayout({ root = repoRoot, outputDir, env = process.env, platform = process.platform }) {
   if (platform !== 'win32') throw new Error('MSIX packages must be prepared on Windows.');
   if (!outputDir) throw new Error('Provide an output directory under target/msix.');
@@ -83,11 +134,13 @@ export async function prepareMsixLayout({ root = repoRoot, outputDir, env = proc
   await rm(resolvedOutput, { recursive: true, force: true });
   await mkdir(resolvedOutput, { recursive: true });
   for (const [source, destination] of sourceFiles) {
+    if (destination === 'WebView2Loader.dll') continue;
     const sourcePath = path.join(root, source);
     const destinationPath = path.join(resolvedOutput, destination);
     await mkdir(path.dirname(destinationPath), { recursive: true });
     await copyFile(sourcePath, destinationPath);
   }
+  await copyFile(await findWebView2Loader(root), path.join(resolvedOutput, 'WebView2Loader.dll'));
   await writeFile(path.join(resolvedOutput, 'Package.appxmanifest'), manifest, 'utf8');
   return { outputDir: resolvedOutput, packageVersion: replacements.PACKAGE_VERSION, identityName: storeIdentityName };
 }

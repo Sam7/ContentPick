@@ -58,6 +58,54 @@ test('prepares a complete MSIX package layout with reserved Store identity and m
   }
 });
 
+test('stages the x64 WebView2 loader from a cross-target Cargo build when no bundle copy exists', async () => {
+  const root = await fixture();
+  const cargoLoader = path.join(root, 'target/x86_64-pc-windows-msvc/release/build/webview2-com-sys-fixture/out/x64/WebView2Loader.dll');
+  const outputDir = path.join(root, 'target/msix/staging');
+  try {
+    await rm(path.join(root, 'target/release/WebView2Loader.dll'));
+    await mkdir(path.dirname(cargoLoader), { recursive: true });
+    await writeFile(cargoLoader, 'cross-target-x64-webview2-loader');
+
+    await prepare(root, outputDir);
+
+    assert.equal(await readFile(path.join(outputDir, 'WebView2Loader.dll'), 'utf8'), 'cross-target-x64-webview2-loader');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects conflicting x64 WebView2 loader outputs from Cargo builds', async () => {
+  const root = await fixture();
+  const first = path.join(root, 'target/x86_64-pc-windows-msvc/release/build/webview2-com-sys-first/out/x64/WebView2Loader.dll');
+  const second = path.join(root, 'target/release/build/webview2-com-sys-second/out/x64/WebView2Loader.dll');
+  try {
+    await mkdir(path.dirname(first), { recursive: true });
+    await mkdir(path.dirname(second), { recursive: true });
+    await writeFile(first, 'x64-webview2-loader-one');
+    await writeFile(second, 'x64-webview2-loader-two');
+
+    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging')), /Multiple different x64 WebView2 loader outputs/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects a bundle loader that conflicts with the x64 Cargo build output', async () => {
+  const root = await fixture();
+  const bundled = path.join(root, 'target/release/WebView2Loader.dll');
+  const cargo = path.join(root, 'target/x86_64-pc-windows-msvc/release/build/webview2-com-sys-fixture/out/x64/WebView2Loader.dll');
+  try {
+    await mkdir(path.dirname(cargo), { recursive: true });
+    await writeFile(bundled, 'bundle-webview2-loader');
+    await writeFile(cargo, 'cross-target-x64-webview2-loader');
+
+    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging')), /Multiple different x64 WebView2 loader outputs/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('pins the reserved identity and Windows 11 25H2 minimum, requiring a tested maximum', async () => {
   const root = await fixture();
   try {

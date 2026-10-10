@@ -213,7 +213,9 @@ try {
         $targetRelease = Join-Path $repoRoot 'target\x86_64-pc-windows-msvc\release'
         $inputRelease = Join-Path $repoRoot 'target\release'
         $null = New-Item -ItemType Directory -Force -Path $inputRelease
-        foreach ($fileName in @('contextpick.exe', 'WebView2Loader.dll')) {
+        # MSVC no-bundle builds place WebView2Loader.dll under the Cargo build
+        # output directory. The MSIX preparer resolves and validates it there.
+        foreach ($fileName in @('contextpick.exe')) {
             $source = Join-Path $targetRelease $fileName
             if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "x64 release build output is missing: $source." }
             Copy-Item -LiteralPath $source -Destination (Join-Path $inputRelease $fileName)
