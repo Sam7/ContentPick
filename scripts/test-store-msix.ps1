@@ -266,13 +266,17 @@ try {
     $null = New-Item -ItemType Directory -Path $privateRoot
     Export-PfxCertificate -Cert $testCertificate -FilePath $pfxPath -Password $pfxSecurePassword | Out-Null
     Export-Certificate -Cert $testCertificate -FilePath $cerPath | Out-Null
-    $report.signing = [ordered]@{ subject = $testCertificate.Subject; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'CurrentUser TrustedPeople (standard-user test)', 'LocalMachine TrustedPeople (added only after clean install)'); privateKeyRetainedOnlyInRunner = $true }
+    $report.signing = [ordered]@{ subject = $testCertificate.Subject; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'Build-user CurrentUser Root (signature verification only; removed before standard-user install)', 'Standard-user CurrentUser TrustedPeople', 'LocalMachine TrustedPeople (added only after clean install)'); privateKeyRetainedOnlyInRunner = $true }
 
     Copy-Item -LiteralPath $candidateUnsigned -Destination $candidateSigned
     Copy-Item -LiteralPath $upgradeUnsigned -Destination $upgradeSigned
     $signTool = Get-SignToolPath
+    if (Test-Path -LiteralPath "Cert:\CurrentUser\Root\$certThumbprint") { throw 'Refusing to reuse an existing build-user test signer root trust entry.' }
+    Import-Certificate -FilePath $cerPath -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
     Sign-TestPackage -PackagePath $candidateSigned -SignToolPath $signTool -PfxPath $pfxPath -Password $pfxPassword -LogPrefix (Join-Path $logRoot 'candidate')
     Sign-TestPackage -PackagePath $upgradeSigned -SignToolPath $signTool -PfxPath $pfxPath -Password $pfxPassword -LogPrefix (Join-Path $logRoot 'upgrade')
+    Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$certThumbprint" -ErrorAction Stop
+    if (Test-Path -LiteralPath "Cert:\CurrentUser\Root\$certThumbprint") { throw 'Build-user test signer root trust remains before standard-user installation.' }
     $report.package.sha256TestSigned = (Get-FileHash -LiteralPath $candidateSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     $report.package.sha256UpgradeTestSigned = (Get-FileHash -LiteralPath $upgradeSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-ValidationReport
@@ -386,6 +390,7 @@ try {
     # to CurrentUser\TrustedPeople and removed by its helper before returning.
     $report.cleanFirstInstall = [ordered]@{
         packageRegistrationsForAllUsersBeforeInstall = $existingPackagesAllUsers.Count
+        buildUserRootTrustPresentBeforeInstall = $false
         machineSignerTrustPresentBeforeInstall = $false
         lifecycleCompletedBeforeMachineSignerTrust = $true
         lifecycleCompletedBeforeWack = $true
@@ -438,14 +443,14 @@ try {
     $accountCreated = $false
     $report.cleanup.temporaryUserRemoved = $true
     if ($certificateCreated) {
-        foreach ($storePath in @('Cert:\CurrentUser\My', 'Cert:\LocalMachine\TrustedPeople')) {
+        foreach ($storePath in @('Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root', 'Cert:\LocalMachine\TrustedPeople')) {
             $certificatePath = Join-Path $storePath $certThumbprint
             if (Test-Path -LiteralPath $certificatePath) { Remove-Item -LiteralPath $certificatePath -ErrorAction Stop }
         }
         $certificateCreated = $false
         $machineTrustInstalled = $false
     }
-    $report.cleanup.signingCertificateRemoved = (@(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\TrustedPeople', 'Cert:\LocalMachine\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint).Count -eq 0)
+    $report.cleanup.signingCertificateRemoved = (@(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root', 'Cert:\CurrentUser\TrustedPeople', 'Cert:\LocalMachine\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint).Count -eq 0)
     if (-not $report.cleanup.signingCertificateRemoved) { throw 'Runner-only test signing certificate remains in the build-user certificate stores.' }
 
     $report.status = 'passed'
@@ -481,13 +486,13 @@ try {
     }
 
     if ($certificateCreated -and $certThumbprint) {
-        foreach ($storePath in @('Cert:\CurrentUser\My')) {
+        foreach ($storePath in @('Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root')) {
             try { Remove-Item -LiteralPath (Join-Path $storePath $certThumbprint) -ErrorAction SilentlyContinue } catch { $cleanupErrors.Add("Build-user certificate cleanup failed in ${storePath}: $($_.Exception.Message)") }
         }
         $report.cleanup.signingCertificateRemoved = $false
         try {
             Remove-Item -LiteralPath "Cert:\LocalMachine\TrustedPeople\$certThumbprint" -ErrorAction SilentlyContinue
-            $remainingCertificates = @(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\LocalMachine\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint)
+            $remainingCertificates = @(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root', 'Cert:\LocalMachine\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint)
             $report.cleanup.signingCertificateRemoved = ($remainingCertificates.Count -eq 0)
             if (-not $report.cleanup.signingCertificateRemoved) { $cleanupErrors.Add('Runner-only test signing certificate remains in a certificate store.') }
             $machineTrustInstalled = $false
