@@ -185,6 +185,13 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const isDirectory = entry.kind === 'directory';
   const needsBrowse = isDirectory && !entry.enumerated && entry.reason !== null;
+  const folderSizeUnknown = isDirectory && entry.sizePartial && entry.size === 0;
+  const sizeTitle = entry.sizePartial
+    ? `At least ${entry.size} bytes of discovered file content; ignored or unscanned descendants may add more.`
+    : `${entry.size} bytes of logical file content.`;
+  const sizeAccessibleLabel = folderSizeUnknown
+    ? 'Folder size unknown because some contents have not been scanned'
+    : `${entry.sizePartial ? 'At least ' : ''}${formatBytes(entry.size)}${entry.sizePartial ? ', partial folder size' : isDirectory ? ' folder content size' : ''}`;
   const disabled = entry.kind === 'blocked' || busy;
   const checkbox = <input aria-label={`Select ${entry.path}`} type="checkbox" tabIndex={-1} checked={entry.selected} disabled={disabled} ref={(element) => { if (element) element.indeterminate = entry.partial; }} onChange={(event) => onIntent(event.target.checked ? 'include' : 'exclude')} />;
   const applyIntent = (intent: SelectionIntent) => {
@@ -255,7 +262,9 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
       {entry.partial && <span className="partial-label">Partial</span>}
       {entry.reason && <span className="reason-label" title={entry.reason}>{entry.reason}</span>}
     </button>
-    {entry.kind === 'file' && <span className="entry-size" title={`${entry.size} bytes`}>{formatBytes(entry.size)}</span>}
+    {(isDirectory || entry.kind === 'file') && <span className={`entry-size${isDirectory ? ' folder-size' : ''}${folderSizeUnknown ? ' size-unknown' : ''}`} title={sizeTitle} aria-label={sizeAccessibleLabel}>
+      {folderSizeUnknown ? '?' : <>{entry.sizePartial ? '≥ ' : ''}{formatBytes(entry.size)}</>}
+    </span>}
     {needsBrowse && <button className="browse-ignored" tabIndex={-1} aria-label="Browse ignored files" title="Browse ignored files" onClick={onBrowse} disabled={busy}><UiIcon icon={IconFolderOpen} size={15} /><span className="browse-ignored-label">Browse ignored files</span></button>}
     <div className="row-menu-wrap"><button ref={triggerRef} className="row-menu" tabIndex={-1} aria-label={`More actions for ${entry.path}`} aria-expanded={actionOpen} onClick={onAction}><UiIcon icon={IconDotsVertical} size={17} /></button>
     </div>

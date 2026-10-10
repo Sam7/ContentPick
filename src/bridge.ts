@@ -13,6 +13,7 @@ export type Entry = {
   path: string;
   kind: 'directory' | 'file' | 'blocked';
   size: number;
+  sizePartial?: boolean;
   selected: boolean;
   forceIncluded: boolean;
   gitIgnored: boolean;
@@ -142,14 +143,14 @@ const fixtureWorkspace: WorkspaceView = {
   root: '/workspace/patchwork',
   generation: 1,
   entries: [
-    { path: 'src', kind: 'directory', size: 0, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
+    { path: 'src', kind: 'directory', size: 3882, sizePartial: false, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
     { path: 'src/main.ts', kind: 'file', size: 1540, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
     { path: 'src/main.generated.ts', kind: 'file', size: 512, selected: false, forceIncluded: false, gitIgnored: false, reason: 'custom exclude (*.generated.ts)', enumerated: true, partial: false },
-    { path: 'src/components', kind: 'directory', size: 0, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
+    { path: 'src/components', kind: 'directory', size: 1830, sizePartial: false, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
     { path: 'src/components/Picker.tsx', kind: 'file', size: 1830, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
-    { path: 'assets', kind: 'directory', size: 0, selected: false, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
+    { path: 'assets', kind: 'directory', size: 12_480, sizePartial: false, selected: false, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
     { path: 'assets/logo.png', kind: 'file', size: 12_480, selected: false, forceIncluded: false, gitIgnored: false, reason: 'Binary image', enumerated: true, partial: false },
-    { path: 'dist', kind: 'directory', size: 0, selected: false, forceIncluded: false, gitIgnored: true, reason: '.gitignore (dist/)', enumerated: false, partial: false },
+    { path: 'dist', kind: 'directory', size: 0, sizePartial: true, selected: false, forceIncluded: false, gitIgnored: true, reason: '.gitignore (dist/)', enumerated: false, partial: false },
     { path: 'README.md', kind: 'file', size: 923, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false },
   ],
   entryCount: 9,

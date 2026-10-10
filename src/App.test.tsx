@@ -27,6 +27,8 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByTitle('Automatic file watching is unavailable in this browser fixture. Refresh after changing files.')).toBeInTheDocument();
     const rootRows = Array.from(screen.getByRole('tree', { name: 'Workspace files' }).querySelectorAll('[role="treeitem"][aria-level="1"] .entry-name')).map((node) => node.textContent);
     expect(rootRows).toEqual(['src', 'assets', 'dist', 'README.md']);
+    expect(screen.getByLabelText('3.9 KB folder content size')).toBeInTheDocument();
+    expect(screen.getByLabelText('Folder size unknown because some contents have not been scanned')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Preview README.md' }));
     expect(await screen.findByText(/^# Patchwork/)).toBeInTheDocument();
     expect(await screen.findByText('≈ 1,234')).toBeInTheDocument();

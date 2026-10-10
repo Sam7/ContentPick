@@ -145,6 +145,8 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
 .entry-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #526174; font-size: 11px; font-weight: 600; }
 .is-muted .entry-name { color: #9fa9b3; font-weight: 500; }
 .entry-size { flex: 0 0 auto; color: #5f6e80; font-size: 9px; }
+.folder-size { min-width: 40px; color: #687887; text-align: right; font-variant-numeric: tabular-nums; }
+.folder-size.size-unknown { min-width: 12px; color: #735e42; }
 .browse-ignored { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid #eee4cc; border-radius: 6px; color: #755923; background: #fff9ed; font-size: 8px; font-weight: 700; white-space: nowrap; cursor: pointer; }
 .browse-ignored:hover:not(:disabled) { background: #fff2d9; }
 .browse-ignored:disabled { opacity: .6; cursor: wait; }
@@ -288,7 +290,7 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
   .footer-metrics .metric small { font-size: 8px; white-space: nowrap; }
   .export-bar { gap: 8px; padding: 8px; }
   .export-button { min-width: 132px; }
-  .entry-size { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .entry-size { max-width: 44px; overflow: hidden; text-overflow: ellipsis; font-size: 8px; white-space: nowrap; }
   .workbench.has-workspace { grid-template-columns: minmax(0, 1fr) var(--splitter-width) minmax(190px, var(--preview-width, 32%)); gap: 8px; }
   .workbench.has-workspace.has-sidebar { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--splitter-width) minmax(190px, var(--preview-width, 32%)); gap: 8px; }
   .workbench.has-workspace.sidebar-collapsed { grid-template-columns: 46px minmax(0, 1fr) var(--splitter-width) minmax(190px, var(--preview-width, 32%)); gap: 8px; }
@@ -301,10 +303,11 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
 @media (max-width: 840px) and (min-width: 561px) {
   .browse-ignored { width: 28px; height: 28px; justify-content: center; padding: 0; }
   .browse-ignored-label { display: none; }
-  .reason-label { max-width: 78px; }
+  .reason-label { max-width: 52px; }
 }
 @media (max-width: 760px) and (min-width: 561px) {
-  .reason-label { max-width: 72px; }
+  .entry-size:not(.folder-size) { display: none; }
+  .reason-label { max-width: 48px; }
 }
 @media (min-width: 720px) and (max-width: 1100px) {
   .workbench.has-workspace:not(.preview-collapsed) { grid-template-columns: minmax(0, 1fr) var(--splitter-width) minmax(0, var(--preview-width, 32%)); }

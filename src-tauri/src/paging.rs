@@ -121,6 +121,7 @@ mod tests {
                     path: format!("file-{n:05}.ts"),
                     kind: "file".into(),
                     size: 16,
+                    size_partial: false,
                     selected: true,
                     force_included: false,
                     git_ignored: false,

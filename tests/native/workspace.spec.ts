@@ -359,10 +359,12 @@ test('native sensitive-file confirmation gates copy and export and rejects stale
 test('native watcher marks changes stale and automatically reconciles create and delete', async ({ native }) => {
   const { page, root } = native;
   const watchedPath = path.join(root, 'src', 'watcher-check.ts');
+  const srcFolderSize = page.locator('.tree-row').filter({ has: page.locator('.entry-name', { hasText: /^src$/ }) }).locator('.folder-size');
   const search = page.getByRole('textbox', { name: 'Search files' });
   await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  const initialFolderSize = await srcFolderSize.textContent();
 
-  await writeFile(watchedPath, 'export const watched = true;\n', 'utf8');
+  await writeFile(watchedPath, 'x'.repeat(4096), 'utf8');
   await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('status')).toContainText('Workspace files changed');
   await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled();
@@ -372,12 +374,15 @@ test('native watcher marks changes stale and automatically reconciles create and
 
   await expect(page.getByRole('button', { name: 'Preview src/watcher-check.ts' })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect.poll(() => srcFolderSize.textContent()).not.toBe(initialFolderSize);
   await expect(page.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
 
   await unlink(watchedPath);
   await expect(page.getByText('Files changed', { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('button', { name: 'Preview src/watcher-check.ts' })).toHaveCount(0, { timeout: 15_000 });
+  await search.clear();
   await expect(page.getByText('Watching', { exact: true })).toBeVisible();
+  await expect(srcFolderSize).toHaveText(initialFolderSize ?? '');
 });
 
 test('native token estimates retotal selections, reuse unchanged files, and invalidate only edits', async ({ native }) => {
@@ -715,10 +720,15 @@ test('native sidebar projections remain truthful and usable at standard and mini
 
   await page.setViewportSize({ width: 1536, height: 1024 });
   await expect(selectedCount).toHaveText('602');
+  const srcRow = page.locator('.tree-row').filter({ has: page.locator('.entry-name', { hasText: /^src$/ }) });
+  const srcFolderSize = srcRow.locator('.folder-size');
+  await expect(srcFolderSize).toBeVisible();
+  const allFilesFolderSize = await srcFolderSize.textContent();
   await screenshot('2026-10-10-design-review-workspace-all.png');
 
   await views.getByRole('button', { name: 'Selected' }).click();
   await expect(selectedCount).toHaveText('602');
+  await expect(srcFolderSize).toHaveText(allFilesFolderSize ?? '');
   await page.getByRole('button', { name: 'Expand src', exact: true }).click();
   await screenshot('2026-10-10-design-review-selected.png');
   const search = page.getByRole('textbox', { name: 'Search files' });

@@ -322,6 +322,7 @@ fn extension(path: &str) -> String {
 struct IndexedEntry {
     path: String,
     kind: String,
+    regular_file: bool,
     size: u64,
     modified_ns: u64,
     hard: Option<String>,
@@ -329,6 +330,12 @@ struct IndexedEntry {
     git_ignore_matched: bool,
     custom_excluded: bool,
     enumerated: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FolderContentSize {
+    bytes: u64,
+    partial: bool,
 }
 
 #[derive(Clone)]
@@ -340,6 +347,7 @@ pub struct Workspace {
     pub browsed: BTreeSet<String>,
     pub generated_outputs: BTreeSet<String>,
     entries: Arc<Vec<IndexedEntry>>,
+    folder_content_sizes: Arc<BTreeMap<String, FolderContentSize>>,
     pub diagnostics: Vec<String>,
     pub enumerated_entries: usize,
     diagnostic_bytes: usize,
@@ -362,6 +370,7 @@ pub struct EntryView {
     pub path: String,
     pub kind: String,
     pub size: u64,
+    pub size_partial: bool,
     pub selected: bool,
     pub force_included: bool,
     pub git_ignored: bool,
@@ -472,6 +481,7 @@ impl Workspace {
             browsed,
             generated_outputs,
             entries: Arc::new(vec![]),
+            folder_content_sizes: Arc::new(BTreeMap::new()),
             diagnostics: vec![],
             enumerated_entries: 0,
             diagnostic_bytes: 0,
@@ -490,6 +500,7 @@ impl Workspace {
         workspace.scan_directory(&dir, "", &[], None, false, &compiled, cancel, 0)?;
         workspace.finalize_diagnostics();
         Arc::make_mut(&mut workspace.entries).sort_by(|a, b| a.path.cmp(&b.path));
+        workspace.folder_content_sizes = Arc::new(compute_folder_content_sizes(&workspace.entries));
         Ok(workspace)
     }
 
@@ -951,6 +962,7 @@ impl Workspace {
             let entry_index = self.entries.len();
             Arc::make_mut(&mut self.entries).push(IndexedEntry {
                 path: path.clone(),
+                regular_file: metadata.is_file() && !linked,
                 kind: if directory {
                     "directory"
                 } else if hard.is_some() {
@@ -1043,7 +1055,17 @@ impl Workspace {
                     } else {
                         e.kind.clone()
                     },
-                    size: e.size,
+                    size: if e.kind == "directory" {
+                        self.folder_content_sizes
+                            .get(&e.path)
+                            .map_or(0, |size| size.bytes)
+                    } else {
+                        e.size
+                    },
+                    size_partial: self
+                        .folder_content_sizes
+                        .get(&e.path)
+                        .is_some_and(|size| size.partial),
                     selected: d.selected,
                     force_included: d.force_included,
                     git_ignored: e.git_ignore_matched
@@ -1118,6 +1140,36 @@ impl Workspace {
     }
 }
 
+fn compute_folder_content_sizes(entries: &[IndexedEntry]) -> BTreeMap<String, FolderContentSize> {
+    let mut sizes = BTreeMap::<String, FolderContentSize>::new();
+    for entry in entries {
+        if entry.regular_file || (entry.kind == "directory" && !entry.enumerated) {
+            let mut parent = entry.path.as_str();
+            while let Some((path, _)) = parent.rsplit_once('/') {
+                let size = sizes.entry(path.to_owned()).or_default();
+                if entry.regular_file {
+                    if let Some(bytes) = size.bytes.checked_add(entry.size) {
+                        size.bytes = bytes;
+                    } else {
+                        size.partial = true;
+                    }
+                }
+                if entry.kind == "directory" && !entry.enumerated {
+                    size.partial = true;
+                }
+                parent = path;
+            }
+        }
+        if entry.kind == "directory" {
+            let size = sizes.entry(entry.path.clone()).or_default();
+            if !entry.enumerated {
+                size.partial = true;
+            }
+        }
+    }
+    sizes
+}
+
 fn compare_tree_paths(left: &str, right: &str, directories: &BTreeSet<&str>) -> CmpOrdering {
     let mut left_start = 0;
     let mut right_start = 0;
@@ -1174,8 +1226,8 @@ fn truncate_diagnostic(message: &str) -> String {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::{
-        CompiledPolicy, DIAGNOSTIC_BYTES_LIMIT, DIAGNOSTIC_LIMIT, FilterPolicy, ScanLimits,
-        Workspace, decode_file_extension_rule, extension, migrated_extension_path_rule,
+        CompiledPolicy, DIAGNOSTIC_BYTES_LIMIT, DIAGNOSTIC_LIMIT, FilterPolicy, IncludeMode,
+        ScanLimits, Workspace, decode_file_extension_rule, extension, migrated_extension_path_rule,
         truncate_diagnostic,
     };
     use crate::{WorkspaceRoot, selection::Intent};
@@ -1274,6 +1326,7 @@ mod diagnostic_tests {
             .find(|entry| entry.path == "tree")
             .unwrap();
         assert!(!tree.enumerated);
+        assert!(tree.size_partial);
         assert!(!view.entries.iter().any(|entry| entry.path == "tree/inner"));
         assert_eq!(workspace.enumerated_entries, 2);
         assert!(view.incomplete);
@@ -1284,6 +1337,49 @@ mod diagnostic_tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn folder_content_sizes_include_unselected_and_binary_files_and_mark_pruned_totals_partial() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
+        std::fs::create_dir_all(temp.path().join("ignored")).unwrap();
+        std::fs::write(temp.path().join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::write(temp.path().join("src/selected.rs"), "abc").unwrap();
+        std::fs::write(
+            temp.path().join("src/nested/unselected.bin"),
+            [0, 1, 2, 3, 4],
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("ignored/hidden.txt"), "hidden").unwrap();
+
+        let workspace = Workspace::scan(
+            temp.path(),
+            FilterPolicy {
+                include_mode: IncludeMode::SelectedExtensions,
+                include_extensions: vec!["rs".into()],
+                ..FilterPolicy::default()
+            },
+            BTreeMap::new(),
+            BTreeSet::new(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let view = workspace.view(1);
+        assert_eq!(
+            view.estimated_bytes,
+            3 + "src/selected.rs".len() as u64 + 40 + 80
+        );
+        let entries = view.entries;
+        let entry = |path: &str| entries.iter().find(|entry| entry.path == path).unwrap();
+
+        assert_eq!(entry("src").size, 8);
+        assert_eq!(entry("src/nested").size, 5);
+        assert!(!entry("src").size_partial);
+        assert!(!entry("src/nested").size_partial);
+        assert_eq!(entry("ignored").size, 0);
+        assert!(entry("ignored").size_partial);
+        assert!(!entry("src/nested/unselected.bin").selected);
     }
 
     #[test]
