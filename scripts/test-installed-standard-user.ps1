@@ -151,14 +151,15 @@ try {
     Grant-TemporaryAccess -Path $nodeHome -Rights 'RX'
 
     $testScript = Join-Path $PSScriptRoot 'test-installed.ps1'
-    $bootstrap = @(
-        '$env:CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR = ' + (ConvertTo-PowerShellLiteral $resultsDir),
-        '$env:COREPACK_HOME = ' + (ConvertTo-PowerShellLiteral $corepackDir),
+    $bootstrapLines = @(
+        ('$env:CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR = ' + (ConvertTo-PowerShellLiteral $resultsDir)),
+        ('$env:COREPACK_HOME = ' + (ConvertTo-PowerShellLiteral $corepackDir)),
         "`$env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'",
         "`$env:CI = 'true'",
-        '& ' + (ConvertTo-PowerShellLiteral $testScript) + ' -InstallerPath ' + (ConvertTo-PowerShellLiteral $installer),
+        ('& ' + (ConvertTo-PowerShellLiteral $testScript) + ' -InstallerPath ' + (ConvertTo-PowerShellLiteral $installer)),
         'exit $LASTEXITCODE'
-    ) -join "`n"
+    )
+    $bootstrap = [string]::Join([Environment]::NewLine, [string[]]$bootstrapLines)
     $parseTokens = $null
     $parseErrors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrap, [ref]$parseTokens, [ref]$parseErrors)
