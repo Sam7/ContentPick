@@ -25,13 +25,24 @@ function Revoke-TemporaryAccess {
         }
 
         $remainingEntries = @(& icacls.exe $path /findsid "*$script:userSid" /T /C /Q 2>&1)
-        $noMatchingSid = $LASTEXITCODE -eq 1332 `
-            -and @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' }).Count -gt 0 `
-            -and @($remainingEntries | Where-Object { $_ -match '^Successfully processed \d+ files; Failed processing 0 files\.?$' }).Count -gt 0
-        if ($LASTEXITCODE -ne 0 -and -not $noMatchingSid) {
-            $script:cleanupErrors.Add("Could not verify removal of the temporary smoke-user SID from $path (icacls exit $LASTEXITCODE).")
-        } elseif (-not $noMatchingSid -and $remainingEntries.Count -gt 0) {
-            $script:cleanupErrors.Add("Temporary smoke-user access remains on ${path}: $($remainingEntries -join ' | ')")
+        $findSidExitCode = $LASTEXITCODE
+        $noMatchLines = @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' })
+        $processedLines = @($remainingEntries | Where-Object { $_ -match '^Successfully processed \d+ files; Failed processing 0 files\.?$' })
+        $unexpectedLines = @($remainingEntries | Where-Object {
+            $_ -notmatch '^No files with a matching SID was found\.?$' -and
+            $_ -notmatch '^Successfully processed \d+ files; Failed processing 0 files\.?$'
+        })
+        $noMatchingSid = $findSidExitCode -in @(0, 1332) `
+            -and $noMatchLines.Count -eq 1 `
+            -and $processedLines.Count -eq 1 `
+            -and $unexpectedLines.Count -eq 0
+        if (-not $noMatchingSid) {
+            $details = if ($remainingEntries.Count -gt 0) { $remainingEntries -join ' | ' } else { 'icacls returned no verification output' }
+            if ($findSidExitCode -ne 0) {
+                $script:cleanupErrors.Add("Could not verify removal of the temporary smoke-user SID from $path (icacls exit $findSidExitCode): $details")
+            } else {
+                $script:cleanupErrors.Add("Temporary smoke-user access remains or could not be verified on ${path}: $details")
+            }
         }
     }
 }
