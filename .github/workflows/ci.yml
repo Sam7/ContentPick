@@ -170,6 +170,8 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Download the Windows candidate from this run
         uses: actions/download-artifact@v4
@@ -241,13 +243,13 @@ jobs:
 
       - name: Install, smoke test, and uninstall candidate
         shell: pwsh
-        run: .\scripts\test-installed.ps1 -InstallerPath $env:CONTEXTPICK_CANDIDATE_INSTALLER -AllowElevatedRunner
+        run: .\scripts\test-installed-standard-user.ps1 -InstallerPath $env:CONTEXTPICK_CANDIDATE_INSTALLER
 
       - name: Retain installed-app failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: contextpick-installed-windows-failure-${{ github.run_number }}-${{ github.sha }}
-          path: test-results/**
+          path: ${{ runner.temp }}/contextpick-standard-user-smoke/**
           if-no-files-found: ignore
           retention-days: 7

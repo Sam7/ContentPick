@@ -1,14 +1,10 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$InstallerPath,
-    [switch]$AllowElevatedRunner
+    [string]$InstallerPath
 )
 
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 or newer is required for bounded process-tree cleanup.' }
-if ($AllowElevatedRunner -and ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows')) {
-    throw 'AllowElevatedRunner is reserved for a GitHub-hosted Windows runner.'
-}
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
 $uninstallRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
@@ -148,8 +144,10 @@ try {
     Write-Output "SHA-256: $hash"
     $isElevated = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     Write-Output "Elevated token: $isElevated"
-    if ($AllowElevatedRunner -and -not $isElevated) { throw 'The hosted-runner mode requires the administrator token supplied by GitHub Actions.' }
-    if ($isElevated -and -not $AllowElevatedRunner) { throw 'Run this current-user NSIS smoke test from a standard, non-elevated user token.' }
+    if ($isElevated) { throw 'Run this current-user NSIS smoke test from a standard, non-elevated user token.' }
+    $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    Write-Output "Test identity: $($currentIdentity.Name) ($($currentIdentity.User.Value))"
+    Write-Output "Test session: $([Diagnostics.Process]::GetCurrentProcess().SessionId)"
 
     $installationAttempted = $true
     $installExitCode = Invoke-BoundedProcess -FilePath $installer -ArgumentList @('/S') -Operation 'Silent NSIS install' -TimeoutSeconds 1200
