@@ -334,6 +334,11 @@ try {
     foreach ($variable in Get-ChildItem Env:) { $environment[$variable.Name] = $null }
     $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
     if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = $env:SystemRoot }
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'Could not determine the Windows system directory for the standard-user smoke environment.' }
+    $windowsPowerShellPath = Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0'
+    if (-not (Test-Path -LiteralPath (Join-Path $windowsPowerShellPath 'powershell.exe') -PathType Leaf)) {
+        throw "Windows PowerShell executable was not found: $(Join-Path $windowsPowerShellPath 'powershell.exe')."
+    }
     $systemDriveRoot = [System.IO.Path]::GetPathRoot($systemRoot)
     $systemDrive = $systemDriveRoot.TrimEnd('\')
     $environmentOverrides = @{
@@ -348,7 +353,7 @@ try {
         HOMEDRIVE = $systemDrive
         HOMEPATH = $userProfile.Substring($systemDrive.Length)
         LOCALAPPDATA = Join-Path $userProfile 'AppData\Local'
-        PATH = "$nodeHome;$pnpmHome;$PSHOME;$systemRoot\System32;$systemRoot"
+        PATH = "$nodeHome;$pnpmHome;$PSHOME;$windowsPowerShellPath;$systemRoot\System32;$systemRoot"
         PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
         PNPM_HOME = $pnpmHome
         PROCESSOR_ARCHITECTURE = 'ARM64'

@@ -18,13 +18,20 @@ function Grant-TemporaryAccess {
 
 function Revoke-TemporaryAccess {
     foreach ($path in $script:aclPaths) {
-        & icacls.exe $path /remove:g "*$script:userSid" /T /Q
+        if ([string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            # The standard user creates files under this disposable RUNNER_TEMP tree.
+            # Reset that tree to inherited defaults so child-created ACEs are removed too.
+            & icacls.exe $path /reset /T /C /Q /L
+        } else {
+            & icacls.exe $path /remove:g "*$script:userSid" /T /Q
+        }
         if ($LASTEXITCODE -ne 0) {
             $script:cleanupErrors.Add("Could not remove temporary smoke-user access from $path (icacls exit $LASTEXITCODE).")
             continue
         }
 
-        $remainingEntries = @(& icacls.exe $path /findsid "*$script:userSid" /T /C /Q 2>&1)
+        $findSidOptions = if ([string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)) { @('/L') } else { @() }
+        $remainingEntries = @(& icacls.exe $path /findsid "*$script:userSid" /T /C /Q @findSidOptions 2>&1)
         $findSidExitCode = $LASTEXITCODE
         $noMatchLines = @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' })
         $processedLines = @($remainingEntries | Where-Object { $_ -match '^Successfully processed \d+ files; Failed processing 0 files\.?$' })
@@ -155,6 +162,10 @@ try {
     $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
     if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = $env:SystemRoot }
     if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'Could not determine the Windows system directory for the smoke environment.' }
+    $windowsPowerShellPath = Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0'
+    if (-not (Test-Path -LiteralPath (Join-Path $windowsPowerShellPath 'powershell.exe') -PathType Leaf)) {
+        throw "Windows PowerShell executable was not found: $(Join-Path $windowsPowerShellPath 'powershell.exe')."
+    }
     $profileRoot = [Environment]::ExpandEnvironmentVariables((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').ProfilesDirectory)
     $userProfile = Join-Path $profileRoot $userName
     $systemDrive = [System.IO.Path]::GetPathRoot($systemRoot).TrimEnd('\')
@@ -178,7 +189,7 @@ try {
         HOMEPATH = $userProfile.Substring($systemDrive.Length)
         LOCALAPPDATA = Join-Path $userProfile 'AppData\Local'
         OS = 'Windows_NT'
-        PATH = "$nodeHome;$PSHOME;$systemRoot\System32;$systemRoot"
+        PATH = "$nodeHome;$PSHOME;$windowsPowerShellPath;$systemRoot\System32;$systemRoot"
         PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
         PROCESSOR_ARCHITECTURE = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Machine')
         ProgramData = Join-Path $systemDrive 'ProgramData'
