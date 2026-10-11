@@ -105,6 +105,7 @@ $certThumbprint = $certificate.Thumbprint
 $expectedAppDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData))
 $userReport = [ordered]@{
     status = 'in_progress'
+    phase = 'starting'
     token = [ordered]@{ name = [Security.Principal.WindowsIdentity]::GetCurrent().Name; sid = $userSid; isElevated = $false; sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId }
     package = [ordered]@{ identity = $IdentityName; publisher = $Publisher; candidateSha256 = (Get-FileHash -LiteralPath $CandidatePackagePath -Algorithm SHA256).Hash.ToLowerInvariant(); candidateVersion = $ExpectedPackageVersion; installedPackageFullName = $null; installedExeSha256 = $null; upgradeSha256 = (Get-FileHash -LiteralPath $UpgradePackagePath -Algorithm SHA256).Hash.ToLowerInvariant() }
     webView2 = [ordered]@{ beforeInstall = @(); afterInstall = @() }
@@ -153,6 +154,8 @@ try {
     $userReport.signing = [ordered]@{ subject = $certificate.Subject; thumbprint = $certThumbprint; trustScope = 'CurrentUser TrustedPeople'; elevatedMachineStoresModified = $false }
     $userReport.webView2.beforeInstall = @(Get-WebView2RuntimeInventory)
 
+    $userReport.phase = 'installing candidate package'
+    Write-UserReport
     Add-AppxPackage -Path $CandidatePackagePath -ErrorAction Stop
     $packageInstalled = $true
     $installed = @(Get-AppxPackage -Name $IdentityName -ErrorAction Stop)
@@ -165,6 +168,7 @@ try {
     $userReport.package.installedPackageFullName = $installed[0].PackageFullName
     $userReport.package.installedExeSha256 = (Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
     $userReport.webView2.afterInstall = @(Get-WebView2RuntimeInventory)
+    $userReport.phase = 'running installed-app Playwright suite'
     Write-UserReport
 
     $env:CONTEXTPICK_NATIVE_EXECUTABLE = $installedExecutable
@@ -181,6 +185,7 @@ try {
     if ($running.Count -gt 0) { throw 'The installed app process remains active after the Playwright suite.' }
     $userReport.playwright.result = 'passed'
     $userReport.playwright.exitCode = 0
+    $userReport.phase = 'upgrading candidate package'
     Write-UserReport
 
     Add-AppxPackage -Path $UpgradePackagePath -ErrorAction Stop
@@ -189,6 +194,7 @@ try {
         throw "MSIX update failed; expected $ExpectedUpgradeVersion, found $($upgraded.Version -join ', ')."
     }
     $userReport.upgrade = [ordered]@{ result = 'passed'; expectedVersion = $ExpectedUpgradeVersion; actualVersion = $upgraded[0].Version.ToString(); packageFullName = $upgraded[0].PackageFullName }
+    $userReport.phase = 'uninstalling upgraded package'
     Write-UserReport
 
     Remove-AppxPackage -Package $upgraded[0].PackageFullName -ErrorAction Stop
@@ -198,6 +204,7 @@ try {
     $userReport.uninstall.result = 'passed'
     $userReport.uninstall.packageRegistrationAbsent = $true
     $userReport.uninstall.appConfigAbsent = $true
+    $userReport.phase = 'removing temporary test-certificate trust'
     Write-UserReport
 
     Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPeople\$certThumbprint" -ErrorAction Stop
@@ -205,9 +212,11 @@ try {
     $userReport.uninstall.certificateAbsent = (@(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint).Count -eq 0)
     if (-not $userReport.uninstall.certificateAbsent) { throw 'Runner-only public test certificate remains in the standard-user certificate stores.' }
     $userReport.status = 'passed'
+    $userReport.phase = 'complete'
 } catch {
     $failure = $_
     $userReport.status = 'failed'
+    $userReport.phase = 'failed'
     $userReport.failure = [ordered]@{ message = $_.Exception.Message; category = $_.CategoryInfo.Category.ToString(); script = $_.InvocationInfo.ScriptName; line = $_.InvocationInfo.ScriptLineNumber }
 } finally {
     Remove-Item Env:\CONTEXTPICK_NATIVE_EXECUTABLE -ErrorAction SilentlyContinue

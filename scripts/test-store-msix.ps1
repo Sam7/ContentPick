@@ -75,11 +75,20 @@ function Sign-TestPackage {
     Invoke-NativeCommand -FilePath $SignToolPath -ArgumentList @('verify', '/pa', '/v', $PackagePath) -LogPath "$LogPrefix-verify.log"
 }
 
+function Write-LifecyclePhase {
+    param([Parameter(Mandatory = $true)] [string]$Message)
+    Write-Output "[$([DateTime]::UtcNow.ToString('o'))] $Message"
+}
+
 function Grant-TemporaryAccess {
     param([Parameter(Mandatory = $true)] [string]$Path, [Parameter(Mandatory = $true)] [string]$Rights)
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    Write-LifecyclePhase "Granting temporary $Rights access recursively: $Path"
     & icacls.exe $Path /grant "*$script:userSid`:(OI)(CI)($Rights)" /T /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Could not grant temporary $Rights access to $Path (icacls exit $LASTEXITCODE)." }
     $script:aclPaths.Add($Path)
+    $timer.Stop()
+    Write-LifecyclePhase "Granted temporary $Rights access recursively in $([Math]::Round($timer.Elapsed.TotalSeconds, 1))s: $Path"
 }
 
 function Revoke-TemporaryAccess {
@@ -258,6 +267,7 @@ try {
     $report.package.sha256UpgradeUnsigned = (Get-FileHash -LiteralPath $upgradeUnsigned -Algorithm SHA256).Hash.ToLowerInvariant()
     Copy-Item -LiteralPath $upgradeUnsigned -Destination (Join-Path $resultRoot (Split-Path -Leaf $upgradeUnsigned))
 
+    Write-LifecyclePhase 'Creating temporary package-test signing certificate.'
     $testCertificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject $publisher -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy Exportable -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter ([DateTime]::UtcNow.AddDays(2))
     $certificateCreated = $true
     $certThumbprint = $testCertificate.Thumbprint
@@ -273,6 +283,7 @@ try {
     $signTool = Get-SignToolPath
     if (Test-Path -LiteralPath "Cert:\CurrentUser\Root\$certThumbprint") { throw 'Refusing to reuse an existing build-user test signer root trust entry.' }
     Import-Certificate -FilePath $cerPath -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+    Write-LifecyclePhase 'Signing and verifying Store candidate and test upgrade packages.'
     Sign-TestPackage -PackagePath $candidateSigned -SignToolPath $signTool -PfxPath $pfxPath -Password $pfxPassword -LogPrefix (Join-Path $logRoot 'candidate')
     Sign-TestPackage -PackagePath $upgradeSigned -SignToolPath $signTool -PfxPath $pfxPath -Password $pfxPassword -LogPrefix (Join-Path $logRoot 'upgrade')
     Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$certThumbprint" -ErrorAction Stop
@@ -281,6 +292,7 @@ try {
     $report.package.sha256UpgradeTestSigned = (Get-FileHash -LiteralPath $upgradeSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-ValidationReport
 
+    Write-LifecyclePhase 'Creating disposable standard-user account and profile.'
     $userSid = $null
     $userPasswordBytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
     $passwordString = 'Cp1!' + [Convert]::ToBase64String($userPasswordBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
@@ -301,6 +313,7 @@ try {
     $null = New-Item -ItemType Directory -Path (Join-Path $resultRoot 'standard-user-temp') -Force
     $viteCache = Join-Path $repoRoot 'node_modules\.vite'
     $null = New-Item -ItemType Directory -Path $viteCache -Force
+    Write-LifecyclePhase 'Granting the disposable standard user access to test inputs and tools.'
     Grant-TemporaryAccess -Path $repoRoot -Rights 'RX'
     Grant-TemporaryAccess -Path $resultRoot -Rights 'M'
     Grant-TemporaryAccess -Path $viteCache -Rights 'M'
@@ -358,8 +371,27 @@ try {
     }
     foreach ($entry in $environmentOverrides.GetEnumerator()) { $environment[$entry.Key] = $entry.Value }
 
+    Write-LifecyclePhase 'Starting installed-app lifecycle under the disposable standard user.'
     $child = Start-Process -FilePath $pwshPath -ArgumentList $childArguments -Credential $credential -LoadUserProfile -Environment $environment -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-    if (-not $child.WaitForExit(55 * 60 * 1000)) {
+    $childTimer = [Diagnostics.Stopwatch]::StartNew()
+    $childCompleted = $false
+    while (-not $childCompleted -and $childTimer.Elapsed -lt [TimeSpan]::FromMinutes(55)) {
+        $childCompleted = $child.WaitForExit(30 * 1000)
+        if (-not $childCompleted) {
+            $phase = 'unknown'
+            if (Test-Path -LiteralPath $standardUserReportPath -PathType Leaf) {
+                try {
+                    $childReport = Get-Content -LiteralPath $standardUserReportPath -Raw | ConvertFrom-Json
+                    if (-not [string]::IsNullOrWhiteSpace([string]$childReport.phase)) { $phase = [string]$childReport.phase }
+                } catch { $phase = 'reading child report failed' }
+            }
+            $stdoutBytes = if (Test-Path -LiteralPath $stdoutPath) { (Get-Item -LiteralPath $stdoutPath).Length } else { 0 }
+            $stderrBytes = if (Test-Path -LiteralPath $stderrPath) { (Get-Item -LiteralPath $stderrPath).Length } else { 0 }
+            Write-LifecyclePhase "Standard-user lifecycle still running after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m; phase=$phase; stdout=${stdoutBytes}B; stderr=${stderrBytes}B."
+        }
+    }
+    $childTimer.Stop()
+    if (-not $childCompleted) {
         $childExited = $false
         try {
             $child.Kill($true)
@@ -380,6 +412,7 @@ try {
     if (-not (Test-Path -LiteralPath $standardUserReportPath -PathType Leaf)) { throw 'Standard-user helper did not emit its lifecycle evidence JSON.' }
     $standardUserReport = Get-Content -LiteralPath $standardUserReportPath -Raw | ConvertFrom-Json
     $report.standardUser = $standardUserReport
+    Write-LifecyclePhase "Standard-user lifecycle exited with status '$($standardUserReport.status)' after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m."
     $report.runner.testTokenElevated = $standardUserReport.token.isElevated
     if ($standardUserReport.status -ne 'passed' -or $standardUserReport.token.isElevated -ne $false) {
         throw 'The MSIX lifecycle did not pass under a verified non-elevated standard-user token.'
