@@ -14,17 +14,23 @@ test('standard-user access avoids recursively granting the entire checkout', () 
   assert.match(script, /foreach \(\$relativeFile in @\('index\.html', 'package\.json', 'pnpm-lock\.yaml', 'playwright\.native\.config\.ts', 'vite\.config\.ts', 'tsconfig\.json', 'tsconfig\.app\.json', 'tsconfig\.node\.json'\)\)\s*\{\s*Grant-TemporaryAccess -Path \(Join-Path \$repoRoot \$relativeFile\) -Rights 'RX'/s);
 });
 
-test('standard-user access follows only in-node_modules Playwright package links', () => {
+test('standard-user access follows declared Playwright dependencies inside node_modules', () => {
   assert.match(script, /Get-Item -LiteralPath \(Join-Path \$repoRoot 'node_modules\\@playwright\\test'\) -Force/);
   assert.match(script, /Attributes -band \[IO\.FileAttributes\]::ReparsePoint/);
   assert.match(script, /\$playwrightPackageTarget = \[string\]\$playwrightPackageLink\.Target/);
   assert.match(script, /\$playwrightPackageTarget = \[IO\.Path\]::GetFullPath\(\$playwrightPackageTarget\)/);
   assert.match(script, /playwrightPackageTarget\.StartsWith\(\$nodeModulesPrefix/);
   assert.match(script, /while \(\$playwrightTargetAncestor\.StartsWith\(\$nodeModulesPrefix[\s\S]*?Get-Item -LiteralPath \$playwrightTargetAncestor -Force[\s\S]*?ReparsePoint[\s\S]*?throw/);
+  assert.match(script, /ConvertFrom-Json/);
+  assert.match(script, /foreach \(\$dependencyName in \$playwrightPackageManifestData\.dependencies\.PSObject\.Properties\.Name\)/);
+  assert.match(script, /Join-Path \$playwrightDependencySearchPath \(Join-Path 'node_modules' \$dependencyName\)/);
+  assert.match(script, /playwrightDependencySearchPath\.StartsWith\(\$repositoryPrefix/);
+  assert.match(script, /playwrightPackageQueue\.Enqueue\(\$playwrightDependencyPath\)/);
   assert.match(script, /ResolveLinkTarget\(\$true\)/);
-  assert.match(script, /playwrightLinkTarget[\s\S]*?StartsWith\(\$nodeModulesPrefix[\s\S]*?throw/);
+  assert.match(script, /playwrightDependencyPath[\s\S]*?StartsWith\(\$nodeModulesPrefix[\s\S]*?throw/);
   assert.match(script, /HashSet\[string\][\s\S]*?OrdinalIgnoreCase/);
-  assert.match(script, /while \(\$playwrightDirectoryQueue\.Count -gt 0\)[\s\S]*?Get-ChildItem -LiteralPath \$playwrightDirectory/);
+  assert.match(script, /while \(\$playwrightPackageQueue\.Count -gt 0\)[\s\S]*?Get-ChildItem -LiteralPath \$playwrightDirectory/);
+  assert.match(script, /if \(\$playwrightItem\.Name -eq 'node_modules'\) \{ continue \}/);
   assert.match(script, /playwrightPackageDirectories\.Add\(\$playwrightDirectory\)[\s\S]*?playwrightPackageFiles\.Add\(\$playwrightItemPath\)/);
   assert.match(script, /foreach \(\$playwrightPackageDirectory in \$playwrightPackageDirectories\)\s*\{\s*Grant-TemporaryAccess -Path \$playwrightPackageDirectory -Rights 'RX'/);
   assert.match(script, /foreach \(\$playwrightPackageFile in \$playwrightPackageFiles\)\s*\{\s*Grant-TemporaryAccess -Path \$playwrightPackageFile -Rights 'RX'/);

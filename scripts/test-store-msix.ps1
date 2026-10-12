@@ -440,6 +440,7 @@ try {
     if (($playwrightPackageLink.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         $nodeModulesRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'node_modules'))
         $nodeModulesPrefix = $nodeModulesRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        $repositoryPrefix = $repoRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
         $playwrightPackageTarget = [string]$playwrightPackageLink.Target
         if (-not [IO.Path]::IsPathRooted($playwrightPackageTarget)) {
             $playwrightPackageTarget = Join-Path (Split-Path -Parent $playwrightPackageLink.FullName) $playwrightPackageTarget
@@ -456,56 +457,100 @@ try {
             }
             $playwrightTargetAncestor = Split-Path -Parent $playwrightTargetAncestor
         }
-        # pnpm exposes this dependency graph through junctions. Follow only links
-        # whose resolved targets remain inside node_modules, then grant exact paths.
-        $playwrightPackageManifest = Join-Path $playwrightPackageTarget 'package.json'
-        if (-not (Test-Path -LiteralPath $playwrightPackageManifest -PathType Leaf)) {
-            throw "The resolved Playwright package has no package manifest: $playwrightPackageManifest."
-        }
+        # pnpm places package dependencies as sibling junctions under its virtual
+        # store's node_modules, so resolve dependencies declared by each manifest.
         $playwrightPackageDirectories = [System.Collections.Generic.List[string]]::new()
         $playwrightPackageFiles = [System.Collections.Generic.List[string]]::new()
+        $playwrightVisitedPackages = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         $playwrightVisitedDirectories = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         $playwrightVisitedFiles = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        $playwrightDirectoryQueue = [System.Collections.Generic.Queue[string]]::new()
-        $playwrightDirectoryQueue.Enqueue($playwrightPackageTarget)
-        while ($playwrightDirectoryQueue.Count -gt 0) {
-            $playwrightDirectory = $playwrightDirectoryQueue.Dequeue()
-            if (-not $playwrightVisitedDirectories.Add($playwrightDirectory)) { continue }
-            $playwrightPackageDirectories.Add($playwrightDirectory)
-            foreach ($playwrightItem in Get-ChildItem -LiteralPath $playwrightDirectory -Force) {
-                $playwrightItemPath = [IO.Path]::GetFullPath($playwrightItem.FullName)
-                if (($playwrightItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    $playwrightLinkTarget = $playwrightItem.ResolveLinkTarget($true)
-                    if ($null -eq $playwrightLinkTarget) {
-                        throw "Could not resolve a Playwright package link: $($playwrightItem.FullName)."
+        $playwrightPackageQueue = [System.Collections.Generic.Queue[string]]::new()
+        $playwrightPackageQueue.Enqueue($playwrightPackageTarget)
+        while ($playwrightPackageQueue.Count -gt 0) {
+            $playwrightPackageRoot = $playwrightPackageQueue.Dequeue()
+            if (-not $playwrightVisitedPackages.Add($playwrightPackageRoot)) { continue }
+            $playwrightPackageManifest = Join-Path $playwrightPackageRoot 'package.json'
+            if (-not (Test-Path -LiteralPath $playwrightPackageManifest -PathType Leaf)) {
+                throw "A Playwright dependency has no package manifest: $playwrightPackageManifest."
+            }
+            try { $playwrightPackageManifestData = Get-Content -LiteralPath $playwrightPackageManifest -Raw | ConvertFrom-Json }
+            catch { throw "Could not read Playwright package manifest $playwrightPackageManifest`: $_" }
+
+            # The pinned runtime chain declares its required modules in dependencies;
+            # optional and peer modules are not required by this installed-app test.
+            if ($null -ne $playwrightPackageManifestData.dependencies) {
+                foreach ($dependencyName in $playwrightPackageManifestData.dependencies.PSObject.Properties.Name) {
+                    $dependencyFound = $false
+                    $playwrightDependencySearchPath = $playwrightPackageRoot
+                    while ([string]::Equals($playwrightDependencySearchPath, $repoRoot, [StringComparison]::OrdinalIgnoreCase) -or $playwrightDependencySearchPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                        $dependencyCandidate = [IO.Path]::GetFullPath((Join-Path $playwrightDependencySearchPath (Join-Path 'node_modules' $dependencyName)))
+                        if (-not $dependencyCandidate.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                            throw "Refusing to probe a Playwright dependency outside node_modules: $dependencyCandidate."
+                        }
+                        $dependencyItem = Get-Item -LiteralPath $dependencyCandidate -Force -ErrorAction SilentlyContinue
+                        if ($null -ne $dependencyItem) {
+                            if (-not $dependencyItem.PSIsContainer) {
+                                throw "Resolved Playwright dependency is not a directory: $dependencyCandidate."
+                            }
+                            if (($dependencyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                                $dependencyLinkTarget = $dependencyItem.ResolveLinkTarget($true)
+                                if ($null -eq $dependencyLinkTarget) {
+                                    throw "Could not resolve Playwright dependency link $dependencyCandidate."
+                                }
+                                $playwrightDependencyPath = [IO.Path]::GetFullPath($dependencyLinkTarget.FullName)
+                            } else {
+                                $playwrightDependencyPath = [IO.Path]::GetFullPath($dependencyItem.FullName)
+                            }
+                            if (-not $playwrightDependencyPath.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                                throw "Refusing to grant access through a Playwright dependency outside node_modules: $playwrightDependencyPath."
+                            }
+                            $dependencyAncestor = $playwrightDependencyPath
+                            while ($dependencyAncestor.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                                $dependencyAncestorItem = Get-Item -LiteralPath $dependencyAncestor -Force
+                                if (($dependencyAncestorItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                                    throw "Refusing to grant access through an unresolved Playwright dependency link: $dependencyAncestor."
+                                }
+                                $dependencyAncestor = Split-Path -Parent $dependencyAncestor
+                            }
+                            Write-LifecyclePhase "Resolved Playwright dependency '$dependencyName' to $playwrightDependencyPath."
+                            $playwrightPackageQueue.Enqueue($playwrightDependencyPath)
+                            $dependencyFound = $true
+                            break
+                        }
+                        $playwrightDependencySearchPath = Split-Path -Parent $playwrightDependencySearchPath
                     }
-                    $playwrightItemPath = [IO.Path]::GetFullPath($playwrightLinkTarget.FullName)
-                }
-                if (-not $playwrightItemPath.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                    throw "Refusing to grant access through a Playwright package link outside node_modules: $playwrightItemPath."
-                }
-                $playwrightItemAncestor = $playwrightItemPath
-                while ($playwrightItemAncestor.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                    $playwrightItemAncestorEntry = Get-Item -LiteralPath $playwrightItemAncestor -Force
-                    if (($playwrightItemAncestorEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                        throw "Refusing to grant access through an unresolved Playwright package link: $playwrightItemAncestor."
+                    if (-not $dependencyFound) {
+                        throw "Could not resolve declared Playwright dependency '$dependencyName' beneath node_modules."
                     }
-                    $playwrightItemAncestor = Split-Path -Parent $playwrightItemAncestor
                 }
-                $playwrightResolvedItem = Get-Item -LiteralPath $playwrightItemPath -Force
-                if ($playwrightResolvedItem.PSIsContainer) {
-                    if (-not $playwrightVisitedDirectories.Contains($playwrightItemPath)) {
-                        $playwrightDirectoryQueue.Enqueue($playwrightItemPath)
+            }
+
+            $playwrightDirectoryQueue = [System.Collections.Generic.Queue[string]]::new()
+            $playwrightDirectoryQueue.Enqueue($playwrightPackageRoot)
+            while ($playwrightDirectoryQueue.Count -gt 0) {
+                $playwrightDirectory = $playwrightDirectoryQueue.Dequeue()
+                if (-not $playwrightVisitedDirectories.Add($playwrightDirectory)) { continue }
+                $playwrightPackageDirectories.Add($playwrightDirectory)
+                foreach ($playwrightItem in Get-ChildItem -LiteralPath $playwrightDirectory -Force) {
+                    if ($playwrightItem.Name -eq 'node_modules') { continue }
+                    $playwrightItemPath = [IO.Path]::GetFullPath($playwrightItem.FullName)
+                    if (($playwrightItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "Refusing to grant access through an unexpected link in the Playwright package: $playwrightItemPath."
                     }
-                } elseif ($playwrightVisitedFiles.Add($playwrightItemPath)) {
-                    $playwrightPackageFiles.Add($playwrightItemPath)
+                    if (-not $playwrightItemPath.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "Refusing to grant access outside node_modules: $playwrightItemPath."
+                    }
+                    if ($playwrightItem.PSIsContainer) {
+                        if (-not $playwrightVisitedDirectories.Contains($playwrightItemPath)) {
+                            $playwrightDirectoryQueue.Enqueue($playwrightItemPath)
+                        }
+                    } elseif ($playwrightVisitedFiles.Add($playwrightItemPath)) {
+                        $playwrightPackageFiles.Add($playwrightItemPath)
+                    }
                 }
             }
         }
-        if (-not $playwrightVisitedFiles.Contains([IO.Path]::GetFullPath($playwrightPackageManifest))) {
-            throw "The resolved Playwright package manifest was not included in its regular file list: $playwrightPackageManifest."
-        }
-        Write-LifecyclePhase "Granting access to $($playwrightPackageDirectories.Count) Playwright package directories and $($playwrightPackageFiles.Count) files."
+        Write-LifecyclePhase "Granting access to $($playwrightVisitedPackages.Count) Playwright packages, $($playwrightPackageDirectories.Count) directories and $($playwrightPackageFiles.Count) files."
         foreach ($playwrightPackageDirectory in $playwrightPackageDirectories) {
             Grant-TemporaryAccess -Path $playwrightPackageDirectory -Rights 'RX'
         }
