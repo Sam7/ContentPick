@@ -152,7 +152,7 @@ function Grant-TemporaryAccess {
     Write-LifecyclePhase "Granting temporary $Rights access $scope`: $Path"
     $script:aclPaths.Add([pscustomobject]@{ Path = $Path; Recursive = [bool]$Recursive })
     if ($Recursive) {
-        & icacls.exe $Path /grant "*$script:userSid`:$inheritance($Rights)" /T /Q | Out-Null
+        & icacls.exe $Path /grant "*$script:userSid`:$inheritance($Rights)" /T /L /Q | Out-Null
     } else {
         & icacls.exe $Path /grant "*$script:userSid`:$inheritance($Rights)" /Q | Out-Null
     }
@@ -164,7 +164,7 @@ function Grant-TemporaryAccess {
 function Revoke-TemporaryAccess {
     foreach ($entry in $script:aclPaths) {
         $arguments = @($entry.Path, '/remove:g', "*$script:userSid", '/Q')
-        if ($entry.Recursive) { $arguments += '/T' }
+        if ($entry.Recursive) { $arguments += @('/T', '/L') }
         & icacls.exe @arguments | Out-Null
         if ($LASTEXITCODE -ne 0) { $script:cleanupErrors.Add("Could not remove temporary standard-user access from $($entry.Path) (icacls exit $LASTEXITCODE).") }
     }
@@ -456,15 +456,38 @@ try {
             }
             $playwrightTargetAncestor = Split-Path -Parent $playwrightTargetAncestor
         }
-        # pnpm exposes this dependency through a junction. The recursive node_modules
-        # grant does not make this protected manifest readable, so grant only that file.
+        # pnpm exposes this dependency through a junction. Its protected package files
+        # need explicit, non-recursive ACLs for the standard-user test account.
         $playwrightPackageManifest = Join-Path $playwrightPackageTarget 'package.json'
         if (-not (Test-Path -LiteralPath $playwrightPackageManifest -PathType Leaf)) {
             throw "The resolved Playwright package has no package manifest: $playwrightPackageManifest."
         }
-        # The hosted runner's pnpm store can retain a protected manifest ACL despite
-        # the recursive directory grant; explicitly grant only this required file.
-        Grant-TemporaryAccess -Path $playwrightPackageManifest -Rights 'RX'
+        $playwrightPackagePrefix = $playwrightPackageTarget.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        $playwrightPackageItems = @(Get-ChildItem -LiteralPath $playwrightPackageTarget -Force -Recurse)
+        $playwrightPackageDirectories = [System.Collections.Generic.List[string]]::new()
+        $playwrightPackageFiles = [System.Collections.Generic.List[string]]::new()
+        $playwrightPackageDirectories.Add($playwrightPackageTarget)
+        foreach ($playwrightPackageItem in $playwrightPackageItems) {
+            $itemPath = [IO.Path]::GetFullPath($playwrightPackageItem.FullName)
+            if (($playwrightPackageItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to grant access through a reparse point in the Playwright package: $itemPath."
+            }
+            if (-not $itemPath.StartsWith($playwrightPackagePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing to grant access outside the resolved Playwright package: $itemPath."
+            }
+            if ($playwrightPackageItem.PSIsContainer) { $playwrightPackageDirectories.Add($itemPath) }
+            else { $playwrightPackageFiles.Add($itemPath) }
+        }
+        if (-not $playwrightPackageFiles.Contains([IO.Path]::GetFullPath($playwrightPackageManifest))) {
+            throw "The resolved Playwright package manifest was not included in its regular file list: $playwrightPackageManifest."
+        }
+        Write-LifecyclePhase "Granting access to $($playwrightPackageDirectories.Count) Playwright package directories and $($playwrightPackageFiles.Count) files."
+        foreach ($playwrightPackageDirectory in $playwrightPackageDirectories) {
+            Grant-TemporaryAccess -Path $playwrightPackageDirectory -Rights 'RX'
+        }
+        foreach ($playwrightPackageFile in $playwrightPackageFiles) {
+            Grant-TemporaryAccess -Path $playwrightPackageFile -Rights 'RX'
+        }
     }
     foreach ($relativeFile in @('index.html', 'package.json', 'pnpm-lock.yaml', 'playwright.native.config.ts', 'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json')) {
         Grant-TemporaryAccess -Path (Join-Path $repoRoot $relativeFile) -Rights 'RX'

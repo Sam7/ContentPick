@@ -7,19 +7,24 @@ const script = await readFile(new URL('./test-store-msix.ps1', import.meta.url),
 test('standard-user access avoids recursively granting the entire checkout', () => {
   assert.doesNotMatch(script, /Grant-TemporaryAccess\s+-Path\s+\$repoRoot\s+-Rights\s+'RX'\s+-Recursive/i);
   assert.doesNotMatch(script, /Join-Path\s+\$repoRoot\s+'node_modules\.vite'/i);
+  assert.match(script, /if \(\$Recursive\) \{\s*& icacls\.exe \$Path \/grant[\s\S]*?\/T \/L \/Q \| Out-Null\s*\}/);
+  assert.match(script, /if \(\$entry\.Recursive\) \{\s*\$arguments \+= @\('\/T', '\/L'\)\s*\}/);
 
   assert.match(script, /foreach \(\$relativeDirectory in @\('node_modules', 'src', 'tests\\native', 'scripts'\)\)\s*\{\s*Grant-TemporaryAccess -Path \(Join-Path \$repoRoot \$relativeDirectory\) -Rights 'RX' -Recursive/s);
   assert.match(script, /foreach \(\$relativeFile in @\('index\.html', 'package\.json', 'pnpm-lock\.yaml', 'playwright\.native\.config\.ts', 'vite\.config\.ts', 'tsconfig\.json', 'tsconfig\.app\.json', 'tsconfig\.node\.json'\)\)\s*\{\s*Grant-TemporaryAccess -Path \(Join-Path \$repoRoot \$relativeFile\) -Rights 'RX'/s);
 });
 
-test('standard-user access follows the Playwright junction to its in-checkout pnpm target', () => {
+test('standard-user access grants only validated regular paths in the Playwright pnpm target', () => {
   assert.match(script, /Get-Item -LiteralPath \(Join-Path \$repoRoot 'node_modules\\@playwright\\test'\) -Force/);
   assert.match(script, /Attributes -band \[IO\.FileAttributes\]::ReparsePoint/);
   assert.match(script, /\$playwrightPackageTarget = \[string\]\$playwrightPackageLink\.Target/);
   assert.match(script, /\$playwrightPackageTarget = \[IO\.Path\]::GetFullPath\(\$playwrightPackageTarget\)/);
   assert.match(script, /playwrightPackageTarget\.StartsWith\(\$nodeModulesPrefix/);
   assert.match(script, /while \(\$playwrightTargetAncestor\.StartsWith\(\$nodeModulesPrefix[\s\S]*?Get-Item -LiteralPath \$playwrightTargetAncestor -Force[\s\S]*?ReparsePoint[\s\S]*?throw/);
-  assert.match(script, /\$playwrightPackageManifest = Join-Path \$playwrightPackageTarget 'package\.json'[\s\S]*?Grant-TemporaryAccess -Path \$playwrightPackageManifest -Rights 'RX'/);
+  assert.match(script, /Get-ChildItem -LiteralPath \$playwrightPackageTarget -Force -Recurse/);
+  assert.match(script, /foreach \(\$playwrightPackageItem in \$playwrightPackageItems\)[\s\S]*?ReparsePoint[\s\S]*?throw[\s\S]*?playwrightPackagePrefix[\s\S]*?StartsWith\([\s\S]*?throw/);
+  assert.match(script, /foreach \(\$playwrightPackageDirectory in \$playwrightPackageDirectories\)\s*\{\s*Grant-TemporaryAccess -Path \$playwrightPackageDirectory -Rights 'RX'/);
+  assert.match(script, /foreach \(\$playwrightPackageFile in \$playwrightPackageFiles\)\s*\{\s*Grant-TemporaryAccess -Path \$playwrightPackageFile -Rights 'RX'/);
   assert.doesNotMatch(script, /Grant-TemporaryAccess -Path \$playwrightPackageTarget -Rights 'RX' -Recursive/);
 });
 
