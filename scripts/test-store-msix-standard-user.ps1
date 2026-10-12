@@ -115,13 +115,12 @@ $userReport = [ordered]@{
     install = [ordered]@{ result = 'pending'; scope = 'current standard-user profile'; architecture = $null }
     playwright = [ordered]@{ result = 'pending'; command = 'pnpm exec playwright test --config playwright.native.config.ts tests/native/workspace.spec.ts'; exitCode = $null }
     upgrade = [ordered]@{ result = 'pending'; expectedVersion = $ExpectedUpgradeVersion; actualVersion = $null }
-    uninstall = [ordered]@{ result = 'pending'; packageRegistrationAbsent = $false; appConfigAbsent = $false; certificateAbsent = $false }
+    uninstall = [ordered]@{ result = 'pending'; packageRegistrationAbsent = $false; appConfigAbsent = $false; certificateAbsentFromStandardUserStores = $false }
     generatedAtUtc = [DateTime]::UtcNow.ToString('o')
     failure = $null
 }
 Write-UserReport
 
-$certificateImported = $false
 $packageInstalled = $false
 $failure = $null
 $cleanupErrors = [System.Collections.Generic.List[string]]::new()
@@ -151,10 +150,7 @@ try {
         throw 'Upgrade MSIX identity, version, publisher, or architecture does not match the expected Store package.'
     }
     if ($certificate.Subject -cne $Publisher) { throw "Runner-only test certificate subject mismatch: $($certificate.Subject)." }
-    if (Test-Path -LiteralPath "Cert:\CurrentUser\TrustedPeople\$certThumbprint") { throw 'Refusing to reuse an existing test certificate trust entry.' }
-    Import-Certificate -FilePath $TestCertificatePath -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople' | Out-Null
-    $certificateImported = $true
-    $userReport.signing = [ordered]@{ subject = $certificate.Subject; thumbprint = $certThumbprint; trustScope = 'CurrentUser TrustedPeople'; elevatedMachineStoresModified = $false }
+    $userReport.signing = [ordered]@{ subject = $certificate.Subject; thumbprint = $certThumbprint; trustScope = 'LocalMachine TrustedPeople (temporary elevated test prerequisite)'; elevatedMachineStoresModified = $false }
     $userReport.webView2.beforeInstall = @(Get-WebView2RuntimeInventory)
 
     $userReport.phase = 'installing candidate package'
@@ -207,13 +203,8 @@ try {
     $userReport.uninstall.result = 'passed'
     $userReport.uninstall.packageRegistrationAbsent = $true
     $userReport.uninstall.appConfigAbsent = $true
-    $userReport.phase = 'removing temporary test-certificate trust'
-    Write-UserReport
-
-    Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPeople\$certThumbprint" -ErrorAction Stop
-    $certificateImported = $false
-    $userReport.uninstall.certificateAbsent = (@(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint).Count -eq 0)
-    if (-not $userReport.uninstall.certificateAbsent) { throw 'Runner-only public test certificate remains in the standard-user certificate stores.' }
+    $userReport.uninstall.certificateAbsentFromStandardUserStores = (@(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root', 'Cert:\CurrentUser\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint).Count -eq 0)
+    if (-not $userReport.uninstall.certificateAbsentFromStandardUserStores) { throw 'Runner-only public test certificate remains in a standard-user certificate store.' }
     $userReport.status = 'passed'
     $userReport.phase = 'complete'
 } catch {
@@ -236,14 +227,6 @@ try {
             $userReport.cleanupPackage = 'Removed the per-user package after failed validation.'
         } catch { $cleanupErrors.Add("Could not remove the per-user package: $($_.Exception.Message)") }
     }
-    if ($certificateImported) {
-        try {
-            Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPeople\$certThumbprint" -ErrorAction Stop
-            if (Test-Path -LiteralPath "Cert:\CurrentUser\TrustedPeople\$certThumbprint") { throw 'TrustedPeople certificate remains after removal.' }
-            $userReport.cleanupCertificate = 'Removed the standard-user trust entry after validation.'
-            $userReport.uninstall.certificateAbsent = $true
-        } catch { $cleanupErrors.Add("Could not remove the standard-user trust entry: $($_.Exception.Message)") }
-    }
     if ($cleanupErrors.Count -gt 0) {
         $userReport.status = 'failed'
         $userReport.cleanupErrors = @($cleanupErrors)
@@ -254,4 +237,4 @@ try {
 
 if ($failure) { Write-Error -ErrorRecord $failure }
 if ($userReport.status -ne 'passed') { throw 'Standard-user MSIX lifecycle did not pass; see standard-user-lifecycle.json.' }
-Write-Output "MSIX install, Playwright behavior, upgrade, uninstall, and test-certificate removal passed as $($userReport.token.name) (non-elevated)."
+Write-Output "MSIX install, Playwright behavior, upgrade, and uninstall passed as $($userReport.token.name) (non-elevated); no signer was imported into standard-user stores, and the elevated parent performs machine trust cleanup."

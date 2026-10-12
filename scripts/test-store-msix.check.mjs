@@ -91,6 +91,21 @@ test('temporary account description respects the Windows local-account length li
   assert.ok(description.length <= 48, `description length ${description.length} exceeds 48 characters`);
 });
 
+test('standard-user MSIX install uses only temporary machine TrustedPeople trust', async () => {
+  const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
+  const trustAdded = script.indexOf("-Operation', 'AddMachineTrustedPeople'");
+  const userLifecycle = script.indexOf("Write-LifecyclePhase 'Starting installed-app lifecycle under the disposable standard user.'");
+  const trustRemoved = script.indexOf("-Operation', 'RemoveTemporaryCertificate'");
+  assert.ok(trustAdded >= 0 && trustAdded < userLifecycle, 'install trust must exist before first package deployment');
+  assert.ok(trustRemoved > userLifecycle, 'trust must be removed after the standard-user lifecycle');
+  assert.match(standardUserScript, /trustScope = 'LocalMachine TrustedPeople/);
+  assert.doesNotMatch(standardUserScript, /Import-Certificate/);
+  assert.doesNotMatch(standardUserScript, /Remove-Item[^\r\n]*Cert:\\CurrentUser\\TrustedPeople/);
+  assert.match(standardUserScript, /certificateAbsentFromStandardUserStores/);
+  assert.match(standardUserScript, /no signer was imported into standard-user stores, and the elevated parent performs machine trust cleanup/i);
+  assert.match(script, /machineTrustedPeoplePresentBeforeInstall = \$true/);
+});
+
 test('local lifecycle fallback is an explicit Windows 11 x64 opt-in', async () => {
   const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
   assert.match(script, /param\(\s*\[switch\]\$AllowLocalWin11X64/);

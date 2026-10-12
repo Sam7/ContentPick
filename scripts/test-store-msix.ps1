@@ -382,7 +382,7 @@ try {
     }
     if (-not $certificateCreated) { throw 'Test certificate helper completed without recording a temporary certificate for cleanup.' }
     Write-LifecyclePhase 'Validating temporary signing certificate.'
-    $report.signing = [ordered]@{ subject = $publisher; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'Runner LocalMachine Root (signature verification only; removed before standard-user install)', 'Standard-user CurrentUser TrustedPeople', 'LocalMachine TrustedPeople (added only after clean install)'); privateKeyRetainedOnlyInRunner = $true }
+    $report.signing = [ordered]@{ subject = $publisher; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'Runner LocalMachine Root (SignTool verification only)', 'Runner LocalMachine TrustedPeople (temporary MSIX deployment trust)'); privateKeyRetainedOnlyInRunner = $true }
 
     Copy-Item -LiteralPath $candidateUnsigned -Destination $candidateSigned
     Copy-Item -LiteralPath $upgradeUnsigned -Destination $upgradeSigned
@@ -398,6 +398,12 @@ try {
     $report.package.sha256TestSigned = (Get-FileHash -LiteralPath $candidateSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     $report.package.sha256UpgradeTestSigned = (Get-FileHash -LiteralPath $upgradeSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-ValidationReport
+
+    # MSIX deployment validates the signer against machine TrustedPeople. This test
+    # certificate is scoped by exact thumbprint and removed with the runner cleanup.
+    Write-LifecyclePhase 'Installing temporary machine TrustedPeople trust for MSIX deployment.'
+    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'AddMachineTrustedPeople', '-CertificatePath', $cerPath, '-Thumbprint', $certThumbprint, '-ExpectedSubject', $publisher) -LogPath (Join-Path $logRoot 'install-machine-trusted-people.log') -TimeoutSeconds 120
+    $machineTrustInstalled = $true
 
     Write-LifecyclePhase 'Creating disposable standard-user account and profile.'
     $userSid = $null
@@ -545,19 +551,16 @@ try {
         throw 'The MSIX lifecycle did not pass under a verified non-elevated standard-user token.'
     }
 
-    # The first-install evidence must precede both machine-level signer trust and WACK,
-    # which can stage/retain package state. The temporary user's own trust was scoped
-    # to CurrentUser\TrustedPeople and removed by its helper before returning.
+    # Record the exact trust prerequisite required by Windows for self-signed MSIX
+    # deployment. The disposable standard-user profile still has no app registration
+    # or app data before install, and package operations remain non-elevated.
     $report.cleanFirstInstall = [ordered]@{
         packageRegistrationsForAllUsersBeforeInstall = $existingPackagesAllUsers.Count
-        buildUserRootTrustPresentBeforeInstall = $false
-        machineSignerTrustPresentBeforeInstall = $false
-        lifecycleCompletedBeforeMachineSignerTrust = $true
+        machineRootTrustPresentBeforeInstall = $false
+        machineTrustedPeoplePresentBeforeInstall = $true
         lifecycleCompletedBeforeWack = $true
     }
-    Write-LifecyclePhase 'Adding temporary machine TrustedPeople trust for WACK.'
-    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'AddMachineTrustedPeople', '-CertificatePath', $cerPath, '-Thumbprint', $certThumbprint, '-ExpectedSubject', $publisher) -LogPath (Join-Path $logRoot 'install-machine-trusted-people.log') -TimeoutSeconds 120
-    $machineTrustInstalled = $true
+    Write-LifecyclePhase 'Retaining temporary machine TrustedPeople trust through WACK.'
 
     $appCertPath = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\App Certification Kit\appcert.exe'
     if (Test-Path -LiteralPath $appCertPath -PathType Leaf) {
