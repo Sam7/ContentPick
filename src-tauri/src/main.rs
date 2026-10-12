@@ -2401,7 +2401,15 @@ mod tests {
             settings_path: config.path().join("settings.json"),
             ..Default::default()
         }));
-        let (_, watcher) = publish_watching_sensitive_fixture(&shared, root.path(), 1, 1);
+        let (published, watcher) = publish_watching_sensitive_fixture(&shared, root.path(), 1, 1);
+        #[cfg(not(target_os = "macos"))]
+        let _ = published;
+        #[cfg(target_os = "macos")]
+        watcher::reconcile_test_startup_hints(
+            &watcher,
+            std::path::Path::new(&published.view.root),
+            1,
+        );
         let watcher = Arc::new(watcher);
         let OutputStart::ConfirmationRequired { ticket, .. } =
             start_output(&shared, &watcher, OutputKind::Copy).unwrap()
