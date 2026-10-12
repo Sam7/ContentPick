@@ -1,4 +1,4 @@
-import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -114,7 +114,10 @@ export async function prepareMsixLayout({ root = repoRoot, outputDir, env = proc
   if (!outputDir) throw new Error('Provide an output directory under target/msix.');
   const targetRoot = path.resolve(root, 'target', 'msix');
   const resolvedOutput = path.resolve(outputDir);
-  if (!resolvedOutput.startsWith(`${targetRoot}${path.sep}`)) throw new Error(`MSIX staging output must be inside ${targetRoot}.`);
+  const outputRelative = path.relative(targetRoot, resolvedOutput);
+  if (!outputRelative || outputRelative === '..' || outputRelative.startsWith(`..${path.sep}`) || path.isAbsolute(outputRelative)) {
+    throw new Error(`MSIX staging output must be inside ${targetRoot}.`);
+  }
   const maxVersionTested = requireWindowsVersion(env.CONTEXTPICK_MSIX_MAX_VERSION_TESTED, 'CONTEXTPICK_MSIX_MAX_VERSION_TESTED');
   if (compareVersions(minimumWindowsVersion, maxVersionTested) > 0) {
     throw new Error('Windows 11 25H2 minimum version cannot be greater than CONTEXTPICK_MSIX_MAX_VERSION_TESTED.');
@@ -135,7 +138,20 @@ export async function prepareMsixLayout({ root = repoRoot, outputDir, env = proc
   await mkdir(resolvedOutput, { recursive: true });
   for (const [source, destination] of sourceFiles) {
     if (destination === 'WebView2Loader.dll') continue;
-    const sourcePath = path.join(root, source);
+    const configuredBinary = destination === 'contextpick.exe' ? env.CONTEXTPICK_MSIX_APP_BINARY : undefined;
+    const sourcePath = configuredBinary ? path.resolve(root, configuredBinary) : path.join(root, source);
+    if (configuredBinary) {
+      const lexicalRelative = path.relative(path.resolve(root), sourcePath);
+      if (lexicalRelative === '..' || lexicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(lexicalRelative)) {
+        throw new Error('CONTEXTPICK_MSIX_APP_BINARY must resolve to a file inside the repository.');
+      }
+      const repositoryRealPath = await realpath(root);
+      const binaryRealPath = await realpath(sourcePath);
+      const binaryRelative = path.relative(repositoryRealPath, binaryRealPath);
+      if (binaryRelative === '..' || binaryRelative.startsWith(`..${path.sep}`) || path.isAbsolute(binaryRelative)) {
+        throw new Error('CONTEXTPICK_MSIX_APP_BINARY must resolve to a file inside the repository.');
+      }
+    }
     const destinationPath = path.join(resolvedOutput, destination);
     await mkdir(path.dirname(destinationPath), { recursive: true });
     await copyFile(sourcePath, destinationPath);
@@ -147,7 +163,7 @@ export async function prepareMsixLayout({ root = repoRoot, outputDir, env = proc
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const outputDir = path.join(repoRoot, 'target', 'msix', 'package-layout');
+    const outputDir = process.argv[2] ? path.resolve(process.argv[2]) : path.join(repoRoot, 'target', 'msix', 'package-layout');
     const result = await prepareMsixLayout({ outputDir });
     process.stdout.write(`Prepared MSIX layout at ${result.outputDir} (${result.identityName}, ${result.packageVersion}).\n`);
   } catch (error) {

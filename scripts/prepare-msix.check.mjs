@@ -58,6 +58,45 @@ test('prepares a complete MSIX package layout with reserved Store identity and m
   }
 });
 
+test('stages the release binary from its isolated x64 build output without copying into target/release', async () => {
+  const root = await fixture();
+  const outputDir = path.join(root, 'target/msix/lifecycle/package-layout');
+  const releaseBinary = path.join(root, 'target/x86_64-pc-windows-msvc/release/contextpick.exe');
+  await mkdir(path.dirname(releaseBinary), { recursive: true });
+  await writeFile(releaseBinary, 'isolated-x64-release-binary');
+  try {
+    await prepare(root, outputDir, { ...versionEnv, CONTEXTPICK_MSIX_APP_BINARY: 'target/x86_64-pc-windows-msvc/release/contextpick.exe' });
+    assert.equal(await readFile(path.join(outputDir, 'contextpick.exe'), 'utf8'), 'isolated-x64-release-binary');
+    assert.equal(await readFile(path.join(root, 'target/release/contextpick.exe'), 'utf8'), 'synthetic:target/release/contextpick.exe');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects an isolated release binary symlink that resolves outside the repository', async () => {
+  const root = await fixture();
+  const outputDir = path.join(root, 'target/msix/lifecycle/package-layout');
+  const releaseBinary = path.join(root, 'target/x86_64-pc-windows-msvc/release/contextpick.exe');
+  const outsideBinary = path.join(path.dirname(root), `contextpick-outside-${path.basename(root)}.exe`);
+  await mkdir(path.dirname(releaseBinary), { recursive: true });
+  await writeFile(outsideBinary, 'outside-repository-binary');
+  try {
+    try {
+      await symlink(outsideBinary, releaseBinary, 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return;
+      throw error;
+    }
+    await assert.rejects(
+      prepare(root, outputDir, { ...versionEnv, CONTEXTPICK_MSIX_APP_BINARY: 'target/x86_64-pc-windows-msvc/release/contextpick.exe' }),
+      /must resolve to a file inside the repository/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outsideBinary, { force: true });
+  }
+});
+
 test('stages the x64 WebView2 loader from a cross-target Cargo build when no bundle copy exists', async () => {
   const root = await fixture();
   const cargoLoader = path.join(root, 'target/x86_64-pc-windows-msvc/release/build/webview2-com-sys-fixture/out/x64/WebView2Loader.dll');
@@ -114,6 +153,7 @@ test('pins the reserved identity and Windows 11 25H2 minimum, requiring a tested
     await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_MAX_VERSION_TESTED: '999999.0.0.0' }), /four Windows version components/);
     await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_MAX_VERSION_TESTED: '10.0.26100.9457' }), /cannot be greater/);
     await assert.rejects(prepare(root, path.join(root, 'target/outside')), /must be inside/);
+    await assert.rejects(prepare(root, path.join(root, 'target/msix/staging'), { ...versionEnv, CONTEXTPICK_MSIX_APP_BINARY: '../outside.exe' }), /must resolve to a file inside the repository/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -90,7 +90,10 @@ $runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
 $evidenceFullPath = [System.IO.Path]::GetFullPath($EvidenceRoot)
 $runnerTempPrefix = $runnerTemp.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 if (-not $evidenceFullPath.StartsWith($runnerTempPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Evidence directory must remain inside RUNNER_TEMP.' }
-if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'The Store package user phase must run on the isolated GitHub-hosted Windows runner.' }
+$isLocalFallback = $env:CONTEXTPICK_LOCAL_MSIX_FALLBACK -eq '1' -and $env:RUNNER_ENVIRONMENT -eq 'local-admin-fallback'
+$isHostedRunner = $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
+if ((-not $isHostedRunner -and -not $isLocalFallback) -or $env:RUNNER_OS -ne 'Windows') { throw 'The Store package user phase requires GitHub-hosted Windows or the explicit local-admin fallback.' }
+if ($isLocalFallback -and [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'X64') { throw 'The local standard-user lifecycle fallback supports Windows x64 only.' }
 if ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'MSIX install, app execution, upgrade and uninstall must run under a verified standard-user token.'
 }

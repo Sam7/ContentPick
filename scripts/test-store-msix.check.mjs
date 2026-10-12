@@ -38,11 +38,41 @@ test('test-signing certificate generation is bounded, code-signing scoped, and c
 
   assert.doesNotMatch(script, /New-SelfSignedCertificate/i);
   assert.match(script, /create-msix-test-certificate\.ps1[\s\S]*?-TimeoutSeconds 120/);
-  assert.ok(script.includes(String.raw`certificateCreated = Test-Path -LiteralPath "Cert:\CurrentUser\My\$certThumbprint"`));
+  assert.ok(script.includes('$certificateCreated = $true'));
   assert.match(script, /if \(\$certThumbprint\) \{[\s\S]*?Build-user certificate cleanup failed/);
   assert.match(helper, /CertificateRequest/);
   assert.match(helper, /1\.3\.6\.1\.5\.5\.7\.3\.3/);
   assert.match(helper, /CONTEXTPICK_TEST_CERT_PFX_PASSWORD/);
   assert.doesNotMatch(helper, /PersistKeySet|X509Certificate2\]::new\(\$PfxPath/i);
   assert.match(helper, /X509Certificate2\]::new\(\$CerPath\)/);
+});
+
+test('post-certificate store and signing phases are observable and bounded', () => {
+  assert.match(script, /Write-LifecyclePhase 'Validating temporary signing certificate\./);
+  assert.match(script, /Write-LifecyclePhase 'Locating Windows SDK SignTool\./);
+  assert.match(script, /Write-LifecyclePhase 'Installing temporary build-user root trust\.'/);
+  assert.match(script, /Write-LifecyclePhase 'Signing and verifying Store candidate and test upgrade packages\.'/);
+  assert.match(script, /Invoke-NativeCommand -FilePath \$SignToolPath[\s\S]*?-TimeoutSeconds 180/);
+});
+
+test('certificate-provider checks after certificate creation do not run unbounded in the parent', () => {
+  const helperFlowStart = script.indexOf("$certificateHelper = Join-Path $PSScriptRoot 'create-msix-test-certificate.ps1'");
+  const certificateValidationStart = script.indexOf("Write-LifecyclePhase 'Validating temporary signing certificate.'", helperFlowStart);
+  assert.notEqual(helperFlowStart, -1);
+  assert.notEqual(certificateValidationStart, -1);
+  const postHelper = script.slice(helperFlowStart, certificateValidationStart);
+  assert.match(postHelper, /Write-LifecyclePhase 'Reading temporary certificate result for cleanup\.'/);
+  assert.doesNotMatch(postHelper, /Test-Path[^\r\n]*Cert:/);
+  assert.doesNotMatch(postHelper, /Get-Item[^\r\n]*Cert:/);
+  assert.match(script, /Test-Path[^\r\n]*Cert:\\CurrentUser\\Root[\s\S]*?Invoke-NativeCommand[\s\S]*?-TimeoutSeconds 120/);
+  assert.match(script, /Import-Certificate -FilePath[\s\S]*?-ErrorAction Stop/);
+});
+
+test('local lifecycle fallback is an explicit Windows 11 x64 opt-in', async () => {
+  const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
+  assert.match(script, /param\(\s*\[switch\]\$AllowLocalWin11X64/);
+  assert.match(script, /AllowLocalWin11X64[\s\S]*?hostArchitecture -ne 'X64'[\s\S]*?osBuild -lt \$minimumBuild/s);
+  assert.match(script, /RUNNER_ENVIRONMENT = \$executionEnvironment/);
+  assert.match(standardUserScript, /CONTEXTPICK_LOCAL_MSIX_FALLBACK -eq '1'/);
+  assert.match(standardUserScript, /RUNNER_ENVIRONMENT -eq 'local-admin-fallback'/);
 });

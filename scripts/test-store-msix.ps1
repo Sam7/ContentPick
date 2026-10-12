@@ -1,3 +1,7 @@
+param(
+    [switch]$AllowLocalWin11X64
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -127,8 +131,8 @@ function Sign-TestPackage {
         [Parameter(Mandatory = $true)] [string]$Password,
         [Parameter(Mandatory = $true)] [string]$LogPrefix
     )
-    Invoke-NativeCommand -FilePath $SignToolPath -ArgumentList @('sign', '/fd', 'SHA256', '/f', $PfxPath, '/p', $Password, $PackagePath) -LogPath "$LogPrefix-sign.log"
-    Invoke-NativeCommand -FilePath $SignToolPath -ArgumentList @('verify', '/pa', '/v', $PackagePath) -LogPath "$LogPrefix-verify.log"
+    Invoke-NativeCommand -FilePath $SignToolPath -ArgumentList @('sign', '/fd', 'SHA256', '/f', $PfxPath, '/p', $Password, $PackagePath) -LogPath "$LogPrefix-sign.log" -TimeoutSeconds 180
+    Invoke-NativeCommand -FilePath $SignToolPath -ArgumentList @('verify', '/pa', '/v', $PackagePath) -LogPath "$LogPrefix-verify.log" -TimeoutSeconds 180
 }
 
 function Write-LifecyclePhase {
@@ -199,18 +203,32 @@ function Wait-ForProcessTreeExit {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+$previousRunnerTemp = $env:RUNNER_TEMP
+$isLocalFallback = [bool]$AllowLocalWin11X64
+$isElevated = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($isLocalFallback) {
+    if ($env:GITHUB_ACTIONS -eq 'true') { throw 'The local fallback switch is not valid inside GitHub Actions.' }
+    if (-not $isElevated) { throw 'The local fallback must be started as Administrator to provision its disposable standard-user account.' }
+    if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) { throw 'The local fallback requires Windows.' }
+    $runnerTemp = Join-Path ([System.IO.Path]::GetTempPath()) ('ContextPick-Msix-' + [Guid]::NewGuid().ToString('N'))
+    $executionEnvironment = 'local-admin-fallback'
+    $env:RUNNER_TEMP = $runnerTemp
+    $null = New-Item -ItemType Directory -Path $runnerTemp
+} else {
+    $runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+    $executionEnvironment = $env:RUNNER_ENVIRONMENT
+}
 $resultRoot = [System.IO.Path]::GetFullPath((Join-Path $runnerTemp 'contextpick-msix-validation'))
 $privateRoot = [System.IO.Path]::GetFullPath((Join-Path $runnerTemp ('contextpick-msix-private-' + [Guid]::NewGuid().ToString('N'))))
 $runnerTempPrefix = $runnerTemp.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 if (-not $resultRoot.StartsWith($runnerTempPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw 'MSIX lifecycle evidence must remain below the dedicated GitHub runner temp directory.'
+    throw 'MSIX lifecycle evidence must remain below the dedicated test-runner temp directory.'
 }
-if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
-    throw 'Store-identity MSIX signing and installation are restricted to an ephemeral GitHub-hosted Windows runner.'
-}
-if (-not [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'The hosted runner must be elevated only to provision the disposable standard-user test account.'
+if (-not $isLocalFallback) {
+    if ($env:GITHUB_ACTIONS -ne 'true' -or $executionEnvironment -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+        throw 'Store-identity MSIX signing and installation require an ephemeral GitHub-hosted Windows runner unless the explicit local fallback switch is used.'
+    }
+    if (-not $isElevated) { throw 'The hosted runner must be elevated only to provision the disposable standard-user test account.' }
 }
 if (Test-Path -LiteralPath $resultRoot) { throw "Refusing to reuse an existing lifecycle evidence directory: $resultRoot." }
 $null = New-Item -ItemType Directory -Path $resultRoot
@@ -221,6 +239,8 @@ $null = New-Item -ItemType Directory -Path $logRoot
 $identityName = 'DotSam.ContextPick'
 $publisher = 'CN=9CF819D8-048A-42F9-91C4-E85E76577891'
 $minimumBuild = 26200
+$msixBuildRoot = Join-Path $repoRoot ('target\msix\lifecycle-' + [Guid]::NewGuid().ToString('N'))
+$packageLayout = Join-Path $msixBuildRoot 'package-layout'
 $appVersionText = (Get-Content -LiteralPath (Join-Path $repoRoot 'src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json).version
 if ($appVersionText -notmatch '^(\d+)\.(\d+)\.(\d+)$') { throw "Expected stable three-part app version, received $appVersionText." }
 $parts = $appVersionText.Split('.') | ForEach-Object { [int]$_ }
@@ -234,8 +254,8 @@ $hostVersion = "10.0.$osBuild.$osUbr"
 $hostArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 $existingPackages = @(Get-AppxPackage -Name $identityName -ErrorAction SilentlyContinue)
 $existingPackagesAllUsers = @(Get-AppxPackage -AllUsers -Name $identityName -ErrorAction SilentlyContinue)
-$candidateUnsigned = Join-Path $repoRoot "target\msix\ContextPick-$appVersionText.msix"
-$upgradeUnsigned = Join-Path $repoRoot 'target\msix\ContextPick-upgrade-test.msix'
+$candidateUnsigned = Join-Path $msixBuildRoot "ContextPick-$appVersionText.msix"
+$upgradeUnsigned = Join-Path $msixBuildRoot 'ContextPick-upgrade-test.msix'
 $candidateSigned = Join-Path $resultRoot "ContextPick-$appVersionText-test-signed.msix"
 $upgradeSigned = Join-Path $resultRoot 'ContextPick-upgrade-test-signed.msix'
 $candidateEvidence = Join-Path $resultRoot "ContextPick-$appVersionText.msix"
@@ -260,9 +280,10 @@ $userProfile = $null
 $securePassword = $null
 $child = $null
 $certThumbprint = $null
+$previousMsixAppBinary = $env:CONTEXTPICK_MSIX_APP_BINARY
 $report = [ordered]@{
     status = 'in_progress'
-    runner = [ordered]@{ environment = $env:RUNNER_ENVIRONMENT; image = $env:ImageOS; imageVersion = $env:ImageVersion; architecture = $hostArchitecture; windowsVersion = $hostVersion; minimumBuild = $minimumBuild; buildTokenElevated = $true; testTokenElevated = $null }
+    runner = [ordered]@{ environment = $executionEnvironment; image = $env:ImageOS; imageVersion = $env:ImageVersion; architecture = $hostArchitecture; windowsVersion = $hostVersion; minimumBuild = $minimumBuild; buildTokenElevated = $isElevated; testTokenElevated = $null }
     package = [ordered]@{ identity = $identityName; publisher = $publisher; architecture = 'x64'; appVersion = $appVersionText; version = $packageVersion; sha256Unsigned = $null; sha256TestSigned = $null; sha256UpgradeUnsigned = $null; sha256UpgradeTestSigned = $null }
     wack = [ordered]@{ result = 'pending'; reportPath = $null; detail = $null }
     standardUser = $null
@@ -273,13 +294,15 @@ $report = [ordered]@{
 Write-ValidationReport
 
 try {
-    if ($hostArchitecture -ne 'Arm64') { throw "Expected a Windows 11 ARM64 runner; actual OS architecture is $hostArchitecture." }
+    if ($isLocalFallback) {
+        if ($hostArchitecture -ne 'X64') { throw "The explicit local fallback supports Windows 11 x64 only; actual OS architecture is $hostArchitecture." }
+        if ($osBuild -lt $minimumBuild) { throw "Local Windows build $osBuild is below the supported minimum $minimumBuild." }
+    } elseif ($hostArchitecture -ne 'Arm64') { throw "Expected a Windows 11 ARM64 runner; actual OS architecture is $hostArchitecture." }
     if ($osBuild -lt $minimumBuild) { throw "Windows build $osBuild is below the Store package minimum $minimumBuild." }
     if ($existingPackages.Count -ne 0 -or $existingPackagesAllUsers.Count -ne 0) { throw "A prior $identityName package exists on this runner; refusing to replace it." }
-    if (Test-Path -LiteralPath $candidateUnsigned) { throw "Candidate path already exists; refusing to reuse stale MSIX input: $candidateUnsigned." }
-    if (Test-Path -LiteralPath $upgradeUnsigned) { throw "Upgrade test path already exists; refusing to reuse stale input: $upgradeUnsigned." }
+    if (Test-Path -LiteralPath $msixBuildRoot) { throw "Isolated MSIX build directory already exists; refusing to reuse it: $msixBuildRoot." }
 
-    Write-Output "Hosted Windows: $hostVersion ($hostArchitecture), runner image $($env:ImageOS) $($env:ImageVersion)."
+    Write-Output "Windows MSIX lifecycle: $hostVersion ($hostArchitecture), environment $executionEnvironment, image $($env:ImageOS) $($env:ImageVersion)."
     Push-Location $repoRoot
     try {
         . (Join-Path $repoRoot 'scripts/env.ps1')
@@ -292,17 +315,11 @@ try {
         Invoke-NativeCommand -FilePath 'corepack' -ArgumentList @('pnpm', 'exec', 'tauri', 'build', '--target', 'x86_64-pc-windows-msvc', '--no-bundle') -LogPath (Join-Path $logRoot 'tauri-x64-build.log')
 
         $targetRelease = Join-Path $repoRoot 'target\x86_64-pc-windows-msvc\release'
-        $inputRelease = Join-Path $repoRoot 'target\release'
-        $null = New-Item -ItemType Directory -Force -Path $inputRelease
-        # MSVC no-bundle builds place WebView2Loader.dll under the Cargo build
-        # output directory. The MSIX preparer resolves and validates it there.
-        foreach ($fileName in @('contextpick.exe')) {
-            $source = Join-Path $targetRelease $fileName
-            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "x64 release build output is missing: $source." }
-            Copy-Item -LiteralPath $source -Destination (Join-Path $inputRelease $fileName)
-        }
-        Invoke-NativeCommand -FilePath 'node' -ArgumentList @('scripts/prepare-msix.mjs') -LogPath (Join-Path $logRoot 'prepare-msix.log')
-        Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('exec', '--yes', '--package=@microsoft/winappcli@0.7.1', '--', 'winapp', 'package', 'target/msix/package-layout', '--no-sign', '--output', $candidateUnsigned) -LogPath (Join-Path $logRoot 'package-msix.log') -TimeoutSeconds 1200
+        $appBinary = Join-Path $targetRelease 'contextpick.exe'
+        if (-not (Test-Path -LiteralPath $appBinary -PathType Leaf)) { throw "x64 release build output is missing: $appBinary." }
+        $env:CONTEXTPICK_MSIX_APP_BINARY = [System.IO.Path]::GetRelativePath($repoRoot, $appBinary).Replace('\', '/')
+        Invoke-NativeCommand -FilePath 'node' -ArgumentList @('scripts/prepare-msix.mjs', $packageLayout) -LogPath (Join-Path $logRoot 'prepare-msix.log')
+        Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('exec', '--yes', '--package=@microsoft/winappcli@0.7.1', '--', 'winapp', 'package', $packageLayout, '--no-sign', '--output', $candidateUnsigned) -LogPath (Join-Path $logRoot 'package-msix.log') -TimeoutSeconds 1200
     } finally { Pop-Location }
 
     if (-not (Test-Path -LiteralPath $candidateUnsigned -PathType Leaf)) { throw 'The Store-identity candidate MSIX was not created.' }
@@ -321,8 +338,8 @@ try {
     Write-LifecyclePhase 'Candidate package manifest, identity, hash, and copy verified.'
     Write-Output "Unsigned Store candidate: $unsignedHash ($($report.package.sizeBytes) bytes)."
 
-    $upgradeLayout = Join-Path $repoRoot 'target\msix\upgrade-test-layout'
-    Copy-Item -LiteralPath (Join-Path $repoRoot 'target\msix\package-layout') -Destination $upgradeLayout -Recurse
+    $upgradeLayout = Join-Path $msixBuildRoot 'upgrade-test-layout'
+    Copy-Item -LiteralPath $packageLayout -Destination $upgradeLayout -Recurse
     $upgradeManifestPath = Join-Path $upgradeLayout 'Package.appxmanifest'
     [xml]$upgradeManifest = Get-Content -LiteralPath $upgradeManifestPath -Raw
     $identityNode = $upgradeManifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
@@ -331,7 +348,7 @@ try {
     $upgradeManifest.Save($upgradeManifestPath)
     Push-Location $repoRoot
     try {
-        Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('exec', '--yes', '--package=@microsoft/winappcli@0.7.1', '--', 'winapp', 'package', 'target/msix/upgrade-test-layout', '--no-sign', '--output', $upgradeUnsigned) -LogPath (Join-Path $logRoot 'package-upgrade-msix.log') -TimeoutSeconds 1200
+        Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('exec', '--yes', '--package=@microsoft/winappcli@0.7.1', '--', 'winapp', 'package', $upgradeLayout, '--no-sign', '--output', $upgradeUnsigned) -LogPath (Join-Path $logRoot 'package-upgrade-msix.log') -TimeoutSeconds 1200
     } finally { Pop-Location }
     Write-LifecyclePhase 'Validating higher-version upgrade package manifest and identity.'
     if (-not (Test-Path -LiteralPath $upgradeUnsigned -PathType Leaf)) { throw 'The higher-version upgrade test MSIX was not created.' }
@@ -356,27 +373,32 @@ try {
         ) -LogPath (Join-Path $logRoot 'create-test-certificate.log') -TimeoutSeconds 120
     } finally {
         Remove-Item Env:CONTEXTPICK_TEST_CERT_PFX_PASSWORD -ErrorAction SilentlyContinue
+        Write-LifecyclePhase 'Reading temporary certificate result for cleanup.'
         if (Test-Path -LiteralPath $certificateThumbprintPath -PathType Leaf) {
             $certThumbprint = (Get-Content -LiteralPath $certificateThumbprintPath -Raw).Trim()
-            $certificateCreated = Test-Path -LiteralPath "Cert:\CurrentUser\My\$certThumbprint"
+            if ($certThumbprint -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Temporary certificate helper returned an invalid thumbprint.' }
+            $certificateCreated = $true
         }
     }
-    if (-not $certificateCreated) { throw 'Test certificate helper completed without creating a tracked CurrentUser certificate.' }
-    $testCertificate = Get-Item -LiteralPath "Cert:\CurrentUser\My\$certThumbprint" -ErrorAction Stop
-    if ($testCertificate.Subject -cne $publisher) { throw "Test-signing certificate subject mismatch: $($testCertificate.Subject)." }
-    if (Test-Path -LiteralPath "Cert:\LocalMachine\TrustedPeople\$certThumbprint") { throw 'Refusing to reuse an existing machine-level test signer trust entry.' }
-    $report.signing = [ordered]@{ subject = $testCertificate.Subject; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'Build-user CurrentUser Root (signature verification only; removed before standard-user install)', 'Standard-user CurrentUser TrustedPeople', 'LocalMachine TrustedPeople (added only after clean install)'); privateKeyRetainedOnlyInRunner = $true }
+    if (-not $certificateCreated) { throw 'Test certificate helper completed without recording a temporary certificate for cleanup.' }
+    Write-LifecyclePhase 'Validating temporary signing certificate.'
+    $report.signing = [ordered]@{ subject = $publisher; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'Build-user CurrentUser Root (signature verification only; removed before standard-user install)', 'Standard-user CurrentUser TrustedPeople', 'LocalMachine TrustedPeople (added only after clean install)'); privateKeyRetainedOnlyInRunner = $true }
 
     Copy-Item -LiteralPath $candidateUnsigned -Destination $candidateSigned
     Copy-Item -LiteralPath $upgradeUnsigned -Destination $upgradeSigned
+    Write-LifecyclePhase 'Locating Windows SDK SignTool.'
     $signTool = Get-SignToolPath
-    if (Test-Path -LiteralPath "Cert:\CurrentUser\Root\$certThumbprint") { throw 'Refusing to reuse an existing build-user test signer root trust entry.' }
-    Import-Certificate -FilePath $cerPath -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+    Write-LifecyclePhase 'Installing temporary build-user root trust.'
+    $buildUserRootPath = "Cert:\CurrentUser\Root\$certThumbprint"
+    $machineTrustedPeoplePath = "Cert:\LocalMachine\TrustedPeople\$certThumbprint"
+    $rootTrustCommand = '$ErrorActionPreference = ''Stop''; if (Test-Path -LiteralPath ' + (ConvertTo-PowerShellLiteral -Value $buildUserRootPath) + ') { throw ' + (ConvertTo-PowerShellLiteral -Value 'Refusing to reuse an existing build-user test signer root trust entry.') + ' }; if (Test-Path -LiteralPath ' + (ConvertTo-PowerShellLiteral -Value $machineTrustedPeoplePath) + ') { throw ' + (ConvertTo-PowerShellLiteral -Value 'Refusing to reuse an existing machine-level test signer trust entry.') + ' }; Import-Certificate -FilePath ' + (ConvertTo-PowerShellLiteral -Value $cerPath) + " -CertStoreLocation 'Cert:\CurrentUser\Root' -ErrorAction Stop | Out-Null"
+    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', $rootTrustCommand) -LogPath (Join-Path $logRoot 'install-build-user-root-trust.log') -TimeoutSeconds 120
     Write-LifecyclePhase 'Signing and verifying Store candidate and test upgrade packages.'
     Sign-TestPackage -PackagePath $candidateSigned -SignToolPath $signTool -PfxPath $pfxPath -Password $pfxPassword -LogPrefix (Join-Path $logRoot 'candidate')
     Sign-TestPackage -PackagePath $upgradeSigned -SignToolPath $signTool -PfxPath $pfxPath -Password $pfxPassword -LogPrefix (Join-Path $logRoot 'upgrade')
-    Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$certThumbprint" -ErrorAction Stop
-    if (Test-Path -LiteralPath "Cert:\CurrentUser\Root\$certThumbprint") { throw 'Build-user test signer root trust remains before standard-user installation.' }
+    $buildUserRootPath = "Cert:\CurrentUser\Root\$certThumbprint"
+    $removeBuildUserRootCommand = 'Remove-Item -LiteralPath ' + (ConvertTo-PowerShellLiteral -Value $buildUserRootPath) + ' -ErrorAction Stop; if (Test-Path -LiteralPath ' + (ConvertTo-PowerShellLiteral -Value $buildUserRootPath) + ') { throw ' + (ConvertTo-PowerShellLiteral -Value 'Build-user test signer root trust remains before standard-user installation.') + ' }'
+    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', $removeBuildUserRootCommand) -LogPath (Join-Path $logRoot 'remove-build-user-root-trust.log') -TimeoutSeconds 120
     $report.package.sha256TestSigned = (Get-FileHash -LiteralPath $candidateSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     $report.package.sha256UpgradeTestSigned = (Get-FileHash -LiteralPath $upgradeSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-ValidationReport
@@ -451,7 +473,6 @@ try {
         COMPUTERNAME = $env:COMPUTERNAME
         COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
         COREPACK_HOME = Join-Path $resultRoot 'corepack'
-        GITHUB_ACTIONS = 'true'
         GITHUB_WORKSPACE = $repoRoot
         HOMEDRIVE = $systemDrive
         HOMEPATH = $userProfile.Substring($systemDrive.Length)
@@ -459,15 +480,17 @@ try {
         PATH = "$nodeHome;$pnpmHome;$PSHOME;$windowsPowerShellPath;$systemRoot\System32;$systemRoot"
         PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
         PNPM_HOME = $pnpmHome
-        PROCESSOR_ARCHITECTURE = 'ARM64'
+        PROCESSOR_ARCHITECTURE = if ($hostArchitecture -eq 'Arm64') { 'ARM64' } else { 'AMD64' }
         ProgramData = Join-Path $systemDriveRoot 'ProgramData'
         ProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
         'ProgramFiles(x86)' = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
         ProgramW6432 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
         PUBLIC = Join-Path $systemDriveRoot 'Users\Public'
-        RUNNER_ENVIRONMENT = 'github-hosted'
+        RUNNER_ENVIRONMENT = $executionEnvironment
         RUNNER_OS = 'Windows'
         RUNNER_TEMP = $runnerTemp
+        CONTEXTPICK_LOCAL_MSIX_FALLBACK = if ($isLocalFallback) { '1' } else { '0' }
+        GITHUB_ACTIONS = if ($isLocalFallback) { 'false' } else { 'true' }
         SystemDrive = $systemDrive
         SystemRoot = $systemRoot
         TEMP = Join-Path $resultRoot 'standard-user-temp'
@@ -639,6 +662,20 @@ try {
             $machineTrustInstalled = $false
         } catch { $cleanupErrors.Add("Test-certificate trust cleanup failed: $($_.Exception.Message)") }
     }
+    if (Test-Path -LiteralPath $msixBuildRoot) {
+        try {
+            $targetMsixRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'target\msix')).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+            $resolvedBuildRoot = [System.IO.Path]::GetFullPath($msixBuildRoot)
+            if (-not $resolvedBuildRoot.StartsWith($targetMsixRoot, [System.StringComparison]::OrdinalIgnoreCase) -or -not (Split-Path -Leaf $resolvedBuildRoot).StartsWith('lifecycle-', [System.StringComparison]::Ordinal)) {
+                throw "Refusing to remove an unexpected MSIX lifecycle output path: $resolvedBuildRoot."
+            }
+            Remove-Item -LiteralPath $resolvedBuildRoot -Recurse -Force -ErrorAction Stop
+        } catch { $cleanupErrors.Add("Isolated MSIX build output cleanup failed: $($_.Exception.Message)") }
+    }
+    if ($null -eq $previousMsixAppBinary) { Remove-Item Env:CONTEXTPICK_MSIX_APP_BINARY -ErrorAction SilentlyContinue }
+    else { $env:CONTEXTPICK_MSIX_APP_BINARY = $previousMsixAppBinary }
+    if ($null -eq $previousRunnerTemp) { Remove-Item Env:RUNNER_TEMP -ErrorAction SilentlyContinue }
+    else { $env:RUNNER_TEMP = $previousRunnerTemp }
     if (Test-Path -LiteralPath $privateRoot) {
         try {
             Remove-Item -LiteralPath $privateRoot -Recurse -Force -ErrorAction Stop

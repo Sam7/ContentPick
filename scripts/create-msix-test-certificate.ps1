@@ -43,9 +43,6 @@ try {
         if (-not (Test-Path -LiteralPath $directory -PathType Container)) { throw "Certificate output directory does not exist: $directory." }
     }
 
-    # Record cleanup identity before importing into the store so a timed-out caller
-    # can still remove the certificate if the store operation was interrupted.
-    [IO.File]::WriteAllText($ThumbprintPath, $certificate.Thumbprint, [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllBytes($PfxPath, $certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Pfx, $password))
     [IO.File]::WriteAllBytes($CerPath, $certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
 
@@ -59,6 +56,9 @@ try {
     if (@($store.Certificates | Where-Object Thumbprint -eq $certificate.Thumbprint).Count -ne 0) {
         throw 'Refusing to reuse a certificate already present in CurrentUser My.'
     }
+    # Record cleanup identity only after ruling out a preexisting thumbprint, but
+    # before adding it so a timed-out caller can still remove a partial import.
+    [IO.File]::WriteAllText($ThumbprintPath, $certificate.Thumbprint, [Text.UTF8Encoding]::new($false))
     $store.Add($publicCertificate)
     Write-Output "Created temporary code-signing certificate $($certificate.Thumbprint)."
 } finally {
