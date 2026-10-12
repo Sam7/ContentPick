@@ -436,6 +436,30 @@ try {
     foreach ($relativeDirectory in @('node_modules', 'src', 'tests\native', 'scripts')) {
         Grant-TemporaryAccess -Path (Join-Path $repoRoot $relativeDirectory) -Rights 'RX' -Recursive
     }
+    $playwrightPackageLink = Get-Item -LiteralPath (Join-Path $repoRoot 'node_modules\@playwright\test') -Force
+    if (($playwrightPackageLink.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $nodeModulesRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'node_modules'))
+        $nodeModulesPrefix = $nodeModulesRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        $playwrightPackageTarget = [string]$playwrightPackageLink.Target
+        if (-not [IO.Path]::IsPathRooted($playwrightPackageTarget)) {
+            $playwrightPackageTarget = Join-Path (Split-Path -Parent $playwrightPackageLink.FullName) $playwrightPackageTarget
+        }
+        $playwrightPackageTarget = [IO.Path]::GetFullPath($playwrightPackageTarget)
+        if (-not $playwrightPackageTarget.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to grant access through an unexpected Playwright package link target: $playwrightPackageTarget."
+        }
+        $playwrightTargetAncestor = $playwrightPackageTarget
+        while ($playwrightTargetAncestor.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $targetAncestorItem = Get-Item -LiteralPath $playwrightTargetAncestor -Force
+            if (($targetAncestorItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to grant access through a nested reparse point in the Playwright target: $playwrightTargetAncestor."
+            }
+            $playwrightTargetAncestor = Split-Path -Parent $playwrightTargetAncestor
+        }
+        # pnpm exposes this dependency through a junction; grant its resolved, in-tree target too.
+        Write-LifecyclePhase "Granting the disposable user access to the resolved Playwright package target: $playwrightPackageTarget"
+        Grant-TemporaryAccess -Path $playwrightPackageTarget -Rights 'RX' -Recursive
+    }
     foreach ($relativeFile in @('index.html', 'package.json', 'pnpm-lock.yaml', 'playwright.native.config.ts', 'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json')) {
         Grant-TemporaryAccess -Path (Join-Path $repoRoot $relativeFile) -Rights 'RX'
     }

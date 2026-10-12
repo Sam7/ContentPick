@@ -12,6 +12,16 @@ test('standard-user access avoids recursively granting the entire checkout', () 
   assert.match(script, /foreach \(\$relativeFile in @\('index\.html', 'package\.json', 'pnpm-lock\.yaml', 'playwright\.native\.config\.ts', 'vite\.config\.ts', 'tsconfig\.json', 'tsconfig\.app\.json', 'tsconfig\.node\.json'\)\)\s*\{\s*Grant-TemporaryAccess -Path \(Join-Path \$repoRoot \$relativeFile\) -Rights 'RX'/s);
 });
 
+test('standard-user access follows the Playwright junction to its in-checkout pnpm target', () => {
+  assert.match(script, /Get-Item -LiteralPath \(Join-Path \$repoRoot 'node_modules\\@playwright\\test'\) -Force/);
+  assert.match(script, /Attributes -band \[IO\.FileAttributes\]::ReparsePoint/);
+  assert.match(script, /\$playwrightPackageTarget = \[string\]\$playwrightPackageLink\.Target/);
+  assert.match(script, /\$playwrightPackageTarget = \[IO\.Path\]::GetFullPath\(\$playwrightPackageTarget\)/);
+  assert.match(script, /playwrightPackageTarget\.StartsWith\(\$nodeModulesPrefix/);
+  assert.match(script, /while \(\$playwrightTargetAncestor\.StartsWith\(\$nodeModulesPrefix[\s\S]*?Get-Item -LiteralPath \$playwrightTargetAncestor -Force[\s\S]*?ReparsePoint[\s\S]*?throw/);
+  assert.match(script, /Grant-TemporaryAccess -Path \$playwrightPackageTarget -Rights 'RX' -Recursive/);
+});
+
 test('standard-user writable state stays in runner evidence folders', () => {
   for (const relativePath of [
     'corepack',

@@ -89,12 +89,26 @@ function Write-UserReport {
 function Write-PlaywrightPackageAccessDiagnostics {
     $manifestPath = Join-Path $repositoryFullPath 'node_modules\@playwright\test\package.json'
     Write-Output "Playwright package access probe as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) ($userSid): $manifestPath"
-    $path = $manifestPath
-    while ($path -and $path.StartsWith($repositoryFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Write-Output "ACL: $path"
-        & icacls.exe $path 2>&1
-        $path = Split-Path -Parent $path
-        if ([string]::IsNullOrWhiteSpace($path)) { break }
+    $manifestPaths = [System.Collections.Generic.List[string]]::new()
+    $manifestPaths.Add($manifestPath)
+    $packageLink = Get-Item -LiteralPath (Join-Path $repositoryFullPath 'node_modules\@playwright\test') -Force -ErrorAction SilentlyContinue
+    if ($packageLink) {
+        Write-Output "Playwright package directory attributes: $($packageLink.Attributes); link type: $($packageLink.LinkType); target: $($packageLink.Target)"
+        if (($packageLink.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $target = [string]$packageLink.Target
+            if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path (Split-Path -Parent $packageLink.FullName) $target }
+            $targetManifest = Join-Path ([IO.Path]::GetFullPath($target)) 'package.json'
+            $manifestPaths.Add($targetManifest)
+        }
+    }
+    foreach ($candidateManifest in $manifestPaths) {
+        $path = $candidateManifest
+        while ($path -and $path.StartsWith($repositoryFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Output "ACL: $path"
+            & icacls.exe $path 2>&1
+            $path = Split-Path -Parent $path
+            if ([string]::IsNullOrWhiteSpace($path)) { break }
+        }
     }
 
     $item = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
