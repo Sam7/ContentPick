@@ -456,29 +456,53 @@ try {
             }
             $playwrightTargetAncestor = Split-Path -Parent $playwrightTargetAncestor
         }
-        # pnpm exposes this dependency through a junction. Its protected package files
-        # need explicit, non-recursive ACLs for the standard-user test account.
+        # pnpm exposes this dependency graph through junctions. Follow only links
+        # whose resolved targets remain inside node_modules, then grant exact paths.
         $playwrightPackageManifest = Join-Path $playwrightPackageTarget 'package.json'
         if (-not (Test-Path -LiteralPath $playwrightPackageManifest -PathType Leaf)) {
             throw "The resolved Playwright package has no package manifest: $playwrightPackageManifest."
         }
-        $playwrightPackagePrefix = $playwrightPackageTarget.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-        $playwrightPackageItems = @(Get-ChildItem -LiteralPath $playwrightPackageTarget -Force -Recurse)
         $playwrightPackageDirectories = [System.Collections.Generic.List[string]]::new()
         $playwrightPackageFiles = [System.Collections.Generic.List[string]]::new()
-        $playwrightPackageDirectories.Add($playwrightPackageTarget)
-        foreach ($playwrightPackageItem in $playwrightPackageItems) {
-            $itemPath = [IO.Path]::GetFullPath($playwrightPackageItem.FullName)
-            if (($playwrightPackageItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "Refusing to grant access through a reparse point in the Playwright package: $itemPath."
+        $playwrightVisitedDirectories = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $playwrightVisitedFiles = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $playwrightDirectoryQueue = [System.Collections.Generic.Queue[string]]::new()
+        $playwrightDirectoryQueue.Enqueue($playwrightPackageTarget)
+        while ($playwrightDirectoryQueue.Count -gt 0) {
+            $playwrightDirectory = $playwrightDirectoryQueue.Dequeue()
+            if (-not $playwrightVisitedDirectories.Add($playwrightDirectory)) { continue }
+            $playwrightPackageDirectories.Add($playwrightDirectory)
+            foreach ($playwrightItem in Get-ChildItem -LiteralPath $playwrightDirectory -Force) {
+                $playwrightItemPath = [IO.Path]::GetFullPath($playwrightItem.FullName)
+                if (($playwrightItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    $playwrightLinkTarget = $playwrightItem.ResolveLinkTarget($true)
+                    if ($null -eq $playwrightLinkTarget) {
+                        throw "Could not resolve a Playwright package link: $($playwrightItem.FullName)."
+                    }
+                    $playwrightItemPath = [IO.Path]::GetFullPath($playwrightLinkTarget.FullName)
+                }
+                if (-not $playwrightItemPath.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Refusing to grant access through a Playwright package link outside node_modules: $playwrightItemPath."
+                }
+                $playwrightItemAncestor = $playwrightItemPath
+                while ($playwrightItemAncestor.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    $playwrightItemAncestorEntry = Get-Item -LiteralPath $playwrightItemAncestor -Force
+                    if (($playwrightItemAncestorEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "Refusing to grant access through an unresolved Playwright package link: $playwrightItemAncestor."
+                    }
+                    $playwrightItemAncestor = Split-Path -Parent $playwrightItemAncestor
+                }
+                $playwrightResolvedItem = Get-Item -LiteralPath $playwrightItemPath -Force
+                if ($playwrightResolvedItem.PSIsContainer) {
+                    if (-not $playwrightVisitedDirectories.Contains($playwrightItemPath)) {
+                        $playwrightDirectoryQueue.Enqueue($playwrightItemPath)
+                    }
+                } elseif ($playwrightVisitedFiles.Add($playwrightItemPath)) {
+                    $playwrightPackageFiles.Add($playwrightItemPath)
+                }
             }
-            if (-not $itemPath.StartsWith($playwrightPackagePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "Refusing to grant access outside the resolved Playwright package: $itemPath."
-            }
-            if ($playwrightPackageItem.PSIsContainer) { $playwrightPackageDirectories.Add($itemPath) }
-            else { $playwrightPackageFiles.Add($itemPath) }
         }
-        if (-not $playwrightPackageFiles.Contains([IO.Path]::GetFullPath($playwrightPackageManifest))) {
+        if (-not $playwrightVisitedFiles.Contains([IO.Path]::GetFullPath($playwrightPackageManifest))) {
             throw "The resolved Playwright package manifest was not included in its regular file list: $playwrightPackageManifest."
         }
         Write-LifecyclePhase "Granting access to $($playwrightPackageDirectories.Count) Playwright package directories and $($playwrightPackageFiles.Count) files."
