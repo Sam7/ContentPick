@@ -456,9 +456,15 @@ try {
             }
             $playwrightTargetAncestor = Split-Path -Parent $playwrightTargetAncestor
         }
-        # pnpm exposes this dependency through a junction; grant its resolved, in-tree target too.
-        Write-LifecyclePhase "Granting the disposable user access to the resolved Playwright package target: $playwrightPackageTarget"
-        Grant-TemporaryAccess -Path $playwrightPackageTarget -Rights 'RX' -Recursive
+        # pnpm exposes this dependency through a junction. The recursive node_modules
+        # grant does not make this protected manifest readable, so grant only that file.
+        $playwrightPackageManifest = Join-Path $playwrightPackageTarget 'package.json'
+        if (-not (Test-Path -LiteralPath $playwrightPackageManifest -PathType Leaf)) {
+            throw "The resolved Playwright package has no package manifest: $playwrightPackageManifest."
+        }
+        # The hosted runner's pnpm store can retain a protected manifest ACL despite
+        # the recursive directory grant; explicitly grant only this required file.
+        Grant-TemporaryAccess -Path $playwrightPackageManifest -Rights 'RX'
     }
     foreach ($relativeFile in @('index.html', 'package.json', 'pnpm-lock.yaml', 'playwright.native.config.ts', 'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json')) {
         Grant-TemporaryAccess -Path (Join-Path $repoRoot $relativeFile) -Rights 'RX'

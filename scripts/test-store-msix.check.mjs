@@ -19,7 +19,8 @@ test('standard-user access follows the Playwright junction to its in-checkout pn
   assert.match(script, /\$playwrightPackageTarget = \[IO\.Path\]::GetFullPath\(\$playwrightPackageTarget\)/);
   assert.match(script, /playwrightPackageTarget\.StartsWith\(\$nodeModulesPrefix/);
   assert.match(script, /while \(\$playwrightTargetAncestor\.StartsWith\(\$nodeModulesPrefix[\s\S]*?Get-Item -LiteralPath \$playwrightTargetAncestor -Force[\s\S]*?ReparsePoint[\s\S]*?throw/);
-  assert.match(script, /Grant-TemporaryAccess -Path \$playwrightPackageTarget -Rights 'RX' -Recursive/);
+  assert.match(script, /\$playwrightPackageManifest = Join-Path \$playwrightPackageTarget 'package\.json'[\s\S]*?Grant-TemporaryAccess -Path \$playwrightPackageManifest -Rights 'RX'/);
+  assert.doesNotMatch(script, /Grant-TemporaryAccess -Path \$playwrightPackageTarget -Rights 'RX' -Recursive/);
 });
 
 test('standard-user writable state stays in runner evidence folders', () => {
