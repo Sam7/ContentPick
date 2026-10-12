@@ -32,3 +32,17 @@ test('checkout-root access does not inherit and report permissions target an exi
   assert.match(script, /New-Item -ItemType File -Path \$standardUserReportPath -Force/);
   assert.ok(script.indexOf('New-Item -ItemType File -Path $standardUserReportPath -Force') < script.indexOf('Grant-TemporaryAccess -Path $standardUserReportPath -Rights \'M\''));
 });
+
+test('test-signing certificate generation is bounded, code-signing scoped, and cleanup tracked', async () => {
+  const helper = await readFile(new URL('./create-msix-test-certificate.ps1', import.meta.url), 'utf8').catch(() => '');
+
+  assert.doesNotMatch(script, /New-SelfSignedCertificate/i);
+  assert.match(script, /create-msix-test-certificate\.ps1[\s\S]*?-TimeoutSeconds 120/);
+  assert.ok(script.includes(String.raw`certificateCreated = Test-Path -LiteralPath "Cert:\CurrentUser\My\$certThumbprint"`));
+  assert.match(script, /if \(\$certThumbprint\) \{[\s\S]*?Build-user certificate cleanup failed/);
+  assert.match(helper, /CertificateRequest/);
+  assert.match(helper, /1\.3\.6\.1\.5\.5\.7\.3\.3/);
+  assert.match(helper, /CONTEXTPICK_TEST_CERT_PFX_PASSWORD/);
+  assert.doesNotMatch(helper, /PersistKeySet|X509Certificate2\]::new\(\$PfxPath/i);
+  assert.match(helper, /X509Certificate2\]::new\(\$CerPath\)/);
+});

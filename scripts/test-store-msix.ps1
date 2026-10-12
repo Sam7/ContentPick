@@ -242,7 +242,6 @@ $candidateEvidence = Join-Path $resultRoot "ContextPick-$appVersionText.msix"
 $pfxPath = Join-Path $privateRoot 'runner-only-test-signing.pfx'
 $cerPath = Join-Path $resultRoot 'runner-only-test-signing.cer'
 $pfxPassword = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(36))
-$pfxSecurePassword = ConvertTo-SecureString -String $pfxPassword -AsPlainText -Force
 $certificateCreated = $false
 $machineTrustInstalled = $false
 $childExited = $true
@@ -345,14 +344,27 @@ try {
     Write-LifecyclePhase 'Upgrade package manifest, identity, hash, and copy verified.'
 
     Write-LifecyclePhase 'Creating temporary package-test signing certificate.'
-    $testCertificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject $publisher -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy Exportable -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter ([DateTime]::UtcNow.AddDays(2))
-    $certificateCreated = $true
-    $certThumbprint = $testCertificate.Thumbprint
+    $null = New-Item -ItemType Directory -Path $privateRoot
+    $certificateThumbprintPath = Join-Path $privateRoot 'certificate-thumbprint.txt'
+    $certificateHelper = Join-Path $PSScriptRoot 'create-msix-test-certificate.ps1'
+    $env:CONTEXTPICK_TEST_CERT_PFX_PASSWORD = $pfxPassword
+    try {
+        Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateHelper,
+            '-Subject', $publisher, '-PfxPath', $pfxPath, '-CerPath', $cerPath,
+            '-ThumbprintPath', $certificateThumbprintPath
+        ) -LogPath (Join-Path $logRoot 'create-test-certificate.log') -TimeoutSeconds 120
+    } finally {
+        Remove-Item Env:CONTEXTPICK_TEST_CERT_PFX_PASSWORD -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $certificateThumbprintPath -PathType Leaf) {
+            $certThumbprint = (Get-Content -LiteralPath $certificateThumbprintPath -Raw).Trim()
+            $certificateCreated = Test-Path -LiteralPath "Cert:\CurrentUser\My\$certThumbprint"
+        }
+    }
+    if (-not $certificateCreated) { throw 'Test certificate helper completed without creating a tracked CurrentUser certificate.' }
+    $testCertificate = Get-Item -LiteralPath "Cert:\CurrentUser\My\$certThumbprint" -ErrorAction Stop
     if ($testCertificate.Subject -cne $publisher) { throw "Test-signing certificate subject mismatch: $($testCertificate.Subject)." }
     if (Test-Path -LiteralPath "Cert:\LocalMachine\TrustedPeople\$certThumbprint") { throw 'Refusing to reuse an existing machine-level test signer trust entry.' }
-    $null = New-Item -ItemType Directory -Path $privateRoot
-    Export-PfxCertificate -Cert $testCertificate -FilePath $pfxPath -Password $pfxSecurePassword | Out-Null
-    Export-Certificate -Cert $testCertificate -FilePath $cerPath | Out-Null
     $report.signing = [ordered]@{ subject = $testCertificate.Subject; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'Build-user CurrentUser Root (signature verification only; removed before standard-user install)', 'Standard-user CurrentUser TrustedPeople', 'LocalMachine TrustedPeople (added only after clean install)'); privateKeyRetainedOnlyInRunner = $true }
 
     Copy-Item -LiteralPath $candidateUnsigned -Destination $candidateSigned
@@ -614,7 +626,7 @@ try {
         $cleanupErrors.Add('The standard-user process tree did not stop; retained its profile and ACLs for hosted-runner teardown.')
     }
 
-    if ($certificateCreated -and $certThumbprint) {
+    if ($certThumbprint) {
         foreach ($storePath in @('Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root')) {
             try { Remove-Item -LiteralPath (Join-Path $storePath $certThumbprint) -ErrorAction SilentlyContinue } catch { $cleanupErrors.Add("Build-user certificate cleanup failed in ${storePath}: $($_.Exception.Message)") }
         }
@@ -639,7 +651,6 @@ try {
     if ($machineTrustInstalled) {
         $cleanupErrors.Add('Runner-only signer trust was installed but its cleanup did not complete.')
     }
-    if ($pfxSecurePassword) { $pfxSecurePassword.Dispose() }
     if ($securePassword) { $securePassword.Dispose() }
     $pfxPassword = $null
     $passwordString = $null
