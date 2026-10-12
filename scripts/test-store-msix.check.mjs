@@ -26,6 +26,17 @@ test('standard-user writable state stays in runner evidence folders', () => {
   assert.doesNotMatch(script, /Grant-TemporaryAccess\s+-Path\s+\$resultRoot\s+-Rights\s+'M'/i);
 });
 
+test('standard-user Playwright failures capture effective package access before execution', async () => {
+  const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
+  assert.match(standardUserScript, /function Write-PlaywrightPackageAccessDiagnostics/);
+  assert.match(standardUserScript, /node_modules\\@playwright\\test\\package\.json/);
+  assert.match(standardUserScript, /icacls\.exe \$path/);
+  assert.match(standardUserScript, /fsutil\.exe hardlink list/);
+  assert.match(standardUserScript, /\[System\.IO\.File\]::OpenRead\(\$manifestPath\)/);
+  assert.match(standardUserScript, /readFileSync\(process\.argv\[1\], 'utf8'\)/);
+  assert.match(standardUserScript, /\n\s*Write-PlaywrightPackageAccessDiagnostics\s*\n[\s\S]*?Invoke-NativeCommand -FilePath 'corepack'/);
+});
+
 test('checkout-root access does not inherit and report permissions target an existing file', () => {
   assert.match(script, /\$inheritance\s*=\s*if\s*\(\$Recursive\s+-and\s+\(Test-Path -LiteralPath \$Path -PathType Container\)\)/i);
   assert.match(script, /\$script:aclPaths\s*=\s*\[System\.Collections\.Generic\.List\[object\]\]::new\(\)/);
@@ -77,7 +88,13 @@ test('temporary machine-root trust uses a bounded noninteractive X509Store helpe
   assert.match(helper, /\.Remove\(\$existing\)/);
   assert.match(helper, /throw '.*already exists/);
   assert.match(helper, /Certificate store operation completed/);
-  assert.match(helper, /'TrustedPeople'; Location = 'CurrentUser'; Action = 'Remove'/);
+  const cleanupSpecs = helper.match(/'RemoveTemporaryCertificate'\s*\{([\s\S]*?)\n\s*\}/)?.[1] ?? '';
+  assert.match(cleanupSpecs, /'My'; Location = 'CurrentUser'; Action = 'Remove'/);
+  assert.doesNotMatch(cleanupSpecs, /'Root'; Location = 'CurrentUser'; Action = 'Remove'/);
+  assert.doesNotMatch(cleanupSpecs, /'TrustedPeople'; Location = 'CurrentUser'; Action = 'Remove'/);
+  assert.match(cleanupSpecs, /'Root'; Location = 'LocalMachine'; Action = 'Remove'/);
+  assert.match(cleanupSpecs, /'TrustedPeople'; Location = 'LocalMachine'; Action = 'Remove'/);
+  assert.match(helper, /catch\s*\{\s*if \(\$Operation -ne 'RemoveTemporaryCertificate'\) \{ throw \}[\s\S]*?storeErrors\.Add[\s\S]*?finally[\s\S]*?if \(\$storeErrors\.Count -gt 0\)[\s\S]*?throw/);
   assert.doesNotMatch(helper, /Import-Certificate|PromptForChoice|Windows\.Forms/i);
 });
 
@@ -101,7 +118,9 @@ test('standard-user MSIX install uses only temporary machine TrustedPeople trust
   assert.match(standardUserScript, /trustScope = 'LocalMachine TrustedPeople/);
   assert.doesNotMatch(standardUserScript, /Import-Certificate/);
   assert.doesNotMatch(standardUserScript, /Remove-Item[^\r\n]*Cert:\\CurrentUser\\TrustedPeople/);
-  assert.match(standardUserScript, /certificateAbsentFromStandardUserStores/);
+  assert.match(standardUserScript, /certificateAbsentFromStandardUserMyStore/);
+  assert.match(standardUserScript, /Get-ChildItem -Path 'Cert:\\CurrentUser\\My'/);
+  assert.doesNotMatch(standardUserScript, /Cert:\\CurrentUser\\(?:Root|TrustedPeople)/);
   assert.match(standardUserScript, /no signer was imported into standard-user stores, and the elevated parent performs machine trust cleanup/i);
   assert.match(script, /machineTrustedPeoplePresentBeforeInstall = \$true/);
 });

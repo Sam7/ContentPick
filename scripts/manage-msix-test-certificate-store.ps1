@@ -34,8 +34,6 @@ try {
         'RemoveMachineTrustedPeople' { [pscustomobject]@{ Name = 'TrustedPeople'; Location = 'LocalMachine'; Action = 'Remove' } }
         'RemoveTemporaryCertificate' {
             [pscustomobject]@{ Name = 'My'; Location = 'CurrentUser'; Action = 'Remove' }
-            [pscustomobject]@{ Name = 'Root'; Location = 'CurrentUser'; Action = 'Remove' }
-            [pscustomobject]@{ Name = 'TrustedPeople'; Location = 'CurrentUser'; Action = 'Remove' }
             [pscustomobject]@{ Name = 'Root'; Location = 'LocalMachine'; Action = 'Remove' }
             [pscustomobject]@{ Name = 'TrustedPeople'; Location = 'LocalMachine'; Action = 'Remove' }
         }
@@ -75,41 +73,57 @@ try {
         if ($conflicts.Count -ne 0) { throw 'The temporary signer already exists in LocalMachine Root.' }
     }
 
+    $storeErrors = [System.Collections.Generic.List[string]]::new()
     foreach ($spec in $storeSpecs) {
         $storeName = [string]$spec.Name
         $storeLocation = [Enum]::Parse([Security.Cryptography.X509Certificates.StoreLocation], [string]$spec.Location)
         $storeAction = [string]$spec.Action
         $store = [Security.Cryptography.X509Certificates.X509Store]::new($storeName, $storeLocation)
-        Write-Output "Opening $storeLocation $storeName certificate store for $storeAction."
-        [Console]::Out.Flush()
-        $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-        $openedStores.Add($store)
-        $matches = $store.Certificates.Find(
-            [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-            $Thumbprint,
-            $false
-        )
-
-        if ($storeAction -eq 'Add') {
-            if ($matches.Count -ne 0) { throw "The temporary signer already exists in $storeLocation $storeName." }
-            Write-Output "Adding temporary certificate to $storeLocation $storeName."
+        $storeOpened = $false
+        try {
+            Write-Output "Opening $storeLocation $storeName certificate store for $storeAction."
             [Console]::Out.Flush()
-            $store.Add($certificate)
-            $verified = $store.Certificates.Find(
+            $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            $storeOpened = $true
+            $matches = $store.Certificates.Find(
                 [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
                 $Thumbprint,
                 $false
             )
-            if ($verified.Count -ne 1) { throw "The temporary signer was not uniquely added to $storeLocation $storeName." }
-        } else {
-            foreach ($existing in $matches) { $store.Remove($existing) }
-            $remaining = $store.Certificates.Find(
-                [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-                $Thumbprint,
-                $false
-            )
-            if ($remaining.Count -ne 0) { throw "The temporary signer remains in $storeLocation $storeName after removal." }
+
+            if ($storeAction -eq 'Add') {
+                if ($matches.Count -ne 0) { throw "The temporary signer already exists in $storeLocation $storeName." }
+                Write-Output "Adding temporary certificate to $storeLocation $storeName."
+                [Console]::Out.Flush()
+                $store.Add($certificate)
+                $verified = $store.Certificates.Find(
+                    [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
+                    $Thumbprint,
+                    $false
+                )
+                if ($verified.Count -ne 1) { throw "The temporary signer was not uniquely added to $storeLocation $storeName." }
+            } else {
+                foreach ($existing in $matches) { $store.Remove($existing) }
+                $remaining = $store.Certificates.Find(
+                    [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
+                    $Thumbprint,
+                    $false
+                )
+                if ($remaining.Count -ne 0) { throw "The temporary signer remains in $storeLocation $storeName after removal." }
+            }
+        } catch {
+            if ($Operation -ne 'RemoveTemporaryCertificate') { throw }
+            $storeErrors.Add("$storeLocation $storeName`: $($_.Exception.Message)")
+            Write-Output "Cleanup failed for $storeLocation $storeName; continuing with remaining owned stores."
+            [Console]::Out.Flush()
+        } finally {
+            if ($storeOpened) { $store.Close() }
+            $store.Dispose()
         }
+    }
+
+    if ($storeErrors.Count -gt 0) {
+        throw "One or more temporary certificate store cleanups failed: $($storeErrors -join '; ')"
     }
 
     Write-Output "Certificate store operation completed: $Operation."

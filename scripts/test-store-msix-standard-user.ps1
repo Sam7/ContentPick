@@ -86,6 +86,42 @@ function Write-UserReport {
     $userReport | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $userReportPath -Encoding utf8
 }
 
+function Write-PlaywrightPackageAccessDiagnostics {
+    $manifestPath = Join-Path $repositoryFullPath 'node_modules\@playwright\test\package.json'
+    Write-Output "Playwright package access probe as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) ($userSid): $manifestPath"
+    $path = $manifestPath
+    while ($path -and $path.StartsWith($repositoryFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Output "ACL: $path"
+        & icacls.exe $path 2>&1
+        $path = Split-Path -Parent $path
+        if ([string]::IsNullOrWhiteSpace($path)) { break }
+    }
+
+    $item = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+    if ($item) {
+        Write-Output "Package manifest attributes: $($item.Attributes); link type: $($item.LinkType); target: $($item.Target)"
+        & fsutil.exe hardlink list $manifestPath 2>&1
+    } else {
+        Write-Output 'Package manifest is not visible to the disposable user.'
+    }
+
+    try {
+        $stream = [System.IO.File]::OpenRead($manifestPath)
+        $stream.Dispose()
+        Write-Output 'PowerShell/.NET package manifest read probe passed.'
+    } catch {
+        Write-Output "PowerShell/.NET package manifest read probe failed: $($_.Exception.Message)"
+    }
+
+    $node = Get-Command node.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($node) {
+        & $node.Source -e "require('fs').readFileSync(process.argv[1], 'utf8')" $manifestPath 2>&1
+        Write-Output "Node package manifest read probe exit code: $LASTEXITCODE"
+    } else {
+        Write-Output 'Node package manifest read probe skipped: node.exe is not on the standard-user PATH.'
+    }
+}
+
 $runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
 $evidenceFullPath = [System.IO.Path]::GetFullPath($EvidenceRoot)
 $runnerTempPrefix = $runnerTemp.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
@@ -115,7 +151,7 @@ $userReport = [ordered]@{
     install = [ordered]@{ result = 'pending'; scope = 'current standard-user profile'; architecture = $null }
     playwright = [ordered]@{ result = 'pending'; command = 'pnpm exec playwright test --config playwright.native.config.ts tests/native/workspace.spec.ts'; exitCode = $null }
     upgrade = [ordered]@{ result = 'pending'; expectedVersion = $ExpectedUpgradeVersion; actualVersion = $null }
-    uninstall = [ordered]@{ result = 'pending'; packageRegistrationAbsent = $false; appConfigAbsent = $false; certificateAbsentFromStandardUserStores = $false }
+    uninstall = [ordered]@{ result = 'pending'; packageRegistrationAbsent = $false; appConfigAbsent = $false; certificateAbsentFromStandardUserMyStore = $false }
     generatedAtUtc = [DateTime]::UtcNow.ToString('o')
     failure = $null
 }
@@ -170,6 +206,7 @@ try {
     $userReport.phase = 'running installed-app Playwright suite'
     Write-UserReport
 
+    Write-PlaywrightPackageAccessDiagnostics
     $env:CONTEXTPICK_NATIVE_EXECUTABLE = $installedExecutable
     $env:CONTEXTPICK_NATIVE_CONFIG_DIR = $configDirectory
     $env:CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR = Join-Path $evidenceFullPath 'playwright-results'
@@ -203,8 +240,8 @@ try {
     $userReport.uninstall.result = 'passed'
     $userReport.uninstall.packageRegistrationAbsent = $true
     $userReport.uninstall.appConfigAbsent = $true
-    $userReport.uninstall.certificateAbsentFromStandardUserStores = (@(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root', 'Cert:\CurrentUser\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint).Count -eq 0)
-    if (-not $userReport.uninstall.certificateAbsentFromStandardUserStores) { throw 'Runner-only public test certificate remains in a standard-user certificate store.' }
+    $userReport.uninstall.certificateAbsentFromStandardUserMyStore = (@(Get-ChildItem -Path 'Cert:\CurrentUser\My' | Where-Object Thumbprint -eq $certThumbprint).Count -eq 0)
+    if (-not $userReport.uninstall.certificateAbsentFromStandardUserMyStore) { throw 'Runner-only public test certificate remains in the standard-user personal certificate store.' }
     $userReport.status = 'passed'
     $userReport.phase = 'complete'
 } catch {
