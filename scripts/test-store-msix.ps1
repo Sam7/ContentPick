@@ -140,6 +140,13 @@ function Write-LifecyclePhase {
     Write-Output "[$([DateTime]::UtcNow.ToString('o'))] $Message"
 }
 
+function Get-ManifestDependencyNames {
+    param([Parameter(Mandatory = $true)] $ManifestData)
+    $dependenciesProperty = $ManifestData.PSObject.Properties['dependencies']
+    if ($null -eq $dependenciesProperty -or $null -eq $dependenciesProperty.Value) { return }
+    return @($dependenciesProperty.Value.PSObject.Properties | ForEach-Object { $_.Name })
+}
+
 function Grant-TemporaryAccess {
     param(
         [Parameter(Mandatory = $true)] [string]$Path,
@@ -478,50 +485,48 @@ try {
 
             # The pinned runtime chain declares its required modules in dependencies;
             # optional and peer modules are not required by this installed-app test.
-            if ($null -ne $playwrightPackageManifestData.dependencies) {
-                foreach ($dependencyName in $playwrightPackageManifestData.dependencies.PSObject.Properties.Name) {
-                    $dependencyFound = $false
-                    $playwrightDependencySearchPath = $playwrightPackageRoot
-                    while ([string]::Equals($playwrightDependencySearchPath, $repoRoot, [StringComparison]::OrdinalIgnoreCase) -or $playwrightDependencySearchPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                        $dependencyCandidate = [IO.Path]::GetFullPath((Join-Path $playwrightDependencySearchPath (Join-Path 'node_modules' $dependencyName)))
-                        if (-not $dependencyCandidate.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                            throw "Refusing to probe a Playwright dependency outside node_modules: $dependencyCandidate."
-                        }
-                        $dependencyItem = Get-Item -LiteralPath $dependencyCandidate -Force -ErrorAction SilentlyContinue
-                        if ($null -ne $dependencyItem) {
-                            if (-not $dependencyItem.PSIsContainer) {
-                                throw "Resolved Playwright dependency is not a directory: $dependencyCandidate."
-                            }
-                            if (($dependencyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                                $dependencyLinkTarget = $dependencyItem.ResolveLinkTarget($true)
-                                if ($null -eq $dependencyLinkTarget) {
-                                    throw "Could not resolve Playwright dependency link $dependencyCandidate."
-                                }
-                                $playwrightDependencyPath = [IO.Path]::GetFullPath($dependencyLinkTarget.FullName)
-                            } else {
-                                $playwrightDependencyPath = [IO.Path]::GetFullPath($dependencyItem.FullName)
-                            }
-                            if (-not $playwrightDependencyPath.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                                throw "Refusing to grant access through a Playwright dependency outside node_modules: $playwrightDependencyPath."
-                            }
-                            $dependencyAncestor = $playwrightDependencyPath
-                            while ($dependencyAncestor.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                                $dependencyAncestorItem = Get-Item -LiteralPath $dependencyAncestor -Force
-                                if (($dependencyAncestorItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                                    throw "Refusing to grant access through an unresolved Playwright dependency link: $dependencyAncestor."
-                                }
-                                $dependencyAncestor = Split-Path -Parent $dependencyAncestor
-                            }
-                            Write-LifecyclePhase "Resolved Playwright dependency '$dependencyName' to $playwrightDependencyPath."
-                            $playwrightPackageQueue.Enqueue($playwrightDependencyPath)
-                            $dependencyFound = $true
-                            break
-                        }
-                        $playwrightDependencySearchPath = Split-Path -Parent $playwrightDependencySearchPath
+            foreach ($dependencyName in (Get-ManifestDependencyNames $playwrightPackageManifestData)) {
+                $dependencyFound = $false
+                $playwrightDependencySearchPath = $playwrightPackageRoot
+                while ([string]::Equals($playwrightDependencySearchPath, $repoRoot, [StringComparison]::OrdinalIgnoreCase) -or $playwrightDependencySearchPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    $dependencyCandidate = [IO.Path]::GetFullPath((Join-Path $playwrightDependencySearchPath (Join-Path 'node_modules' $dependencyName)))
+                    if (-not $dependencyCandidate.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "Refusing to probe a Playwright dependency outside node_modules: $dependencyCandidate."
                     }
-                    if (-not $dependencyFound) {
-                        throw "Could not resolve declared Playwright dependency '$dependencyName' beneath node_modules."
+                    $dependencyItem = Get-Item -LiteralPath $dependencyCandidate -Force -ErrorAction SilentlyContinue
+                    if ($null -ne $dependencyItem) {
+                        if (-not $dependencyItem.PSIsContainer) {
+                            throw "Resolved Playwright dependency is not a directory: $dependencyCandidate."
+                        }
+                        if (($dependencyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                            $dependencyLinkTarget = $dependencyItem.ResolveLinkTarget($true)
+                            if ($null -eq $dependencyLinkTarget) {
+                                throw "Could not resolve Playwright dependency link $dependencyCandidate."
+                            }
+                            $playwrightDependencyPath = [IO.Path]::GetFullPath($dependencyLinkTarget.FullName)
+                        } else {
+                            $playwrightDependencyPath = [IO.Path]::GetFullPath($dependencyItem.FullName)
+                        }
+                        if (-not $playwrightDependencyPath.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                            throw "Refusing to grant access through a Playwright dependency outside node_modules: $playwrightDependencyPath."
+                        }
+                        $dependencyAncestor = $playwrightDependencyPath
+                        while ($dependencyAncestor.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                            $dependencyAncestorItem = Get-Item -LiteralPath $dependencyAncestor -Force
+                            if (($dependencyAncestorItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                                throw "Refusing to grant access through an unresolved Playwright dependency link: $dependencyAncestor."
+                            }
+                            $dependencyAncestor = Split-Path -Parent $dependencyAncestor
+                        }
+                        Write-LifecyclePhase "Resolved Playwright dependency '$dependencyName' to $playwrightDependencyPath."
+                        $playwrightPackageQueue.Enqueue($playwrightDependencyPath)
+                        $dependencyFound = $true
+                        break
                     }
+                    $playwrightDependencySearchPath = Split-Path -Parent $playwrightDependencySearchPath
+                }
+                if (-not $dependencyFound) {
+                    throw "Could not resolve declared Playwright dependency '$dependencyName' beneath node_modules."
                 }
             }
 
@@ -747,6 +752,7 @@ try {
             try {
                 Revoke-TemporaryAccess
                 if ($script:cleanupErrors.Count -gt 0) { throw ($script:cleanupErrors -join ' ') }
+                $report.cleanup.repositoryAclRestored = $true
                 $profileEntry = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$userSid'" -ErrorAction SilentlyContinue
                 if ($profileEntry) {
                     $profilePath = [System.IO.Path]::GetFullPath([string]$profileEntry.LocalPath)

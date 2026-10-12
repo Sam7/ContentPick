@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
@@ -22,7 +23,8 @@ test('standard-user access follows declared Playwright dependencies inside node_
   assert.match(script, /playwrightPackageTarget\.StartsWith\(\$nodeModulesPrefix/);
   assert.match(script, /while \(\$playwrightTargetAncestor\.StartsWith\(\$nodeModulesPrefix[\s\S]*?Get-Item -LiteralPath \$playwrightTargetAncestor -Force[\s\S]*?ReparsePoint[\s\S]*?throw/);
   assert.match(script, /ConvertFrom-Json/);
-  assert.match(script, /foreach \(\$dependencyName in \$playwrightPackageManifestData\.dependencies\.PSObject\.Properties\.Name\)/);
+  assert.match(script, /function Get-ManifestDependencyNames \{/);
+  assert.match(script, /foreach \(\$dependencyName in \(Get-ManifestDependencyNames \$playwrightPackageManifestData\)\)/);
   assert.match(script, /Join-Path \$playwrightDependencySearchPath \(Join-Path 'node_modules' \$dependencyName\)/);
   assert.match(script, /playwrightDependencySearchPath\.StartsWith\(\$repositoryPrefix/);
   assert.match(script, /playwrightPackageQueue\.Enqueue\(\$playwrightDependencyPath\)/);
@@ -35,6 +37,17 @@ test('standard-user access follows declared Playwright dependencies inside node_
   assert.match(script, /foreach \(\$playwrightPackageDirectory in \$playwrightPackageDirectories\)\s*\{\s*Grant-TemporaryAccess -Path \$playwrightPackageDirectory -Rights 'RX'/);
   assert.match(script, /foreach \(\$playwrightPackageFile in \$playwrightPackageFiles\)\s*\{\s*Grant-TemporaryAccess -Path \$playwrightPackageFile -Rights 'RX'/);
   assert.doesNotMatch(script, /Grant-TemporaryAccess -Path \$playwrightPackageTarget -Rights 'RX' -Recursive/);
+});
+
+test('Playwright dependency enumeration handles absent, null, empty, and populated manifest sections', { skip: process.platform !== 'win32' }, async () => {
+  const helper = script.match(/function Get-ManifestDependencyNames \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(helper, 'production dependency enumeration helper should exist');
+  const powershell = spawnSync('pwsh.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    `${helper}\n$ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest; @('{}', '{"dependencies":null}', '{"dependencies":{}}', '{"dependencies":{"playwright":"1.63.0"}}') | ForEach-Object { $manifest = ConvertFrom-Json $_; ,@(Get-ManifestDependencyNames $manifest) } | ConvertTo-Json -Compress -Depth 4`,
+  ], { encoding: 'utf8' });
+  assert.equal(powershell.status, 0, powershell.stderr || powershell.stdout);
+  assert.deepEqual(JSON.parse(powershell.stdout.trim()), [[], [], [], ['playwright']]);
 });
 
 test('standard-user writable state stays in runner evidence folders', () => {
@@ -67,6 +80,11 @@ test('checkout-root access does not inherit and report permissions target an exi
   assert.match(script, /\$script:aclPaths\s*=\s*\[System\.Collections\.Generic\.List\[object\]\]::new\(\)/);
   assert.match(script, /New-Item -ItemType File -Path \$standardUserReportPath -Force/);
   assert.ok(script.indexOf('New-Item -ItemType File -Path $standardUserReportPath -Force') < script.indexOf('Grant-TemporaryAccess -Path $standardUserReportPath -Rights \'M\''));
+});
+
+test('failure-path cleanup records restored repository ACLs only after successful revocation', () => {
+  const finallyBlock = script.slice(script.lastIndexOf('} finally {'));
+  assert.match(finallyBlock, /Revoke-TemporaryAccess\s+if \(\$script:cleanupErrors\.Count -gt 0\) \{ throw[\s\S]*?\$report\.cleanup\.repositoryAclRestored = \$true/);
 });
 
 test('test-signing certificate generation is bounded, code-signing scoped, and cleanup tracked', async () => {
