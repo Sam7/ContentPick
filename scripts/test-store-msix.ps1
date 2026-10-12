@@ -137,20 +137,32 @@ function Write-LifecyclePhase {
 }
 
 function Grant-TemporaryAccess {
-    param([Parameter(Mandatory = $true)] [string]$Path, [Parameter(Mandatory = $true)] [string]$Rights)
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [string]$Rights,
+        [switch]$Recursive
+    )
     $timer = [Diagnostics.Stopwatch]::StartNew()
-    Write-LifecyclePhase "Granting temporary $Rights access recursively: $Path"
-    & icacls.exe $Path /grant "*$script:userSid`:(OI)(CI)($Rights)" /T /Q | Out-Null
+    $inheritance = if ($Recursive -and (Test-Path -LiteralPath $Path -PathType Container)) { '(OI)(CI)' } else { '' }
+    $scope = if ($Recursive) { 'recursively' } else { 'at this path' }
+    Write-LifecyclePhase "Granting temporary $Rights access $scope`: $Path"
+    $script:aclPaths.Add([pscustomobject]@{ Path = $Path; Recursive = [bool]$Recursive })
+    if ($Recursive) {
+        & icacls.exe $Path /grant "*$script:userSid`:$inheritance($Rights)" /T /Q | Out-Null
+    } else {
+        & icacls.exe $Path /grant "*$script:userSid`:$inheritance($Rights)" /Q | Out-Null
+    }
     if ($LASTEXITCODE -ne 0) { throw "Could not grant temporary $Rights access to $Path (icacls exit $LASTEXITCODE)." }
-    $script:aclPaths.Add($Path)
     $timer.Stop()
-    Write-LifecyclePhase "Granted temporary $Rights access recursively in $([Math]::Round($timer.Elapsed.TotalSeconds, 1))s: $Path"
+    Write-LifecyclePhase "Granted temporary $Rights access in $([Math]::Round($timer.Elapsed.TotalSeconds, 1))s: $Path"
 }
 
 function Revoke-TemporaryAccess {
-    foreach ($path in $script:aclPaths) {
-        & icacls.exe $path /remove:g "*$script:userSid" /T /Q | Out-Null
-        if ($LASTEXITCODE -ne 0) { $script:cleanupErrors.Add("Could not remove temporary standard-user access from $path (icacls exit $LASTEXITCODE).") }
+    foreach ($entry in $script:aclPaths) {
+        $arguments = @($entry.Path, '/remove:g', "*$script:userSid", '/Q')
+        if ($entry.Recursive) { $arguments += '/T' }
+        & icacls.exe @arguments | Out-Null
+        if ($LASTEXITCODE -ne 0) { $script:cleanupErrors.Add("Could not remove temporary standard-user access from $($entry.Path) (icacls exit $LASTEXITCODE).") }
     }
 }
 
@@ -236,7 +248,7 @@ $machineTrustInstalled = $false
 $childExited = $true
 $accountCreated = $false
 $script:userSid = $null
-$script:aclPaths = [System.Collections.Generic.List[string]]::new()
+$script:aclPaths = [System.Collections.Generic.List[object]]::new()
 $script:cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $pwshPath = (Get-Process -Id $PID).Path
@@ -376,12 +388,26 @@ try {
     $pnpmHome = if (-not [string]::IsNullOrWhiteSpace($env:PNPM_HOME)) { $env:PNPM_HOME } else { Split-Path -Parent ((Get-Command pnpm -ErrorAction Stop | Select-Object -First 1).Source) }
     $null = New-Item -ItemType Directory -Path (Join-Path $resultRoot 'corepack') -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $resultRoot 'standard-user-temp') -Force
-    $viteCache = Join-Path $repoRoot 'node_modules\.vite'
-    $null = New-Item -ItemType Directory -Path $viteCache -Force
-    Write-LifecyclePhase 'Granting the disposable standard user access to test inputs and tools.'
+    $playwrightResults = Join-Path $resultRoot 'playwright-results'
+    $screenshots = Join-Path $resultRoot 'screenshots'
+    $viteCache = Join-Path $resultRoot 'vite-cache'
+    foreach ($directory in @($playwrightResults, $screenshots, $viteCache)) {
+        $null = New-Item -ItemType Directory -Path $directory -Force
+    }
+    $null = New-Item -ItemType File -Path $standardUserReportPath -Force
+    Write-LifecyclePhase 'Granting the disposable standard user access to required test inputs and tools.'
     Grant-TemporaryAccess -Path $repoRoot -Rights 'RX'
-    Grant-TemporaryAccess -Path $resultRoot -Rights 'M'
-    Grant-TemporaryAccess -Path $viteCache -Rights 'M'
+    foreach ($relativeDirectory in @('node_modules', 'src', 'tests\native', 'scripts')) {
+        Grant-TemporaryAccess -Path (Join-Path $repoRoot $relativeDirectory) -Rights 'RX' -Recursive
+    }
+    foreach ($relativeFile in @('index.html', 'package.json', 'pnpm-lock.yaml', 'playwright.native.config.ts', 'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json')) {
+        Grant-TemporaryAccess -Path (Join-Path $repoRoot $relativeFile) -Rights 'RX'
+    }
+    Grant-TemporaryAccess -Path $resultRoot -Rights 'RX' -Recursive
+    foreach ($directory in @($logRoot, $playwrightResults, $screenshots, $viteCache, (Join-Path $resultRoot 'standard-user-temp'), (Join-Path $resultRoot 'corepack'))) {
+        Grant-TemporaryAccess -Path $directory -Rights 'M' -Recursive
+    }
+    Grant-TemporaryAccess -Path $standardUserReportPath -Rights 'M'
     Grant-TemporaryAccess -Path $nodeHome -Rights 'RX'
     if (-not [string]::IsNullOrWhiteSpace($pnpmHome) -and (Test-Path -LiteralPath $pnpmHome)) { Grant-TemporaryAccess -Path $pnpmHome -Rights 'RX' }
 
