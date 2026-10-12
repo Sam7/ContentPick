@@ -15,3 +15,7 @@
 ## Commands
 
 On Windows, source `. .\scripts\env.ps1` first. Use `corepack pnpm test`, `typecheck`, `lint`, `build`, `test:e2e`, `test:native`, and `test:native:scale`; E2E and native suites share port 1420 and must run sequentially. Run `scripts/test-installed.ps1` only with a disposable clean Windows user profile and PowerShell 7+. Rust checks: `cargo test --workspace --locked`, `cargo fmt --all -- --check`, and `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+
+## Current MSIX retry
+
+Run [38210202658](https://github.com/Sam7/ContentPick/actions/runs/38210202658) built/signed and installed the Store package as a fresh standard user; WebView2 was detected. It failed before installed-app specs because the Playwright config started an unnecessary Vite server. The fix skips Vite only for installed executable mode and passed local regression, dynamic config inspection, full tests (**92 Vitest + 33 script checks**), lint, typecheck and diff check. This fix is not pushed yet. Push to trigger a hosted retry; verify installed-app Playwright, upgrade, uninstall, ACL/certificate cleanup and WACK. M5.7.2 remains open; no Store submission has occurred.

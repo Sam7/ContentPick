@@ -11,7 +11,8 @@ export default defineConfig({
   timeout: 120_000,
   expect: { timeout: 15_000 },
   use: { trace: 'retain-on-failure' },
-  webServer: {
+  // Installed-package tests exercise the embedded frontend; only debug builds need Vite.
+  webServer: process.env.CONTEXTPICK_NATIVE_EXECUTABLE?.trim() ? undefined : {
     command: 'corepack pnpm dev:web --host 127.0.0.1 --port 1420 --strictPort',
     url: 'http://127.0.0.1:1420',
     reuseExistingServer: true,

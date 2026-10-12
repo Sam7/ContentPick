@@ -87,6 +87,12 @@ test('failure-path cleanup records restored repository ACLs only after successfu
   assert.match(finallyBlock, /Revoke-TemporaryAccess\s+if \(\$script:cleanupErrors\.Count -gt 0\) \{ throw[\s\S]*?\$report\.cleanup\.repositoryAclRestored = \$true/);
 });
 
+test('installed MSIX Playwright checks skip the unused Vite development server', async () => {
+  const nativeConfig = await readFile(new URL('../playwright.native.config.ts', import.meta.url), 'utf8');
+  assert.match(nativeConfig, /webServer:\s*process\.env\.CONTEXTPICK_NATIVE_EXECUTABLE\?\.trim\(\)\s*\?\s*undefined\s*:/);
+  assert.match(nativeConfig, /command: 'corepack pnpm dev:web/);
+});
+
 test('test-signing certificate generation is bounded, code-signing scoped, and cleanup tracked', async () => {
   const helper = await readFile(new URL('./create-msix-test-certificate.ps1', import.meta.url), 'utf8').catch(() => '');
 
