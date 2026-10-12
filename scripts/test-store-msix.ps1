@@ -382,23 +382,19 @@ try {
     }
     if (-not $certificateCreated) { throw 'Test certificate helper completed without recording a temporary certificate for cleanup.' }
     Write-LifecyclePhase 'Validating temporary signing certificate.'
-    $report.signing = [ordered]@{ subject = $publisher; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'Build-user CurrentUser Root (signature verification only; removed before standard-user install)', 'Standard-user CurrentUser TrustedPeople', 'LocalMachine TrustedPeople (added only after clean install)'); privateKeyRetainedOnlyInRunner = $true }
+    $report.signing = [ordered]@{ subject = $publisher; thumbprint = $certThumbprint; temporaryStores = @('Build-user CurrentUser My', 'Runner LocalMachine Root (signature verification only; removed before standard-user install)', 'Standard-user CurrentUser TrustedPeople', 'LocalMachine TrustedPeople (added only after clean install)'); privateKeyRetainedOnlyInRunner = $true }
 
     Copy-Item -LiteralPath $candidateUnsigned -Destination $candidateSigned
     Copy-Item -LiteralPath $upgradeUnsigned -Destination $upgradeSigned
     Write-LifecyclePhase 'Locating Windows SDK SignTool.'
     $signTool = Get-SignToolPath
-    Write-LifecyclePhase 'Installing temporary build-user root trust.'
-    $buildUserRootPath = "Cert:\CurrentUser\Root\$certThumbprint"
-    $machineTrustedPeoplePath = "Cert:\LocalMachine\TrustedPeople\$certThumbprint"
-    $rootTrustCommand = '$ErrorActionPreference = ''Stop''; if (Test-Path -LiteralPath ' + (ConvertTo-PowerShellLiteral -Value $buildUserRootPath) + ') { throw ' + (ConvertTo-PowerShellLiteral -Value 'Refusing to reuse an existing build-user test signer root trust entry.') + ' }; if (Test-Path -LiteralPath ' + (ConvertTo-PowerShellLiteral -Value $machineTrustedPeoplePath) + ') { throw ' + (ConvertTo-PowerShellLiteral -Value 'Refusing to reuse an existing machine-level test signer trust entry.') + ' }; Import-Certificate -FilePath ' + (ConvertTo-PowerShellLiteral -Value $cerPath) + " -CertStoreLocation 'Cert:\CurrentUser\Root' -ErrorAction Stop | Out-Null"
-    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', $rootTrustCommand) -LogPath (Join-Path $logRoot 'install-build-user-root-trust.log') -TimeoutSeconds 120
+    Write-LifecyclePhase 'Installing temporary runner machine-root trust for SignTool verification.'
+    $certificateStoreHelper = Join-Path $PSScriptRoot 'manage-msix-test-certificate-store.ps1'
+    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'AddMachineRoot', '-CertificatePath', $cerPath, '-Thumbprint', $certThumbprint, '-ExpectedSubject', $publisher) -LogPath (Join-Path $logRoot 'install-machine-root-trust.log') -TimeoutSeconds 120
     Write-LifecyclePhase 'Signing and verifying Store candidate and test upgrade packages.'
     Sign-TestPackage -PackagePath $candidateSigned -SignToolPath $signTool -PfxPath $pfxPath -Password $pfxPassword -LogPrefix (Join-Path $logRoot 'candidate')
     Sign-TestPackage -PackagePath $upgradeSigned -SignToolPath $signTool -PfxPath $pfxPath -Password $pfxPassword -LogPrefix (Join-Path $logRoot 'upgrade')
-    $buildUserRootPath = "Cert:\CurrentUser\Root\$certThumbprint"
-    $removeBuildUserRootCommand = 'Remove-Item -LiteralPath ' + (ConvertTo-PowerShellLiteral -Value $buildUserRootPath) + ' -ErrorAction Stop; if (Test-Path -LiteralPath ' + (ConvertTo-PowerShellLiteral -Value $buildUserRootPath) + ') { throw ' + (ConvertTo-PowerShellLiteral -Value 'Build-user test signer root trust remains before standard-user installation.') + ' }'
-    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', $removeBuildUserRootCommand) -LogPath (Join-Path $logRoot 'remove-build-user-root-trust.log') -TimeoutSeconds 120
+    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'RemoveMachineRoot', '-CertificatePath', $cerPath, '-Thumbprint', $certThumbprint, '-ExpectedSubject', $publisher) -LogPath (Join-Path $logRoot 'remove-machine-root-trust.log') -TimeoutSeconds 120
     $report.package.sha256TestSigned = (Get-FileHash -LiteralPath $candidateSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     $report.package.sha256UpgradeTestSigned = (Get-FileHash -LiteralPath $upgradeSigned -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-ValidationReport
@@ -559,7 +555,8 @@ try {
         lifecycleCompletedBeforeMachineSignerTrust = $true
         lifecycleCompletedBeforeWack = $true
     }
-    Import-Certificate -FilePath $cerPath -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+    Write-LifecyclePhase 'Adding temporary machine TrustedPeople trust for WACK.'
+    Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'AddMachineTrustedPeople', '-CertificatePath', $cerPath, '-Thumbprint', $certThumbprint, '-ExpectedSubject', $publisher) -LogPath (Join-Path $logRoot 'install-machine-trusted-people.log') -TimeoutSeconds 120
     $machineTrustInstalled = $true
 
     $appCertPath = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\App Certification Kit\appcert.exe'
@@ -607,15 +604,12 @@ try {
     $accountCreated = $false
     $report.cleanup.temporaryUserRemoved = $true
     if ($certificateCreated) {
-        foreach ($storePath in @('Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root', 'Cert:\LocalMachine\TrustedPeople')) {
-            $certificatePath = Join-Path $storePath $certThumbprint
-            if (Test-Path -LiteralPath $certificatePath) { Remove-Item -LiteralPath $certificatePath -ErrorAction Stop }
-        }
+        Write-LifecyclePhase 'Removing temporary signer from all test certificate stores.'
+        Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'RemoveTemporaryCertificate', '-Thumbprint', $certThumbprint) -LogPath (Join-Path $logRoot 'remove-temporary-signing-certificate.log') -TimeoutSeconds 120
         $certificateCreated = $false
         $machineTrustInstalled = $false
     }
-    $report.cleanup.signingCertificateRemoved = (@(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root', 'Cert:\CurrentUser\TrustedPeople', 'Cert:\LocalMachine\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint).Count -eq 0)
-    if (-not $report.cleanup.signingCertificateRemoved) { throw 'Runner-only test signing certificate remains in the build-user certificate stores.' }
+    $report.cleanup.signingCertificateRemoved = $true
 
     $report.status = 'passed'
 } catch {
@@ -650,17 +644,18 @@ try {
     }
 
     if ($certThumbprint) {
-        foreach ($storePath in @('Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root')) {
-            try { Remove-Item -LiteralPath (Join-Path $storePath $certThumbprint) -ErrorAction SilentlyContinue } catch { $cleanupErrors.Add("Build-user certificate cleanup failed in ${storePath}: $($_.Exception.Message)") }
-        }
-        $report.cleanup.signingCertificateRemoved = $false
         try {
-            Remove-Item -LiteralPath "Cert:\LocalMachine\TrustedPeople\$certThumbprint" -ErrorAction SilentlyContinue
-            $remainingCertificates = @(Get-ChildItem -Path 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\Root', 'Cert:\LocalMachine\TrustedPeople' | Where-Object Thumbprint -eq $certThumbprint)
-            $report.cleanup.signingCertificateRemoved = ($remainingCertificates.Count -eq 0)
-            if (-not $report.cleanup.signingCertificateRemoved) { $cleanupErrors.Add('Runner-only test signing certificate remains in a certificate store.') }
+            Write-LifecyclePhase 'Removing temporary signer from all test certificate stores.'
+            Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'RemoveTemporaryCertificate', '-Thumbprint', $certThumbprint) -LogPath (Join-Path $logRoot 'remove-temporary-signing-certificate.log') -TimeoutSeconds 120
+            $report.cleanup.signingCertificateRemoved = $true
             $machineTrustInstalled = $false
-        } catch { $cleanupErrors.Add("Test-certificate trust cleanup failed: $($_.Exception.Message)") }
+        } catch {
+            $report.cleanup.signingCertificateRemoved = $false
+            $cleanupErrors.Add("Test-certificate trust cleanup failed: $($_.Exception.Message)")
+        }
+    }
+    if (-not $childExited -or ($accountCreated -and -not $report.cleanup.temporaryProfileRemoved)) {
+        $report.cleanup.signingCertificateRemoved = $false
     }
     if (Test-Path -LiteralPath $msixBuildRoot) {
         try {

@@ -39,7 +39,7 @@ test('test-signing certificate generation is bounded, code-signing scoped, and c
   assert.doesNotMatch(script, /New-SelfSignedCertificate/i);
   assert.match(script, /create-msix-test-certificate\.ps1[\s\S]*?-TimeoutSeconds 120/);
   assert.ok(script.includes('$certificateCreated = $true'));
-  assert.match(script, /if \(\$certThumbprint\) \{[\s\S]*?Build-user certificate cleanup failed/);
+  assert.match(script, /if \(\$certThumbprint\) \{[\s\S]*?RemoveTemporaryCertificate[\s\S]*?-TimeoutSeconds 120/);
   assert.match(helper, /CertificateRequest/);
   assert.match(helper, /1\.3\.6\.1\.5\.5\.7\.3\.3/);
   assert.match(helper, /CONTEXTPICK_TEST_CERT_PFX_PASSWORD/);
@@ -50,7 +50,7 @@ test('test-signing certificate generation is bounded, code-signing scoped, and c
 test('post-certificate store and signing phases are observable and bounded', () => {
   assert.match(script, /Write-LifecyclePhase 'Validating temporary signing certificate\./);
   assert.match(script, /Write-LifecyclePhase 'Locating Windows SDK SignTool\./);
-  assert.match(script, /Write-LifecyclePhase 'Installing temporary build-user root trust\.'/);
+  assert.match(script, /Write-LifecyclePhase 'Installing temporary runner machine-root trust for SignTool verification\.'/);
   assert.match(script, /Write-LifecyclePhase 'Signing and verifying Store candidate and test upgrade packages\.'/);
   assert.match(script, /Invoke-NativeCommand -FilePath \$SignToolPath[\s\S]*?-TimeoutSeconds 180/);
 });
@@ -64,8 +64,25 @@ test('certificate-provider checks after certificate creation do not run unbounde
   assert.match(postHelper, /Write-LifecyclePhase 'Reading temporary certificate result for cleanup\.'/);
   assert.doesNotMatch(postHelper, /Test-Path[^\r\n]*Cert:/);
   assert.doesNotMatch(postHelper, /Get-Item[^\r\n]*Cert:/);
-  assert.match(script, /Test-Path[^\r\n]*Cert:\\CurrentUser\\Root[\s\S]*?Invoke-NativeCommand[\s\S]*?-TimeoutSeconds 120/);
-  assert.match(script, /Import-Certificate -FilePath[\s\S]*?-ErrorAction Stop/);
+  assert.match(script, /manage-msix-test-certificate-store\.ps1[\s\S]*?-TimeoutSeconds 120/);
+  assert.doesNotMatch(script, /Import-Certificate/);
+});
+
+test('temporary machine-root trust uses a bounded noninteractive X509Store helper', async () => {
+  const helper = await readFile(new URL('./manage-msix-test-certificate-store.ps1', import.meta.url), 'utf8');
+  assert.match(helper, /ValidateSet\([\s\S]*'AddMachineRoot'[\s\S]*'RemoveMachineRoot'/);
+  assert.match(helper, /X509Store\]::new\([\s\S]*?'Root'[\s\S]*?StoreLocation\]::LocalMachine/);
+  assert.match(helper, /X509Store\]::new\([\s\S]*?'TrustedPeople'[\s\S]*?StoreLocation\]::LocalMachine/);
+  assert.match(helper, /\.Add\(\$certificate\)/);
+  assert.match(helper, /\.Remove\(\$existing\)/);
+  assert.match(helper, /throw '.*already exists/);
+  assert.match(helper, /Certificate store operation completed/);
+  assert.match(helper, /'TrustedPeople'; Location = 'CurrentUser'; Action = 'Remove'/);
+  assert.doesNotMatch(helper, /Import-Certificate|PromptForChoice|Windows\.Forms/i);
+});
+
+test('certificate cleanup evidence stays false when the temporary-user profile is retained', () => {
+  assert.match(script, /if \(-not \$childExited -or \(\$accountCreated -and -not \$report\.cleanup\.temporaryProfileRemoved\)\) \{\s*\$report\.cleanup\.signingCertificateRemoved = \$false/);
 });
 
 test('local lifecycle fallback is an explicit Windows 11 x64 opt-in', async () => {
