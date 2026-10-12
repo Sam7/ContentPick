@@ -85,6 +85,12 @@ test('certificate cleanup evidence stays false when the temporary-user profile i
   assert.match(script, /if \(-not \$childExited -or \(\$accountCreated -and -not \$report\.cleanup\.temporaryProfileRemoved\)\) \{\s*\$report\.cleanup\.signingCertificateRemoved = \$false/);
 });
 
+test('temporary account description respects the Windows local-account length limit', () => {
+  const description = script.match(/-Description '([^']+)'/)?.[1];
+  assert.ok(description, 'temporary local account should have an explicit description');
+  assert.ok(description.length <= 48, `description length ${description.length} exceeds 48 characters`);
+});
+
 test('local lifecycle fallback is an explicit Windows 11 x64 opt-in', async () => {
   const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
   assert.match(script, /param\(\s*\[switch\]\$AllowLocalWin11X64/);

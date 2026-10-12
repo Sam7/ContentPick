@@ -405,7 +405,7 @@ try {
     $passwordString = 'Cp1!' + [Convert]::ToBase64String($userPasswordBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
     [Array]::Clear($userPasswordBytes, 0, $userPasswordBytes.Length)
     $securePassword = ConvertTo-SecureString -String $passwordString -AsPlainText -Force
-    $null = New-LocalUser -Name $userName -Password $securePassword -Description 'Temporary ContextPick Store MSIX lifecycle account'
+    $null = New-LocalUser -Name $userName -Password $securePassword -Description 'ContextPick Store MSIX test account'
     $accountCreated = $true
     $userSid = (Get-LocalUser -Name $userName).SID.Value
     $script:userSid = $userSid
