@@ -172,8 +172,39 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await expect(page.getByText('export const value599 = 599;')).toBeVisible();
   await expect(selected).toHaveText('602');
   await search.clear();
+  await expect(page.getByRole('button', { name: 'Preview src/file-0599.ts' })).toHaveCount(0);
 
-  await page.getByRole('checkbox', { name: 'Select README.md' }).click();
+  await page.getByRole('button', { name: 'Expand src', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Collapse src', exact: true })).toBeVisible();
+  const tree = page.getByRole('tree', { name: 'Workspace files' });
+  const lastFile = page.getByRole('checkbox', { name: 'Select src/file-0599.ts' });
+  await tree.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(lastFile).toHaveCount(1);
+  await lastFile.scrollIntoViewIfNeeded();
+  const scrollBeforeSelection = await tree.evaluate((element) => element.scrollTop);
+  await lastFile.click();
+  await expect(selected).toHaveText('601');
+  await expect(lastFile).not.toBeChecked();
+  await expect(page.locator('.panel-heading p').first()).toContainText('items discovered');
+  const scrollAfterSelection = await tree.evaluate((element) => element.scrollTop);
+  expect(Math.abs(scrollAfterSelection - scrollBeforeSelection)).toBeLessThan(32);
+  await expect(page.getByText(/items loaded/)).toHaveCount(0);
+
+  await tree.evaluate((element) => { element.scrollTop = 0; });
+  const sourceFolder = page.getByRole('checkbox', { name: 'Select src', exact: true });
+  await expect(sourceFolder).toHaveCount(1);
+  const sourceRow = page.getByRole('treeitem').filter({ has: sourceFolder });
+  await expect.poll(() => sourceRow.getAttribute('aria-checked')).toBe('mixed');
+  await sourceFolder.click();
+  await expect(selected).toHaveText('1');
+  await expect(sourceFolder).not.toBeChecked();
+  await sourceFolder.click();
+  await expect(selected).toHaveText('602');
+
+  await tree.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  const readmeCheckbox = page.getByRole('checkbox', { name: 'Select README.md', exact: true });
+  await expect(readmeCheckbox).toHaveCount(1);
+  await readmeCheckbox.click();
   await expect(selected).toHaveText('601');
   await page.getByRole('button', { name: 'Filters' }).click();
   await native.resizeWindow(1536, 1024);
@@ -189,7 +220,11 @@ test('native restore, paging, ignore policy, manual override, copy, and restart 
   await gitignore.check();
   await expect(selected).toHaveText('601');
   await page.getByRole('button', { name: 'All' }).click();
-  await expect(page.getByRole('checkbox', { name: 'Select README.md' })).not.toBeChecked();
+  const fullTree = page.getByRole('tree', { name: 'Workspace files' });
+  await fullTree.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  const uncheckedReadme = page.getByRole('checkbox', { name: 'Select README.md', exact: true });
+  await expect(uncheckedReadme).toHaveCount(1);
+  await expect(uncheckedReadme).not.toBeChecked();
 
   await search.fill('dist');
   await page.getByRole('button', { name: 'Browse ignored files' }).first().click();

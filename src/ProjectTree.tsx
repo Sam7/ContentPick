@@ -147,7 +147,7 @@ export function ProjectTree({ entries, expanded, actionPath, busy, previewDisabl
         break;
       case ' ':
         if (!isRowFocus) return;
-        if (!busy && entry.kind !== 'blocked') onIntent(entry.path, entry.selected ? 'exclude' : 'include');
+        if (!busy && entry.kind !== 'blocked') onIntent(entry.path, entry.partial || entry.selected ? 'exclude' : 'include');
         break;
       default: return;
     }
@@ -206,7 +206,7 @@ function TreeRow({ entry, tabStop, posInSet, setSize, expanded, searchRevealed, 
     ? 'Folder size unknown because some contents have not been scanned'
     : `${entry.sizePartial ? 'At least ' : ''}${formatBytes(entry.size)}${entry.sizePartial ? ', partial folder size' : isDirectory ? ' folder content size' : ''}`;
   const disabled = entry.kind === 'blocked' || busy;
-  const checkbox = <input aria-label={`Select ${entry.path}`} type="checkbox" tabIndex={-1} checked={entry.selected} disabled={disabled} ref={(element) => { if (element) element.indeterminate = entry.partial; }} onChange={(event) => onIntent(event.target.checked ? 'include' : 'exclude')} />;
+  const checkbox = <input aria-label={`Select ${entry.path}`} type="checkbox" tabIndex={-1} checked={entry.selected} disabled={disabled} ref={(element) => { if (element) element.indeterminate = entry.partial; }} onChange={(event) => onIntent(entry.partial ? 'exclude' : event.target.checked ? 'include' : 'exclude')} />;
   const applyIntent = (intent: SelectionIntent) => {
     onIntent(intent);
     triggerRef.current?.focus({ preventScroll: true });

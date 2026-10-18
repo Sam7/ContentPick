@@ -934,18 +934,10 @@ async fn set_intent(
         .workspace
         .clone()
         .ok_or("choose a workspace first")?;
-    if !path.is_empty() && !workspace.view(0).entries.iter().any(|e| e.path == path) {
-        return Err("unknown workspace path".into());
-    }
-    match intent {
-        Some(intent) => {
-            workspace.intents.insert(path, intent);
-        }
-        None => {
-            workspace.intents.remove(&path);
-        }
-    }
-    if intent == Some(Intent::ForceInclude) {
+    let needs_rescan = workspace
+        .set_intent(&path, intent)
+        .map_err(|error| error.to_string())?;
+    if intent == Some(Intent::ForceInclude) || needs_rescan {
         return rescan_candidate(shared, workspace).await;
     }
     let (generation, _) = begin_scan(&shared)?;

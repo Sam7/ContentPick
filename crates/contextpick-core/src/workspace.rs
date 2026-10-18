@@ -1037,6 +1037,42 @@ impl Workspace {
             .collect()
     }
 
+    /// Update saved selection intent for an indexed path. Deselecting a folder
+    /// clears more-specific choices beneath it so the entire subtree is removed
+    /// from the selection in one action.
+    pub fn set_intent(&mut self, path: &str, intent: Option<Intent>) -> Result<bool> {
+        let kind = self
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.kind.as_str());
+        if !path.is_empty() && kind.is_none() {
+            return Err(Error::Message("unknown workspace path".into()));
+        }
+
+        let mut needs_rescan = self.intents.get(path) == Some(&Intent::ForceInclude)
+            && intent != Some(Intent::ForceInclude);
+        if kind == Some("directory") && intent == Some(Intent::Exclude) {
+            self.intents.retain(|candidate, existing| {
+                let is_descendant = candidate != path && selection::is_descendant(candidate, path);
+                if is_descendant && *existing == Intent::ForceInclude {
+                    needs_rescan = true;
+                }
+                candidate == path || !is_descendant
+            });
+        }
+
+        match intent {
+            Some(intent) => {
+                self.intents.insert(path.to_owned(), intent);
+            }
+            None => {
+                self.intents.remove(path);
+            }
+        }
+        Ok(needs_rescan)
+    }
+
     pub fn view(&self, generation: u64) -> WorkspaceView {
         let mut entries: Vec<_> = self
             .entries

@@ -1031,6 +1031,33 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByText('4', { selector: 'strong' })).toBeInTheDocument();
   });
 
+  it('clicking a partially selected folder requests a recursive exclusion', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const initial = (await base.choose_workspace())!;
+    const partialWorkspace = {
+      ...initial,
+      entries: initial.entries.map((entry) => entry.path === 'src' ? { ...entry, selected: false, partial: true } : entry),
+    };
+    const intents: { path: string; intent: string | null }[] = [];
+    const bridge = {
+      ...base,
+      choose_workspace: async () => partialWorkspace,
+      set_intent: async ({ path, intent }: { path: string; intent: string | null }) => {
+        intents.push({ path, intent });
+        return { ...partialWorkspace, generation: partialWorkspace.generation + 1, entries: partialWorkspace.entries.map((entry) => entry.path === path ? { ...entry, selected: false, partial: false } : entry) };
+      },
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+
+    const folder = screen.getByRole('treeitem', { name: /src/ });
+    expect(folder).toHaveAttribute('aria-checked', 'mixed');
+    await user.click(screen.getByRole('checkbox', { name: 'Select src' }));
+
+    await waitFor(() => expect(intents).toEqual([{ path: 'src', intent: 'exclude' }]));
+  });
+
   it('toggles the focused tree item from the keyboard and exposes its checked state', async () => {
     const user = userEvent.setup();
     const base = createBrowserBridge();
@@ -1654,6 +1681,39 @@ describe('ContextPick workspace UI', () => {
     expect(screen.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
   });
 
+  it('retains loaded tree rows while a selection response pages in refreshed intent', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const baseWorkspace = (await base.choose_workspace())!;
+    const entries: WorkspaceView['entries'] = ['first.ts', 'middle.ts', 'last.ts'].map((path) => ({
+      path, kind: 'file', size: 1, selected: true, forceIncluded: false, gitIgnored: false, reason: null, enumerated: true, partial: false,
+    }));
+    const initial = { ...baseWorkspace, entries, entryCount: entries.length, nextOffset: null };
+    const refreshedFirstPage = { ...initial, generation: initial.generation + 1, entries: [{ ...entries[0]!, selected: false, reason: 'excluded by user' }], nextOffset: 1, selectedCount: 2 };
+    const nextPage = deferred<{ root: string; generation: number; offset: number; entries: WorkspaceView['entries']; nextOffset: number | null }>();
+    const bridge = {
+      ...base,
+      choose_workspace: async () => initial,
+      set_intent: async () => refreshedFirstPage,
+      workspace_page: async () => nextPage.promise,
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Select first.ts' }));
+
+    expect(await screen.findByRole('button', { name: 'Preview last.ts' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).not.toHaveTextContent('items loaded');
+    nextPage.resolve({
+      root: initial.root,
+      generation: refreshedFirstPage.generation,
+      offset: 1,
+      entries: [{ ...entries[1]!, selected: true }, { ...entries[2]!, selected: true }],
+      nextOffset: null,
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export Markdown' })).toBeEnabled());
+    expect(screen.getByRole('button', { name: 'Preview last.ts' })).toBeInTheDocument();
+  });
+
   it('ignores a late workspace page after cancellation and opening a new root', async () => {
     const user = userEvent.setup();
     const base = createBrowserBridge();
@@ -1855,6 +1915,26 @@ describe('ContextPick workspace UI', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/page/i);
     expect(screen.getByRole('button', { name: 'Preview first.ts' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Preview bad-page.ts' })).not.toBeInTheDocument();
+  });
+
+  it('rejects duplicate paths across workspace pages instead of leaving a short index', async () => {
+    const user = userEvent.setup();
+    const base = createBrowserBridge();
+    const initial = (await base.choose_workspace())!;
+    const firstEntry = { ...initial.entries[0]!, path: 'first.ts', kind: 'file' as const };
+    const bridge = {
+      ...base,
+      choose_workspace: async () => ({ ...initial, entries: [firstEntry], entryCount: 2, nextOffset: 1 }),
+      workspace_page: async ({ generation, offset }: { generation: number; offset: number }) => ({
+        root: initial.root, generation, offset, entries: [firstEntry], nextOffset: null,
+      }),
+    };
+    render(<App bridge={bridge} fixtureMode />);
+    await user.click(screen.getByRole('button', { name: 'Open folder' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('duplicate path');
+    expect(screen.getByRole('button', { name: 'Preview first.ts' })).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Project files' })).getByText('1 of 2 items loaded')).toBeInTheDocument();
   });
 
   it('offers an explicit cancel action for a running export', async () => {

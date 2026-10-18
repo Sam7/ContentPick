@@ -14,7 +14,7 @@ ContextPick can save repetitive file-by-file preparation and keep related projec
 
 ## Download
 
-**Latest release: v0.9.0 · Windows x64.** [Download ContextPick](https://github.com/Sam7/ContentPick/releases/download/v0.9.0/ContextPick_0.9.0_x64-setup.exe) · [Release notes and SHA-256 checksum](https://github.com/Sam7/ContentPick/releases/tag/v0.9.0)
+**Latest release: v0.9.1 · Windows x64.** [Download ContextPick](https://github.com/Sam7/ContentPick/releases/download/v0.9.1/ContextPick_0.9.1_x64-setup.exe) · [Release notes and SHA-256 checksum](https://github.com/Sam7/ContentPick/releases/tag/v0.9.1)
 
 The Windows installer is unsigned. Verify the checksum linked on the release page before installing. If WebView2 Runtime is absent, setup downloads its bootstrapper and needs network access. This release does not include a verified macOS installer; see [project status](docs/project/STATUS.md).
 

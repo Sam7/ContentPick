@@ -36,6 +36,103 @@ fn prunes_ignored_subtree_but_keeps_explainable_placeholder() {
 }
 
 #[test]
+fn excluding_a_folder_clears_nested_intents_and_preserves_sibling_choices() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("folder/nested")).unwrap();
+    std::fs::create_dir_all(temp.path().join("sibling")).unwrap();
+    std::fs::write(temp.path().join("folder/root.ts"), "root").unwrap();
+    std::fs::write(temp.path().join("folder/nested/child.ts"), "child").unwrap();
+    std::fs::write(temp.path().join("sibling/keep.ts"), "keep").unwrap();
+    let mut intents = BTreeMap::from([
+        ("folder/nested/child.ts".into(), Intent::ForceInclude),
+        ("folder/nested".into(), Intent::Include),
+        ("sibling/keep.ts".into(), Intent::Include),
+    ]);
+    let mut workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        std::mem::take(&mut intents),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    workspace
+        .set_intent("folder", Some(Intent::Exclude))
+        .unwrap();
+
+    assert_eq!(workspace.intents.get("folder"), Some(&Intent::Exclude));
+    assert!(
+        !workspace
+            .intents
+            .keys()
+            .any(|path| path.starts_with("folder/"))
+    );
+    assert_eq!(
+        workspace.intents.get("sibling/keep.ts"),
+        Some(&Intent::Include)
+    );
+    let view = workspace.view(1);
+    assert!(
+        view.entries
+            .iter()
+            .filter(|entry| entry.path.starts_with("folder/"))
+            .all(|entry| !entry.selected)
+    );
+    assert!(
+        view.entries
+            .iter()
+            .find(|entry| entry.path == "sibling/keep.ts")
+            .unwrap()
+            .selected
+    );
+}
+
+#[test]
+fn removing_a_force_include_from_an_ignored_subtree_requests_a_rescan() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("ignored/nested")).unwrap();
+    std::fs::write(temp.path().join(".gitignore"), "/ignored/\n").unwrap();
+    std::fs::write(temp.path().join("ignored/nested/secret.ts"), "fixture").unwrap();
+    let mut workspace = Workspace::scan(
+        temp.path(),
+        FilterPolicy::default(),
+        BTreeMap::from([("ignored/nested/secret.ts".into(), Intent::ForceInclude)]),
+        BTreeSet::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        workspace
+            .view(1)
+            .entries
+            .iter()
+            .any(|entry| entry.path == "ignored/nested/secret.ts")
+    );
+
+    let needs_rescan = workspace
+        .set_intent("ignored", Some(Intent::Exclude))
+        .unwrap();
+
+    assert!(needs_rescan);
+    let rescanned = Workspace::scan(
+        temp.path(),
+        workspace.policy.clone(),
+        workspace.intents.clone(),
+        workspace.browsed.clone(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        !rescanned
+            .view(1)
+            .entries
+            .iter()
+            .any(|entry| entry.path == "ignored/nested/secret.ts")
+    );
+}
+
+#[test]
 fn selected_extensions_mode_with_empty_allowlist_selects_no_files() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("note.txt"), "text").unwrap();

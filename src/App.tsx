@@ -77,11 +77,18 @@ function validateInitialWorkspace(view: WorkspaceView): void {
   } else if (!Number.isSafeInteger(view.nextOffset) || view.nextOffset !== view.entries.length || view.nextOffset <= 0 || view.nextOffset >= view.entryCount) {
     throw new Error('Workspace page metadata is invalid.');
   }
+  if (new Set(view.entries.map((entry) => entry.path)).size !== view.entries.length) {
+    throw new Error('Workspace page contains duplicate paths.');
+  }
 }
 
-function validateWorkspacePage(initial: WorkspaceView, page: WorkspacePage, expectedOffset: number, loaded: number): void {
+function validateWorkspacePage(initial: WorkspaceView, page: WorkspacePage, expectedOffset: number, loaded: number, seenPaths: Set<string>): void {
   if (page.root !== initial.root || page.generation !== initial.generation || page.offset !== expectedOffset || !Array.isArray(page.entries)) {
     throw new Error('Workspace page response did not match the requested page.');
+  }
+  for (const entry of page.entries) {
+    if (seenPaths.has(entry.path)) throw new Error('Workspace page contains a duplicate path.');
+    seenPaths.add(entry.path);
   }
   const nextLoaded = loaded + page.entries.length;
   if (nextLoaded > initial.entryCount) throw new Error('Workspace page contains too many entries.');
@@ -90,6 +97,21 @@ function validateWorkspacePage(initial: WorkspaceView, page: WorkspacePage, expe
   } else if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset !== nextLoaded || page.nextOffset <= expectedOffset || page.nextOffset >= initial.entryCount) {
     throw new Error('Workspace page did not make valid progress.');
   }
+}
+
+function mergeWorkspaceEntries(existing: Entry[], incoming: Entry[]): Entry[] {
+  const merged = existing.slice();
+  const indexes = new Map(merged.map((entry, index) => [entry.path, index]));
+  for (const entry of incoming) {
+    const index = indexes.get(entry.path);
+    if (index === undefined) {
+      indexes.set(entry.path, merged.length);
+      merged.push(entry);
+    } else {
+      merged[index] = entry;
+    }
+  }
+  return merged;
 }
 
 export function App({ bridge, fixtureMode = false }: AppProps) {
@@ -444,21 +466,22 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     }
   }, [previewCollapsed]);
 
-  const loadWorkspacePages = useCallback(async (initial: WorkspaceView, isCurrent: () => boolean): Promise<void> => {
+  const loadWorkspacePages = useCallback(async (initial: WorkspaceView, isCurrent: () => boolean, showProgress = true): Promise<void> => {
     validateInitialWorkspace(initial);
     let loaded = initial.entries.length;
     let nextOffset = initial.nextOffset;
-    if (!isOutputStatus(statusText.current)) setStatus(nextOffset === null ? '' : `${loaded} of ${initial.entryCount} items loaded`);
+    const seenPaths = new Set(initial.entries.map((entry) => entry.path));
+    if (showProgress && !isOutputStatus(statusText.current)) setStatus(nextOffset === null ? '' : `${loaded} of ${initial.entryCount} items loaded`);
     while (nextOffset !== null) {
       const page = await bridge.workspace_page({ generation: initial.generation, offset: nextOffset });
       if (!isCurrent()) return;
-      validateWorkspacePage(initial, page, nextOffset, loaded);
+      validateWorkspacePage(initial, page, nextOffset, loaded, seenPaths);
       setWorkspace((current) => current && current.root === initial.root && current.generation === initial.generation
-        ? { ...current, entries: [...current.entries, ...page.entries], nextOffset: page.nextOffset }
+        ? { ...current, entries: mergeWorkspaceEntries(current.entries, page.entries), nextOffset: page.nextOffset }
         : current);
       loaded += page.entries.length;
       nextOffset = page.nextOffset;
-      if (!isOutputStatus(statusText.current)) setStatus(nextOffset === null ? '' : `${loaded} of ${initial.entryCount} items loaded`);
+      if (showProgress && !isOutputStatus(statusText.current)) setStatus(nextOffset === null ? '' : `${loaded} of ${initial.entryCount} items loaded`);
     }
   }, [bridge, setStatus]);
 
@@ -521,7 +544,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
         setWorkspaceStale(true);
         setStatus(staleHealth.message ?? 'Watcher unavailable. Refresh before continuing.');
       }
-      if (result) await loadWorkspacePages(result, stillCurrent);
+      if (result) await loadWorkspacePages(result, stillCurrent, name !== 'selection');
     } catch (cause) {
       if (stillCurrent()) {
         setError(errorMessage(cause, 'The request could not be completed.'));
@@ -610,7 +633,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
     }
   }
 
-  function commitWorkspace(result: WorkspaceView, hydratePolicy = !policyDirty.current, preservePreview = false) {
+  function commitWorkspace(result: WorkspaceView, hydratePolicy = !policyDirty.current, preservePreview = false, preserveTree = false) {
     if (workspace && workspace.root === result.root && result.generation < workspace.generation) return;
     const rootChanged = workspace?.root !== result.root;
     const snapshotChanged = rootChanged || !workspace || workspace.generation !== result.generation;
@@ -641,7 +664,8 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
       previewRequestId.current += 1;
       setPreview(null);
     }
-    setWorkspace(result);
+    const preserveEntries = preserveTree && !rootChanged && workspace?.entryCount === result.entryCount;
+    setWorkspace(preserveEntries ? { ...result, entries: mergeWorkspaceEntries(workspace.entries, result.entries) } : result);
     const health = watchHealthRef.current;
     setWorkspaceStale((rootChanged && !fixtureMode) || watchStatusUnavailableRef.current || watchListenerUnavailableRef.current || (health?.root === result.root && health.state !== 'watching'));
   }
@@ -772,7 +796,7 @@ export function App({ bridge, fixtureMode = false }: AppProps) {
   function setIntent(path: string, intent: SelectionIntent) {
     if (workspaceStale || cancelling) return;
     const requestId = ++workspaceRequestId.current;
-    void runWorkspaceCommand('selection', () => bridge.set_intent({ path, intent }), commitWorkspace, () => requestId === workspaceRequestId.current);
+    void runWorkspaceCommand('selection', () => bridge.set_intent({ path, intent }), (result) => commitWorkspace(result, undefined, false, intent === 'include' || intent === 'exclude'), () => requestId === workspaceRequestId.current);
     setActionPath(null);
   }
 
