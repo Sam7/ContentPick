@@ -33,11 +33,13 @@ test('standard-user Playwright failures capture effective package access before 
   const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
   assert.match(standardUserScript, /function Write-PlaywrightPackageAccessDiagnostics/);
   assert.match(standardUserScript, /node_modules\\@playwright\\test\\package\.json/);
-  assert.match(standardUserScript, /icacls\.exe \$path/);
-  assert.match(standardUserScript, /fsutil\.exe hardlink list/);
+  assert.match(standardUserScript, /Invoke-OptionalNativeDiagnostic -FilePath 'icacls\.exe'/);
+  assert.match(standardUserScript, /Invoke-OptionalNativeDiagnostic -FilePath 'fsutil\.exe' -ArgumentList @\('hardlink', 'list', \$manifestPath\)/);
+  assert.match(standardUserScript, /function Invoke-OptionalNativeDiagnostic[\s\S]*?catch \{[\s\S]*?diagnostic could not run/);
   assert.match(standardUserScript, /\[System\.IO\.File\]::OpenRead\(\$manifestPath\)/);
   assert.match(standardUserScript, /readFileSync\(process\.argv\[1\], 'utf8'\)/);
-  assert.match(standardUserScript, /\n\s*Write-PlaywrightPackageAccessDiagnostics\s*\n[\s\S]*?Invoke-NativeCommand -FilePath 'corepack'/);
+  assert.match(standardUserScript, /try\s*\{\s*Write-PlaywrightPackageAccessDiagnostics\s*\}\s*catch\s*\{[\s\S]*?Invoke-NativeCommand -FilePath 'corepack'/);
+  assert.doesNotMatch(standardUserScript, /Node package manifest read probe exit code: \$LASTEXITCODE/);
 });
 
 test('installed MSIX Playwright checks skip the unused Vite development server', async () => {

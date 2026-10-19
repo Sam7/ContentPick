@@ -59,6 +59,19 @@ function Get-WebView2RuntimeInventory {
     return @($entries)
 }
 
+function Invoke-OptionalNativeDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)] [string]$FilePath,
+        [Parameter(Mandatory = $true)] [string[]]$ArgumentList
+    )
+    try {
+        & $FilePath @ArgumentList 2>&1 | ForEach-Object { Write-Output $_ }
+        if ($LASTEXITCODE -ne 0) { Write-Output "$FilePath diagnostic exited with code $LASTEXITCODE." }
+    } catch {
+        Write-Output "$FilePath diagnostic could not run: $($_.Exception.Message)"
+    }
+}
+
 function Get-MsixIdentity {
     param([Parameter(Mandatory = $true)] [string]$PackagePath)
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -105,7 +118,7 @@ function Write-PlaywrightPackageAccessDiagnostics {
         $path = $candidateManifest
         while ($path -and $path.StartsWith($repositoryFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
             Write-Output "ACL: $path"
-            & icacls.exe $path 2>&1
+            Invoke-OptionalNativeDiagnostic -FilePath 'icacls.exe' -ArgumentList @($path)
             $path = Split-Path -Parent $path
             if ([string]::IsNullOrWhiteSpace($path)) { break }
         }
@@ -114,7 +127,7 @@ function Write-PlaywrightPackageAccessDiagnostics {
     $item = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
     if ($item) {
         Write-Output "Package manifest attributes: $($item.Attributes); link type: $($item.LinkType); target: $($item.Target)"
-        & fsutil.exe hardlink list $manifestPath 2>&1
+        Invoke-OptionalNativeDiagnostic -FilePath 'fsutil.exe' -ArgumentList @('hardlink', 'list', $manifestPath)
     } else {
         Write-Output 'Package manifest is not visible to the disposable user.'
     }
@@ -129,8 +142,7 @@ function Write-PlaywrightPackageAccessDiagnostics {
 
     $node = Get-Command node.exe -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($node) {
-        & $node.Source -e "require('fs').readFileSync(process.argv[1], 'utf8')" $manifestPath 2>&1
-        Write-Output "Node package manifest read probe exit code: $LASTEXITCODE"
+        Invoke-OptionalNativeDiagnostic -FilePath $node.Source -ArgumentList @('-e', "require('fs').readFileSync(process.argv[1], 'utf8')", $manifestPath)
     } else {
         Write-Output 'Node package manifest read probe skipped: node.exe is not on the standard-user PATH.'
     }
@@ -230,7 +242,7 @@ try {
     $userReport.phase = 'running installed-app Playwright suite'
     Write-UserReport
 
-    Write-PlaywrightPackageAccessDiagnostics
+    try { Write-PlaywrightPackageAccessDiagnostics } catch { Write-Output "Optional package access diagnostics could not complete: $($_.Exception.Message)" }
     $env:CONTEXTPICK_NATIVE_EXECUTABLE = $installedExecutable
     $env:CONTEXTPICK_NATIVE_CONFIG_DIR = $configDirectory
     $env:CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR = Join-Path $evidenceFullPath 'playwright-results'
