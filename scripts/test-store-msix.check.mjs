@@ -1,67 +1,23 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const script = await readFile(new URL('./test-store-msix.ps1', import.meta.url), 'utf8');
 
-test('standard-user access avoids recursively granting the entire checkout', () => {
-  assert.doesNotMatch(script, /Grant-TemporaryAccess\s+-Path\s+\$repoRoot\s+-Rights\s+'RX'\s+-Recursive/i);
-  assert.doesNotMatch(script, /Join-Path\s+\$repoRoot\s+'node_modules\.vite'/i);
-  assert.match(script, /if \(\$Recursive\) \{\s*& icacls\.exe \$Path \/grant[\s\S]*?\/T \/L \/Q \| Out-Null\s*\}/);
-  assert.match(script, /if \(\$entry\.Recursive\) \{\s*\$arguments \+= @\('\/T', '\/L'\)\s*\}/);
-
-  assert.match(script, /foreach \(\$relativeDirectory in @\('node_modules', 'src', 'tests\\native', 'scripts'\)\)\s*\{\s*Grant-TemporaryAccess -Path \(Join-Path \$repoRoot \$relativeDirectory\) -Rights 'RX' -Recursive/s);
-  assert.match(script, /foreach \(\$relativeFile in @\('index\.html', 'package\.json', 'pnpm-lock\.yaml', 'playwright\.native\.config\.ts', 'vite\.config\.ts', 'tsconfig\.json', 'tsconfig\.app\.json', 'tsconfig\.node\.json'\)\)\s*\{\s*Grant-TemporaryAccess -Path \(Join-Path \$repoRoot \$relativeFile\) -Rights 'RX'/s);
-});
-
-test('standard-user access follows declared Playwright dependencies inside node_modules', () => {
-  assert.match(script, /Get-Item -LiteralPath \(Join-Path \$repoRoot 'node_modules\\@playwright\\test'\) -Force/);
-  assert.match(script, /Attributes -band \[IO\.FileAttributes\]::ReparsePoint/);
-  assert.match(script, /\$playwrightPackageTarget = \[string\]\$playwrightPackageLink\.Target/);
-  assert.match(script, /\$playwrightPackageTarget = \[IO\.Path\]::GetFullPath\(\$playwrightPackageTarget\)/);
-  assert.match(script, /playwrightPackageTarget\.StartsWith\(\$nodeModulesPrefix/);
-  assert.match(script, /while \(\$playwrightTargetAncestor\.StartsWith\(\$nodeModulesPrefix[\s\S]*?Get-Item -LiteralPath \$playwrightTargetAncestor -Force[\s\S]*?ReparsePoint[\s\S]*?throw/);
-  assert.match(script, /ConvertFrom-Json/);
-  assert.match(script, /function Get-ManifestDependencyNames \{/);
-  assert.match(script, /foreach \(\$dependencyName in \(Get-ManifestDependencyNames \$playwrightPackageManifestData\)\)/);
-  assert.match(script, /Join-Path \$playwrightDependencySearchPath \(Join-Path 'node_modules' \$dependencyName\)/);
-  assert.match(script, /playwrightDependencySearchPath\.StartsWith\(\$repositoryPrefix/);
-  assert.match(script, /playwrightPackageQueue\.Enqueue\(\$playwrightDependencyPath\)/);
-  assert.match(script, /ResolveLinkTarget\(\$true\)/);
-  assert.match(script, /playwrightDependencyPath[\s\S]*?StartsWith\(\$nodeModulesPrefix[\s\S]*?throw/);
-  assert.match(script, /HashSet\[string\][\s\S]*?OrdinalIgnoreCase/);
-  assert.match(script, /while \(\$playwrightPackageQueue\.Count -gt 0\)[\s\S]*?Get-ChildItem -LiteralPath \$playwrightDirectory/);
-  assert.match(script, /if \(\$playwrightItem\.Name -eq 'node_modules'\) \{ continue \}/);
-  assert.match(script, /playwrightPackageDirectories\.Add\(\$playwrightDirectory\)[\s\S]*?playwrightPackageFiles\.Add\(\$playwrightItemPath\)/);
-  assert.match(script, /foreach \(\$playwrightPackageDirectory in \$playwrightPackageDirectories\)\s*\{\s*Grant-TemporaryAccess -Path \$playwrightPackageDirectory -Rights 'RX'/);
-  assert.match(script, /foreach \(\$playwrightPackageFile in \$playwrightPackageFiles\)\s*\{\s*Grant-TemporaryAccess -Path \$playwrightPackageFile -Rights 'RX'/);
-  assert.doesNotMatch(script, /Grant-TemporaryAccess -Path \$playwrightPackageTarget -Rights 'RX' -Recursive/);
-});
-
-test('Playwright dependency enumeration handles absent, null, empty, and populated manifest sections', { skip: process.platform !== 'win32' }, async () => {
-  const helper = script.match(/function Get-ManifestDependencyNames \{[\s\S]*?\n\}/)?.[0];
-  assert.ok(helper, 'production dependency enumeration helper should exist');
-  const powershell = spawnSync('pwsh.exe', [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-    `${helper}\n$ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest; @('{}', '{"dependencies":null}', '{"dependencies":{}}', '{"dependencies":{"playwright":"1.63.0"}}') | ForEach-Object { $manifest = ConvertFrom-Json $_; ,@(Get-ManifestDependencyNames $manifest) } | ConvertTo-Json -Compress -Depth 4`,
-  ], { encoding: 'utf8' });
-  assert.equal(powershell.status, 0, powershell.stderr || powershell.stdout);
-  assert.deepEqual(JSON.parse(powershell.stdout.trim()), [[], [], [], ['playwright']]);
-});
-
-test('standard-user writable state stays in runner evidence folders', () => {
-  for (const relativePath of [
-    'corepack',
-    'standard-user-temp',
-    'playwright-results',
-    'screenshots',
-    'vite-cache',
-  ]) {
-    assert.ok(script.includes(`Join-Path $resultRoot '${relativePath}'`), `missing isolated writable path ${relativePath}`);
-  }
-
-  assert.doesNotMatch(script, /Grant-TemporaryAccess\s+-Path\s+\$resultRoot\s+-Rights\s+'M'/i);
+test('MSIX lifecycle uses a linked filtered token and preserves the runner account and profile', async () => {
+  const helper = await readFile(new URL('./run-filtered-token-process.ps1', import.meta.url), 'utf8');
+  const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
+  assert.match(script, /run-filtered-token-process\.ps1/);
+  assert.match(script, /Start-ContextPickFilteredTokenProcess/);
+  assert.match(script, /testTokenMode = 'UAC linked filtered token'/);
+  assert.match(script, /filteredTokenReport\.token\.sid -ne \$runnerSid/);
+  assert.match(script, /filteredTokenReport\.token\.sessionId/);
+  assert.match(script, /filteredTokenReport\.token\.integrityRid/);
+  assert.match(script, /runnerProfilePreserved = \$true/);
+  assert.match(script, /filtered-token-lifecycle\.json/);
+  assert.match(standardUserScript, /mode = 'UAC linked filtered token'/);
+  assert.match(standardUserScript, /scope = 'fresh hosted runner profile under linked filtered token'/);
+  assert.doesNotMatch(script + helper, /CreateProcessWithLogonW|New-LocalUser|Remove-LocalUser|Grant-TemporaryAccess|Revoke-TemporaryAccess|icacls\.exe.*\/(?:grant|remove:g)/);
 });
 
 test('standard-user Playwright failures capture effective package access before execution', async () => {
@@ -73,33 +29,6 @@ test('standard-user Playwright failures capture effective package access before 
   assert.match(standardUserScript, /\[System\.IO\.File\]::OpenRead\(\$manifestPath\)/);
   assert.match(standardUserScript, /readFileSync\(process\.argv\[1\], 'utf8'\)/);
   assert.match(standardUserScript, /\n\s*Write-PlaywrightPackageAccessDiagnostics\s*\n[\s\S]*?Invoke-NativeCommand -FilePath 'corepack'/);
-});
-
-test('checkout-root access does not inherit and report permissions target an existing file', () => {
-  assert.match(script, /\$inheritance\s*=\s*if\s*\(\$Recursive\s+-and\s+\(Test-Path -LiteralPath \$Path -PathType Container\)\)/i);
-  assert.match(script, /\$script:aclPaths\s*=\s*\[System\.Collections\.Generic\.List\[object\]\]::new\(\)/);
-  assert.match(script, /New-Item -ItemType File -Path \$standardUserReportPath -Force/);
-  assert.ok(script.indexOf('New-Item -ItemType File -Path $standardUserReportPath -Force') < script.indexOf('Grant-TemporaryAccess -Path $standardUserReportPath -Rights \'M\''));
-});
-
-test('failure-path cleanup records restored repository ACLs only after successful revocation', () => {
-  const finallyBlock = script.slice(script.lastIndexOf('} finally {'));
-  assert.match(finallyBlock, /Assert-NoTemporaryUserProcesses\s+Revoke-TemporaryAccess\s+if \(\$script:cleanupErrors\.Count -gt 0\) \{ throw[\s\S]*?\$report\.cleanup\.repositoryAclRestored = \$true/);
-});
-
-test('temporary standard-user processes are audited before account and ACL cleanup', () => {
-  assert.match(script, /function Assert-NoTemporaryUserProcesses/);
-  assert.match(script, /Invoke-CimMethod -InputObject \$process -MethodName GetOwnerSid -ErrorAction Stop/);
-  assert.match(script, /\[int\]\$owner\.ReturnValue -ne 0/);
-  assert.match(script, /\$null -eq \$owner -or \[int\]\$owner\.ReturnValue -ne 0/);
-  assert.match(script, /temporaryUserProcessBaseline\[\[int\]\$process\.ProcessId\]/);
-  assert.match(script, /\[int\]\$process\.SessionId -ne \[int\]\$script:temporaryUserSessionId/);
-  assert.match(script, /\$script:temporaryUserProcessBaseline = @\{\}/);
-  assert.match(script, /Could not recheck process \$\(\$process\.ProcessId\) after its owner SID lookup failed/);
-  assert.match(script, /Property CreationDate, SessionId -ErrorAction Stop/);
-  assert.match(script, /Temporary standard-user processes remain; preserving its profile, account, and repository ACLs/);
-  const cleanup = script.slice(script.indexOf('function Assert-NoTemporaryUserProcesses'));
-  assert.match(cleanup, /Assert-NoTemporaryUserProcesses\s+Revoke-TemporaryAccess/);
 });
 
 test('installed MSIX Playwright checks skip the unused Vite development server', async () => {
@@ -194,20 +123,14 @@ test('temporary machine-root trust uses a bounded noninteractive X509Store helpe
   assert.doesNotMatch(helper, /Import-Certificate|PromptForChoice|Windows\.Forms/i);
 });
 
-test('certificate cleanup evidence stays false when the temporary-user profile is retained', () => {
-  assert.match(script, /if \(-not \$childExited -or \(\$accountCreated -and -not \$report\.cleanup\.temporaryProfileRemoved\)\) \{\s*\$report\.cleanup\.signingCertificateRemoved = \$false/);
-});
-
-test('temporary account description respects the Windows local-account length limit', () => {
-  const description = script.match(/-Description '([^']+)'/)?.[1];
-  assert.ok(description, 'temporary local account should have an explicit description');
-  assert.ok(description.length <= 48, `description length ${description.length} exceeds 48 characters`);
+test('certificate cleanup is marked incomplete if the filtered-token lifecycle process remains', () => {
+  assert.match(script, /if \(-not \$childExited\) \{\s*\$report\.cleanup\.signingCertificateRemoved = \$false/);
 });
 
 test('standard-user MSIX install uses only temporary machine TrustedPeople trust', async () => {
   const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
   const trustAdded = script.indexOf("-Operation', 'AddMachineTrustedPeople'");
-  const userLifecycle = script.indexOf("Write-LifecyclePhase 'Starting installed-app lifecycle under the disposable standard user.'");
+  const userLifecycle = script.indexOf('Starting MSIX install, activation, upgrade, and uninstall under filtered runner token');
   const trustRemoved = script.indexOf("-Operation', 'RemoveTemporaryCertificate'");
   assert.ok(trustAdded >= 0 && trustAdded < userLifecycle, 'install trust must exist before first package deployment');
   assert.ok(trustRemoved > userLifecycle, 'trust must be removed after the standard-user lifecycle');
@@ -217,7 +140,7 @@ test('standard-user MSIX install uses only temporary machine TrustedPeople trust
   assert.match(standardUserScript, /certificateAbsentFromStandardUserMyStore/);
   assert.match(standardUserScript, /Get-ChildItem -Path 'Cert:\\CurrentUser\\My'/);
   assert.doesNotMatch(standardUserScript, /Cert:\\CurrentUser\\(?:Root|TrustedPeople)/);
-  assert.match(standardUserScript, /no signer was imported into standard-user stores, and the elevated parent performs machine trust cleanup/i);
+  assert.match(standardUserScript, /runner profile remains intact/i);
   assert.match(script, /machineTrustedPeoplePresentBeforeInstall = \$true/);
 });
 

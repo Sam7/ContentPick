@@ -241,7 +241,7 @@ jobs:
       - name: Install frontend test dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install, smoke test, and uninstall candidate
+      - name: Install, exercise, and uninstall candidate under linked filtered token
         shell: pwsh
         run: .\scripts\test-installed-standard-user.ps1 -InstallerPath $env:CONTEXTPICK_CANDIDATE_INSTALLER
 
@@ -249,8 +249,8 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: contextpick-installed-windows-failure-${{ github.run_number }}-${{ github.sha }}
-          path: ${{ runner.temp }}/contextpick-standard-user-smoke/**
+          name: contextpick-filtered-token-windows-failure-${{ github.run_number }}-${{ github.sha }}
+          path: ${{ runner.temp }}/contextpick-filtered-token-smoke/**
           if-no-files-found: ignore
           retention-days: 7
 

@@ -4,209 +4,129 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
-function Grant-TemporaryAccess {
-    param(
-        [Parameter(Mandatory = $true)] [string]$Path,
-        [Parameter(Mandatory = $true)] [string]$Rights,
-        [switch]$Inheritable,
-        [switch]$Recursive
-    )
-
-    $inheritanceFlags = if ($Inheritable) { '(OI)(CI)' } else { '' }
-    $grantOptions = @($Path, '/grant', "*$script:userSid`:$inheritanceFlags($Rights)")
-    if ($Recursive) { $grantOptions += '/T' }
-    $grantOptions += '/Q'
-    & icacls.exe @grantOptions
-    if ($LASTEXITCODE -ne 0) { throw "Could not grant temporary $Rights access to $Path (icacls exit $LASTEXITCODE)." }
-    $script:aclPaths.Add($Path)
+if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw 'PowerShell 7.4 or newer is required.' }
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+    throw 'The filtered-token installer smoke is reserved for a GitHub-hosted Windows runner.'
+}
+if (-not [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'The hosted runner must be elevated to install the filtered-token launcher prerequisites.'
 }
 
-function Revoke-TemporaryAccess {
-    foreach ($path in $script:aclPaths) {
-        $isOutputRoot = [string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)
-        $outputPrefix = $outputRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-        $isOutputChild = $path.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)
-        if ($isOutputRoot -or $isOutputChild) {
-            # Output-root access is direct only. Inheritance begins at the three
-            # disposable scratch directories recorded separately in aclPaths.
-            & icacls.exe $path /reset /Q /L
-            if ($LASTEXITCODE -ne 0) {
-                $script:cleanupErrors.Add("Could not reset temporary smoke-user access from $path (icacls exit $LASTEXITCODE).")
-                continue
-            }
-            if ($isOutputChild) {
-                & icacls.exe $path /reset /T /C /Q /L
-            }
-        } else {
-            & icacls.exe $path /remove:g "*$script:userSid" /T /Q
-        }
-        if ($LASTEXITCODE -ne 0) {
-            $script:cleanupErrors.Add("Could not remove temporary smoke-user access from $path (icacls exit $LASTEXITCODE).")
-            continue
-        }
-
-        if ($isOutputRoot -or $isOutputChild) { continue }
-
-        $findSidOptions = @()
-        if ($isOutputRoot) { $findSidOptions += '/L' }
-        $remainingEntries = @(& icacls.exe $path /findsid "*$script:userSid" /T /C /Q @findSidOptions 2>&1)
-        $findSidExitCode = $LASTEXITCODE
-        $noMatchLines = @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' })
-        $processedLines = @($remainingEntries | Where-Object { $_ -match '^Successfully processed \d+ files; Failed processing 0 files\.?$' })
-        $unexpectedLines = @($remainingEntries | Where-Object {
-            $_ -notmatch '^No files with a matching SID was found\.?$' -and
-            $_ -notmatch '^Successfully processed \d+ files; Failed processing 0 files\.?$'
-        })
-        $noMatchingSid = $findSidExitCode -in @(0, 1332) `
-            -and $noMatchLines.Count -eq 1 `
-            -and $processedLines.Count -eq 1 `
-            -and $unexpectedLines.Count -eq 0
-        if (-not $noMatchingSid) {
-            $details = if ($remainingEntries.Count -gt 0) { $remainingEntries -join ' | ' } else { 'icacls returned no verification output' }
-            if ($findSidExitCode -ne 0) {
-                $script:cleanupErrors.Add("Could not verify removal of the temporary smoke-user SID from $path (icacls exit $findSidExitCode): $details")
-            } else {
-                $script:cleanupErrors.Add("Temporary smoke-user access remains or could not be verified on ${path}: $details")
-            }
-        }
-    }
-
-    # Reset restores inherited permissions, but ACL inheritance can leave the
-    # temporary SID on generated descendants. Remove that SID across this
-    # dedicated output tree before verifying no grant remains.
-    & icacls.exe $outputRoot /remove:g "*$script:userSid" /T /C /Q /L
-    if ($LASTEXITCODE -ne 0) {
-        $script:cleanupErrors.Add("Could not remove temporary smoke-user access from ${outputRoot} (icacls exit $LASTEXITCODE).")
-    }
-
-    $findOutputRootOptions = @('/findsid', "*$script:userSid", '/T', '/C', '/Q', '/L')
-    $remainingEntries = @(& icacls.exe $outputRoot @findOutputRootOptions 2>&1)
-    $findSidExitCode = $LASTEXITCODE
-    $noMatchLines = @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' })
-    $processedLines = @($remainingEntries | Where-Object { $_ -match '^Successfully processed \d+ files; Failed processing 0 files\.?$' })
-    $unexpectedLines = @($remainingEntries | Where-Object {
-        $_ -notmatch '^No files with a matching SID was found\.?$' -and
-        $_ -notmatch '^Successfully processed \d+ files; Failed processing 0 files\.?$'
-    })
-    if ($findSidExitCode -notin @(0, 1332) -or $noMatchLines.Count -ne 1 -or $processedLines.Count -ne 1 -or $unexpectedLines.Count -ne 0) {
-        $details = if ($remainingEntries.Count -gt 0) { $remainingEntries -join ' | ' } else { 'icacls returned no verification output' }
-        $script:cleanupErrors.Add("Temporary smoke-user access remains or could not be verified on ${outputRoot}: $details")
-    }
-}
-
-function Restore-RunnerOwnershipOfSmokeArtifacts {
-    $resultsFullPath = [System.IO.Path]::GetFullPath($resultsDir)
-    $outputPrefix = [System.IO.Path]::GetFullPath($outputRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $resultsFullPath.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Refusing to restore ownership outside the dedicated smoke output directory.'
-    }
-    $entries = @((Get-Item -LiteralPath $resultsFullPath -Force)) + @(Get-ChildItem -LiteralPath $resultsFullPath -Force -Recurse)
-    foreach ($entry in $entries) {
-        if ($entry.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
-            throw "Refusing to restore artifact ownership through a reparse point: $($entry.FullName)."
-        }
-    }
-    $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    if ($runnerSid -eq $script:userSid) { throw 'Refusing to restore smoke artifact ownership to the disposable user.' }
-    & icacls.exe $resultsFullPath /setowner "*$runnerSid" /T /C /Q /L
-    if ($LASTEXITCODE -ne 0) { throw "Could not restore runner ownership for disposable Playwright artifacts (icacls exit $LASTEXITCODE)." }
-}
+. (Join-Path $PSScriptRoot 'run-filtered-token-process.ps1')
 
 function ConvertTo-PowerShellLiteral {
-    param([Parameter(Mandatory = $true)] [string]$Value)
-    return "'" + $Value.Replace("'", "''") + "'"
+    param([Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$Value)
+    "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Get-ProcessTreeSnapshot {
+    param([Parameter(Mandatory = $true)] [int]$RootProcessId)
+    $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, CreationDate, SessionId)
+    $owned = [System.Collections.Generic.HashSet[int]]::new()
+    $null = $owned.Add($RootProcessId)
+    do {
+        $changed = $false
+        foreach ($item in $all) {
+            if ($owned.Contains([int]$item.ParentProcessId) -and $owned.Add([int]$item.ProcessId)) { $changed = $true }
+        }
+    } while ($changed)
+    @($all | Where-Object { $owned.Contains([int]$_.ProcessId) } | ForEach-Object {
+        $ownerSid = $null
+        try {
+            $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop
+            if ($owner.ReturnValue -eq 0) { $ownerSid = [string]$owner.Sid }
+        } catch { }
+        $commandLine = [string]$_.CommandLine
+        $debugPort = $null
+        if ($commandLine -match '--remote-debugging-port=(\d+)') { $debugPort = [int]$Matches[1] }
+        $windowHandle = $null
+        $windowTitle = $null
+        try {
+            $process = Get-Process -Id ([int]$_.ProcessId) -ErrorAction Stop
+            $windowHandle = [string]$process.MainWindowHandle
+            $windowTitle = [string]$process.MainWindowTitle
+        } catch { }
+        [pscustomobject]@{
+            processId = [int]$_.ProcessId
+            parentProcessId = [int]$_.ParentProcessId
+            name = [string]$_.Name
+            sessionId = [int]$_.SessionId
+            ownerSid = $ownerSid
+            executableName = if ($_.ExecutablePath) { [System.IO.Path]::GetFileName([string]$_.ExecutablePath) } else { $null }
+            creationTimeUtc = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null }
+            debugPort = $debugPort
+            windowHandle = $windowHandle
+            windowTitle = $windowTitle
+        }
+    })
 }
 
 function Wait-ForProcessTreeExit {
-    param(
-        [Parameter(Mandatory = $true)] [int]$RootProcessId,
-        [Parameter(Mandatory = $true)] [int]$TimeoutSeconds
-    )
-
-    $knownProcessIds = [System.Collections.Generic.HashSet[int]]::new()
-    $null = $knownProcessIds.Add($RootProcessId)
+    param([Parameter(Mandatory = $true)] [int]$RootProcessId, [Parameter(Mandatory = $true)] [int]$TimeoutSeconds)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $ownedIds = [System.Collections.Generic.HashSet[int]]::new()
+    $null = $ownedIds.Add($RootProcessId)
     do {
-        $processes = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId)
+        $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId)
         do {
             $changed = $false
-            foreach ($process in $processes) {
-                if ($knownProcessIds.Contains([int]$process.ParentProcessId) -and $knownProcessIds.Add([int]$process.ProcessId)) {
-                    $changed = $true
-                }
+            foreach ($item in $all) {
+                if ($ownedIds.Contains([int]$item.ParentProcessId) -and $ownedIds.Add([int]$item.ProcessId)) { $changed = $true }
             }
         } while ($changed)
-
-        if (-not ($processes | Where-Object { $knownProcessIds.Contains([int]$_.ProcessId) })) { return $true }
+        if (-not ($all | Where-Object { $ownedIds.Contains([int]$_.ProcessId) })) { return $true }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-
     return $false
 }
 
-function Assert-NoTemporaryAccountProcesses {
+function Save-LaunchDiagnostics {
     param(
+        [Parameter(Mandatory = $true)] [DateTime]$StartedAtUtc,
+        [Parameter(Mandatory = $true)] [string]$UserSid,
         [Parameter(Mandatory = $true)] [int]$SessionId,
-        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]]$ProcessBaseline
+        [Parameter(Mandatory = $true)] [string]$Path
     )
-
-    $baselineKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($baselineProcess in $ProcessBaseline) {
-        if ([int]$baselineProcess.SessionId -eq $SessionId -and $null -ne $baselineProcess.CreationDate) {
-            $baselineKey = '{0}|{1}' -f [int]$baselineProcess.ProcessId, $baselineProcess.CreationDate.ToUniversalTime().Ticks
-            $null = $baselineKeys.Add($baselineKey)
-        }
-    }
-    $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "SessionId=$SessionId" -Property ProcessId, SessionId, Name, CreationDate)
-    foreach ($process in $processes) {
-        if ([int]$process.SessionId -ne $SessionId) { continue }
-        $creationTicks = if ($null -ne $process.CreationDate) { $process.CreationDate.ToUniversalTime().Ticks } else { 'unknown' }
-        $processKey = '{0}|{1}' -f [int]$process.ProcessId, $creationTicks
-        $wasPresentBeforeChild = $baselineKeys.Contains($processKey)
+    $items = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, CreationDate, SessionId)) {
+        if ([int]$item.SessionId -ne $SessionId -or -not $item.CreationDate -or $item.CreationDate.ToUniversalTime() -lt $StartedAtUtc) { continue }
+        if ([string]$item.Name -notin @('contextpick.exe', 'msedgewebview2.exe')) { continue }
         try {
-            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
-        } catch {
-            if ($wasPresentBeforeChild) { continue }
-            throw "Could not verify the owner of process $($process.ProcessId) ($($process.Name)) in the standard-user smoke session; preserving the temporary account and ACLs: $_"
+            $owner = Invoke-CimMethod -InputObject $item -MethodName GetOwnerSid -ErrorAction Stop
+            if ($owner.ReturnValue -ne 0 -or $owner.Sid -ne $UserSid) { continue }
+        } catch { continue }
+        $command = [string]$item.CommandLine
+        $port = $null
+        if ($command -match '--remote-debugging-port=(\d+)') { $port = [int]$Matches[1] }
+        $listeners = @()
+        if ($port) {
+            $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $item.ProcessId } | ForEach-Object { [pscustomobject]@{ address = $_.LocalAddress; port = $_.LocalPort } })
         }
-        if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace([string]$owner.Sid)) {
-            if ($wasPresentBeforeChild) { continue }
-            throw "Could not verify the owner of process $($process.ProcessId) ($($process.Name)) in the standard-user smoke session (GetOwnerSid returned $($owner.ReturnValue)); preserving the temporary account and ACLs."
-        }
-        if ([string]$owner.Sid -eq $script:userSid) {
-            throw "Temporary smoke account still owns process $($process.ProcessId) ($($process.Name)); preserving the account and ACLs for runner teardown."
-        }
+        $windowHandle = $null
+        try { $windowHandle = [string](Get-Process -Id ([int]$item.ProcessId) -ErrorAction Stop).MainWindowHandle } catch { }
+        $items.Add([pscustomobject]@{
+            processId = [int]$item.ProcessId
+            parentProcessId = [int]$item.ParentProcessId
+            name = [string]$item.Name
+            sessionId = [int]$item.SessionId
+            ownerSid = [string]$owner.Sid
+            executableName = if ($item.ExecutablePath) { [System.IO.Path]::GetFileName([string]$item.ExecutablePath) } else { $null }
+            creationTimeUtc = $item.CreationDate.ToUniversalTime().ToString('o')
+            debugPort = $port
+            listeners = $listeners
+            windowHandle = $windowHandle
+        })
     }
-}
-
-function Remove-NsisTemporaryUninstaller {
-    param([Parameter(Mandatory = $true)] [string]$TemporaryDirectory)
-
-    $temporaryRoot = [System.IO.Path]::GetFullPath($TemporaryDirectory).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-    foreach ($directory in @(Get-ChildItem -LiteralPath $TemporaryDirectory -Directory -Force -Filter '~nsu*.tmp' -ErrorAction SilentlyContinue)) {
-        $resolvedDirectory = [System.IO.Path]::GetFullPath($directory.FullName)
-        if (-not $resolvedDirectory.StartsWith($temporaryRoot, [System.StringComparison]::OrdinalIgnoreCase) -or $directory.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
-            throw "Refusing to remove unexpected NSIS temporary directory: $resolvedDirectory."
-        }
-        $entries = @(Get-ChildItem -LiteralPath $resolvedDirectory -Force)
-        if ($entries.Count -ne 1 -or $entries[0].Name -cne 'Un.exe' -or $entries[0].PSIsContainer -or $entries[0].Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
-            throw "Refusing to remove NSIS temporary directory with unexpected contents: $resolvedDirectory."
-        }
-        $uninstallerPath = [System.IO.Path]::GetFullPath($entries[0].FullName)
-        $runningUninstaller = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ExecutablePath | Where-Object { [string]::Equals([string]$_.ExecutablePath, $uninstallerPath, [System.StringComparison]::OrdinalIgnoreCase) })
-        if ($runningUninstaller.Count -gt 0) { throw "Refusing to remove a running NSIS temporary uninstaller: $uninstallerPath." }
-        Remove-Item -LiteralPath $uninstallerPath -Force -ErrorAction Stop
-        Remove-Item -LiteralPath $resolvedDirectory -Force -ErrorAction Stop
+    $document = [ordered]@{
+        capturedAtUtc = [DateTime]::UtcNow.ToString('o')
+        testStartedAtUtc = $StartedAtUtc.ToString('o')
+        runnerSid = $UserSid
+        sessionId = $SessionId
+        appProcesses = @($items)
+        appOutputLog = [System.IO.Path]::GetFileName($stdoutPath)
     }
-}
-
-if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw 'PowerShell 7.4 or newer is required.' }
-if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
-    throw 'The temporary standard-user installer smoke is reserved for a GitHub-hosted Windows runner.'
-}
-if (-not [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'The hosted Windows runner must be elevated to create and remove its temporary standard user.'
+    [System.IO.File]::WriteAllText($Path, ($document | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
+    return @($items)
 }
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -218,229 +138,157 @@ if (-not $installer.StartsWith($candidatePrefix, [System.StringComparison]::Ordi
     throw 'The installer must be inside this run dedicated candidate directory.'
 }
 
-$outputRoot = [System.IO.Path]::GetFullPath((Join-Path $runnerTemp 'contextpick-standard-user-smoke'))
-$outputPrefix = $runnerTemp.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-if (-not $outputRoot.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The smoke output directory must remain under RUNNER_TEMP.'
-}
-if (Test-Path -LiteralPath $outputRoot) { throw 'The dedicated standard-user smoke output directory already exists.' }
+$outputRoot = [System.IO.Path]::GetFullPath((Join-Path $runnerTemp 'contextpick-filtered-token-smoke'))
+$runnerTempPrefix = $runnerTemp.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+if (-not $outputRoot.StartsWith($runnerTempPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Smoke output must remain under RUNNER_TEMP.' }
+if (Test-Path -LiteralPath $outputRoot) { throw 'The dedicated installer smoke output directory already exists.' }
 $null = New-Item -ItemType Directory -Path $outputRoot
 $resultsDir = Join-Path $outputRoot 'playwright'
 $null = New-Item -ItemType Directory -Path $resultsDir
-$tempDir = Join-Path $outputRoot 'temp'
-$null = New-Item -ItemType Directory -Path $tempDir
 $corepackDir = Join-Path $outputRoot 'corepack'
 $null = New-Item -ItemType Directory -Path $corepackDir
-$stdoutPath = Join-Path $outputRoot 'smoke.stdout.txt'
-$stderrPath = Join-Path $outputRoot 'smoke.stderr.txt'
+$stdoutPath = Join-Path $outputRoot 'filtered-token-smoke.log'
+$bootstrapPath = Join-Path $outputRoot 'filtered-token-smoke-bootstrap.ps1'
+$diagnosticsPath = Join-Path $outputRoot 'launch-diagnostics.json'
+$runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+$userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$appData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
+$localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+$existingConfig = Join-Path $appData 'dev.contextpick.desktop'
+$existingInstall = Join-Path $localAppData 'ContextPick'
+if (Test-Path -LiteralPath $existingConfig) { throw "Runner profile already contains ContextPick settings: $existingConfig." }
+if (Test-Path -LiteralPath $existingInstall) { throw "Runner profile already contains a ContextPick installation: $existingInstall." }
+$uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+$existingRegistrations = @(Get-ChildItem -LiteralPath $uninstallKey -ErrorAction SilentlyContinue | Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'ContextPick*' })
+if ($existingRegistrations.Count -gt 0) { throw 'Runner profile already has a ContextPick uninstall registration.' }
 
-$script:aclPaths = [System.Collections.Generic.List[string]]::new()
-$script:cleanupErrors = [System.Collections.Generic.List[string]]::new()
-$script:userSid = $null
-$userName = 'cpSmoke' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
-$accountCreated = $false
-$childExited = $true
-$passwordString = $null
-$securePassword = $null
-$child = $null
-$smokeFailure = $null
-
+$nodeCommand = Get-Command node.exe -ErrorAction Stop | Select-Object -First 1
+$nodeHome = Split-Path -Parent $nodeCommand.Source
+$pwshPath = (Get-Process -Id $PID).Path
+$systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
+if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = $env:SystemRoot }
+$windowsPowerShellPath = Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0'
+$systemDrive = [System.IO.Path]::GetPathRoot($systemRoot).TrimEnd('\')
+$corepackPath = Get-Command corepack.cmd -ErrorAction Stop | Select-Object -First 1
+$previousCorepackHome = $env:COREPACK_HOME
 try {
-    $randomBytes = [byte[]]::new(32)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($randomBytes)
-    $passwordString = 'Aa1!' + [Convert]::ToBase64String($randomBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-    [Array]::Clear($randomBytes, 0, $randomBytes.Length)
-    $securePassword = ConvertTo-SecureString -String $passwordString -AsPlainText -Force
+    $env:COREPACK_HOME = $corepackDir
+    & $corepackPath.Source pnpm --version
+    if ($LASTEXITCODE -ne 0) { throw "Could not prewarm pinned pnpm (Corepack exit $LASTEXITCODE)." }
+} finally {
+    if ($null -eq $previousCorepackHome) { Remove-Item Env:COREPACK_HOME -ErrorAction SilentlyContinue }
+    else { $env:COREPACK_HOME = $previousCorepackHome }
+}
 
-    $null = New-LocalUser -Name $userName -Password $securePassword -Description 'Temporary ContextPick smoke account'
-    $accountCreated = $true
-    $localUser = Get-LocalUser -Name $userName
-    $script:userSid = $localUser.SID.Value
-    $accountName = "$env:COMPUTERNAME\$userName"
-    $credential = [PSCredential]::new($accountName, $securePassword)
+$environment = @{}
+$allowedNames = @(
+    'ALLUSERSPROFILE', 'APPDATA', 'CI', 'COMSPEC', 'COMPUTERNAME', 'CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR',
+    'COREPACK_ENABLE_DOWNLOAD_PROMPT', 'COREPACK_HOME', 'GITHUB_ACTIONS', 'GITHUB_WORKSPACE', 'HOMEDRIVE',
+    'HOMEPATH', 'LOCALAPPDATA', 'OS', 'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'ProgramData',
+    'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'PUBLIC', 'RUNNER_ENVIRONMENT', 'RUNNER_OS',
+    'RUNNER_TEMP', 'SystemDrive', 'SystemRoot', 'TEMP', 'TMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE', 'WINDIR'
+)
+foreach ($name in $allowedNames) { $environment[$name] = $null }
+$environment['ALLUSERSPROFILE'] = Join-Path $systemDrive 'ProgramData'
+$environment['APPDATA'] = $appData
+$environment['CI'] = 'true'
+$environment['COMSPEC'] = Join-Path $systemRoot 'System32\cmd.exe'
+$environment['COMPUTERNAME'] = $env:COMPUTERNAME
+$environment['CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR'] = $resultsDir
+$environment['COREPACK_ENABLE_DOWNLOAD_PROMPT'] = '0'
+$environment['COREPACK_HOME'] = $corepackDir
+$environment['GITHUB_ACTIONS'] = 'true'
+$environment['GITHUB_WORKSPACE'] = $repoRoot
+$environment['HOMEDRIVE'] = $systemDrive
+$environment['HOMEPATH'] = $userProfile.Substring($systemDrive.Length)
+$environment['LOCALAPPDATA'] = $localAppData
+$environment['OS'] = 'Windows_NT'
+$environment['PATH'] = "$nodeHome;$PSHOME;$windowsPowerShellPath;$systemRoot\System32;$systemRoot"
+$environment['PATHEXT'] = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+$environment['PROCESSOR_ARCHITECTURE'] = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Machine')
+$environment['ProgramData'] = Join-Path $systemDrive 'ProgramData'
+$environment['ProgramFiles'] = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+$environment['ProgramFiles(x86)'] = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+$environment['ProgramW6432'] = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+$environment['PUBLIC'] = Join-Path $systemDrive 'Users\Public'
+$environment['RUNNER_ENVIRONMENT'] = 'github-hosted'
+$environment['RUNNER_OS'] = 'Windows'
+$environment['RUNNER_TEMP'] = $runnerTemp
+$environment['SystemDrive'] = $systemDrive
+$environment['SystemRoot'] = $systemRoot
+$environment['TEMP'] = $env:TEMP
+$environment['TMP'] = $env:TMP
+$environment['USERDOMAIN'] = $env:USERDOMAIN
+$environment['USERNAME'] = $env:USERNAME
+$environment['USERPROFILE'] = $userProfile
+$environment['WINDIR'] = $systemRoot
 
-    $adminGroup = Get-LocalGroup -SID 'S-1-5-32-544'
-    $adminSids = @(Get-LocalGroupMember -Group $adminGroup | ForEach-Object { $_.SID.Value })
-    if ($adminSids -contains $script:userSid) { throw 'The temporary smoke account must not belong to Administrators.' }
+$testScript = Join-Path $PSScriptRoot 'test-installed.ps1'
+$bootstrapLines = [System.Collections.Generic.List[string]]::new()
+$bootstrapLines.Add('$ErrorActionPreference = ''Stop''')
+foreach ($entry in $environment.GetEnumerator()) {
+    if ($null -ne $entry.Value) {
+        $bootstrapLines.Add('[Environment]::SetEnvironmentVariable(' + (ConvertTo-PowerShellLiteral ([string]$entry.Key)) + ', ' + (ConvertTo-PowerShellLiteral ([string]$entry.Value)) + ", 'Process')")
+    }
+}
+$bootstrapLines.Add('try { & ' + (ConvertTo-PowerShellLiteral $testScript) + ' -InstallerPath ' + (ConvertTo-PowerShellLiteral $installer) + ' *> ' + (ConvertTo-PowerShellLiteral $stdoutPath) + '; exit 0 }')
+$bootstrapLines.Add('catch { $_ | Out-File -LiteralPath ' + (ConvertTo-PowerShellLiteral $stdoutPath) + ' -Append -Encoding utf8; exit 1 }')
+$bootstrap = [string]::Join([Environment]::NewLine, $bootstrapLines)
+$parseTokens = $null
+$parseErrors = $null
+$null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrap, [ref]$parseTokens, [ref]$parseErrors)
+if ($parseErrors.Count -gt 0) { throw "Could not parse filtered-token bootstrap: $($parseErrors[0].Message)" }
+[System.IO.File]::WriteAllText($bootstrapPath, $bootstrap, [Text.UTF8Encoding]::new($false))
 
-    Write-Output "Temporary standard test account: $accountName ($($script:userSid))"
-    Grant-TemporaryAccess -Path $repoRoot -Rights 'RX' -Inheritable -Recursive
-    Grant-TemporaryAccess -Path $candidateRoot -Rights 'RX' -Inheritable -Recursive
-    Grant-TemporaryAccess -Path $outputRoot -Rights 'M'
-    Grant-TemporaryAccess -Path $resultsDir -Rights 'M' -Inheritable
-    Grant-TemporaryAccess -Path $tempDir -Rights 'M' -Inheritable
-    $previousCorepackHome = $env:COREPACK_HOME
-    try {
-        $env:COREPACK_HOME = $corepackDir
-        $corepackCommand = Get-Command corepack.cmd -ErrorAction Stop | Select-Object -First 1
-        & $corepackCommand.Source pnpm --version
-        if ($LASTEXITCODE -ne 0) { throw "Could not prewarm the pinned pnpm package manager (Corepack exit $LASTEXITCODE)." }
-    } finally {
-        if ($null -eq $previousCorepackHome) { Remove-Item Env:COREPACK_HOME -ErrorAction SilentlyContinue }
-        else { $env:COREPACK_HOME = $previousCorepackHome }
-    }
-    Grant-TemporaryAccess -Path $corepackDir -Rights 'RX' -Inheritable -Recursive
-
-    $nodeCommand = Get-Command node.exe -ErrorAction Stop | Select-Object -First 1
-    $nodeHome = Split-Path -Parent $nodeCommand.Source
-    Grant-TemporaryAccess -Path $nodeHome -Rights 'RX' -Inheritable -Recursive
-
-    $testScript = Join-Path $PSScriptRoot 'test-installed.ps1'
-    $pwshPath = (Get-Process -Id $PID).Path
-    $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
-    if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = $env:SystemRoot }
-    if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'Could not determine the Windows system directory for the smoke environment.' }
-    $windowsPowerShellPath = Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0'
-    if (-not (Test-Path -LiteralPath (Join-Path $windowsPowerShellPath 'powershell.exe') -PathType Leaf)) {
-        throw "Windows PowerShell executable was not found: $(Join-Path $windowsPowerShellPath 'powershell.exe')."
-    }
-    $profileRoot = [Environment]::ExpandEnvironmentVariables((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').ProfilesDirectory)
-    $userProfile = Join-Path $profileRoot $userName
-    $systemDrive = [System.IO.Path]::GetPathRoot($systemRoot).TrimEnd('\')
-    $environment = @{}
-    foreach ($variable in Get-ChildItem Env:) {
-        $environment[$variable.Name] = $null
-    }
-    $testEnvironment = @{
-        ALLUSERSPROFILE = Join-Path $systemDrive 'ProgramData'
-        APPDATA = Join-Path $userProfile 'AppData\Roaming'
-        CI = 'true'
-        CommonProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonProgramFiles)
-        'CommonProgramFiles(x86)' = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonProgramFilesX86)
-        COMSPEC = Join-Path $systemRoot 'System32\cmd.exe'
-        COMPUTERNAME = $env:COMPUTERNAME
-        CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR = $resultsDir
-        COREPACK_HOME = $corepackDir
-        COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
-        GITHUB_ACTIONS = 'true'
-        HOMEDRIVE = $systemDrive
-        HOMEPATH = $userProfile.Substring($systemDrive.Length)
-        LOCALAPPDATA = Join-Path $userProfile 'AppData\Local'
-        OS = 'Windows_NT'
-        PATH = "$nodeHome;$PSHOME;$windowsPowerShellPath;$systemRoot\System32;$systemRoot"
-        PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
-        PROCESSOR_ARCHITECTURE = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Machine')
-        ProgramData = Join-Path $systemDrive 'ProgramData'
-        ProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-        'ProgramFiles(x86)' = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
-        ProgramW6432 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-        PUBLIC = Join-Path $systemDrive 'Users\Public'
-        RUNNER_ENVIRONMENT = 'github-hosted'
-        RUNNER_OS = 'Windows'
-        SystemDrive = $systemDrive
-        SystemRoot = $systemRoot
-        TEMP = $tempDir
-        TMP = $tempDir
-        USERDOMAIN = $env:COMPUTERNAME
-        USERNAME = $userName
-        USERPROFILE = $userProfile
-        WINDIR = $systemRoot
-    }
-    foreach ($entry in $testEnvironment.GetEnumerator()) {
-        $environment[$entry.Key] = $entry.Value
-    }
-    $bootstrapLines = [System.Collections.Generic.List[string]]::new()
-    foreach ($entry in $environment.GetEnumerator()) {
-        if ($null -ne $entry.Value) {
-            $bootstrapLines.Add('[Environment]::SetEnvironmentVariable(' +
-                (ConvertTo-PowerShellLiteral $entry.Key) + ', ' +
-                (ConvertTo-PowerShellLiteral ([string]$entry.Value)) + ", 'Process')")
-        }
-    }
-    $bootstrapLines.Add('& ' + (ConvertTo-PowerShellLiteral $testScript) + ' -InstallerPath ' + (ConvertTo-PowerShellLiteral $installer))
-    $bootstrapLines.Add('exit $LASTEXITCODE')
-    $bootstrap = [string]::Join([Environment]::NewLine, $bootstrapLines.ToArray())
-    $parseTokens = $null
-    $parseErrors = $null
-    $null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrap, [ref]$parseTokens, [ref]$parseErrors)
-    if ($parseErrors.Count -gt 0) { throw "Could not parse the standard-user smoke bootstrap: $($parseErrors[0].Message)" }
-    $bootstrapPath = Join-Path $candidateRoot 'standard-user-smoke-bootstrap.ps1'
-    [System.IO.File]::WriteAllText($bootstrapPath, $bootstrap, [Text.UTF8Encoding]::new($false))
-    $childArguments = '-NoLogo -NoProfile -File "' + $bootstrapPath + '"'
-    $childCommandLineLength = ('"' + $pwshPath + '" ' + $childArguments).Length
-    if ($childCommandLineLength -ge 1024) {
-        throw "Standard-user smoke launch command line exceeds the CreateProcessWithLogonW 1,024-character limit ($childCommandLineLength)."
-    }
-
-    $processBaseline = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, SessionId, CreationDate)
-    $child = Start-Process -FilePath $pwshPath `
-        -ArgumentList $childArguments `
-        -Credential $credential -LoadUserProfile -Environment $environment `
-        -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+$startedAtUtc = [DateTime]::UtcNow
+$arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $bootstrapPath)
+$child = $null
+$childExited = $true
+try {
+$launch = Start-ContextPickFilteredTokenProcess -FilePath $pwshPath -ArgumentList $arguments -WorkingDirectory $repoRoot -Environment $environment
+$child = $launch.Process
 $childExited = $false
-$childSessionId = [int]$child.SessionId
+if ($launch.Token.SessionId -ne $sessionId -or $launch.Token.UserSid -ne $runnerSid -or $launch.Token.IsElevated -or $launch.Token.IsAdministrator -or $launch.Token.IntegrityRid -ne 0x2000) {
+    throw 'Filtered-token launcher returned a process that does not meet the runner-session identity checks.'
+}
+$childCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($child.Id)" -Property ProcessId, SessionId
+$childOwner = Invoke-CimMethod -InputObject $childCim -MethodName GetOwnerSid -ErrorAction Stop
+if (-not $childCim -or [int]$childCim.SessionId -ne $sessionId -or $childOwner.ReturnValue -ne 0 -or $childOwner.Sid -ne $runnerSid) {
+    throw 'Filtered-token PowerShell child did not start as the runner SID in the runner session.'
+}
 
-    if (-not $child.WaitForExit(30 * 60 * 1000)) {
-        $childExited = $false
+$timeout = [TimeSpan]::FromMinutes(30)
+    if (-not $child.WaitForExit([int]$timeout.TotalMilliseconds)) {
         try {
             $child.Kill($true)
-            if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) {
-                throw 'The timed-out standard-user smoke process tree did not stop.'
+            if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 15)) {
+                throw 'Filtered-token smoke process tree did not stop after timeout.'
             }
-            Assert-NoTemporaryAccountProcesses -SessionId $childSessionId -ProcessBaseline $processBaseline
-            $childExited = $true
-        } catch {
-            throw "Standard-user smoke exceeded 30 minutes and its process tree could not be confirmed stopped: $_"
-        }
-        throw 'Standard-user smoke exceeded its 30-minute timeout.'
+        } catch { throw "Filtered-token installed-app smoke timed out and cleanup could not be confirmed: $_" }
+        $childExited = $true
+        throw 'Filtered-token installed-app smoke exceeded 30 minutes.'
     }
-
     $child.Refresh()
-    $childExited = $false
-    if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) {
-        throw 'The standard-user smoke process exited while a descendant process was still running.'
-    }
-    Assert-NoTemporaryAccountProcesses -SessionId $childSessionId -ProcessBaseline $processBaseline
+    if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 15)) { throw 'Filtered-token helper exited while its process descendants remained active.' }
     $childExited = $true
-    if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath }
-    if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Warning $_ } }
-    if ($child.ExitCode -ne 0) { throw "Standard-user installer lifecycle failed with exit code $($child.ExitCode)." }
+    if ($child.ExitCode -ne 0) { throw "Filtered-token installer smoke failed with exit code $($child.ExitCode)." }
+    $remainingAppProcesses = @(Save-LaunchDiagnostics -StartedAtUtc $startedAtUtc -UserSid $runnerSid -SessionId $sessionId -Path $diagnosticsPath)
+    if ($remainingAppProcesses.Count -gt 0) { throw "Installed app left same-session app processes running: $(($remainingAppProcesses | ForEach-Object { "$($_.name) PID $($_.processId)" }) -join ', ')." }
+    if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath | Write-Output }
+    Write-Output "Filtered-token installer smoke passed for runner SID $runnerSid in session $sessionId."
 } catch {
-    $smokeFailure = $_
-} finally {
-    if ($childExited) {
-        try { Remove-NsisTemporaryUninstaller -TemporaryDirectory $tempDir } catch { $script:cleanupErrors.Add("Could not remove the verified NSIS temporary uninstaller: $_") }
-        if ($script:userSid) {
-            try { Restore-RunnerOwnershipOfSmokeArtifacts } catch { $script:cleanupErrors.Add("Could not safely restore runner ownership of smoke artifacts: $_") }
-            Revoke-TemporaryAccess
-        }
-        if ($accountCreated) {
-            try {
-                if ($script:cleanupErrors.Count -gt 0) { throw 'Smoke access/ownership cleanup failed; preserving the temporary account and profile.' }
-                $userProfile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$script:userSid'" -ErrorAction SilentlyContinue
-                if ($userProfile) {
-                    $profilePath = [System.IO.Path]::GetFullPath([string]$userProfile.LocalPath)
-                    $usersRoot = [System.IO.Path]::GetFullPath((Join-Path $env:SystemDrive 'Users')).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-                    if ($userProfile.Loaded) { throw 'The temporary test profile remains loaded; preserving it for runner teardown.' }
-                    if (-not $profilePath.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $profilePath) -ne $userName -or $userProfile.Special) {
-                        throw "Refusing to remove unexpected test profile path: $profilePath"
-                    }
-                    Remove-CimInstance -InputObject $userProfile
-                    if (Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$script:userSid'" -ErrorAction SilentlyContinue) {
-                        throw 'The temporary test profile still exists after removal.'
-                    }
-                }
-                Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue
-                if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) {
-                    throw 'The temporary smoke account still exists after removal.'
-                }
-            } catch {
-                $script:cleanupErrors.Add("Could not fully remove the temporary smoke account/profile: $_")
-            }
-        }
-    } else {
-        $script:cleanupErrors.Add('Preserved the temporary account and permissions because a timed-out process tree could not be confirmed stopped; the hosted runner must be discarded.')
+    if ($null -ne $child -and -not $childExited) {
+        try {
+            $child.Refresh()
+            if (-not $child.HasExited) { $child.Kill($true) }
+            if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 15)) { throw 'Child process tree did not stop after validation failure.' }
+            $childExited = $true
+        } catch { Write-Warning "Could not confirm filtered-token child cleanup: $_" }
     }
-
-    if ($securePassword) { $securePassword.Dispose() }
-    $passwordString = $null
-    $credential = $null
+    try { Save-LaunchDiagnostics -StartedAtUtc $startedAtUtc -UserSid $runnerSid -SessionId $sessionId -Path $diagnosticsPath } catch { Write-Warning "Could not capture sanitized launch diagnostics: $_" }
+    if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath | Write-Output }
+    throw
+} finally {
+    if ($null -ne $child) { $child.Dispose() }
 }
-
-if ($script:cleanupErrors.Count -gt 0) {
-    $script:cleanupErrors | ForEach-Object { Write-Error $_ -ErrorAction Continue }
-    throw 'Standard-user smoke cleanup did not complete; see cleanup errors above.'
-}
-if ($smokeFailure) { throw $smokeFailure.Exception }
-Write-Output 'The clean-profile installer, installed-app Playwright smoke, uninstall, and temporary-account cleanup all passed.'

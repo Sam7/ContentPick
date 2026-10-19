@@ -147,11 +147,16 @@ if ($isLocalFallback -and [System.Runtime.InteropServices.RuntimeInformation]::O
 if ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'MSIX install, app execution, upgrade and uninstall must run under a verified standard-user token.'
 }
+. (Join-Path $PSScriptRoot 'run-filtered-token-process.ps1')
+$actualToken = [ContextPick.FilteredTokenLauncher]::InspectCurrent()
+if ($actualToken.ElevationType -ne 3 -or $actualToken.IsElevated -or $actualToken.IsAdministrator -or -not $actualToken.IsInteractive -or $actualToken.IntegrityRid -ne 0x2000) {
+    throw 'MSIX child is not running under the expected interactive UAC linked filtered token.'
+}
 
 $repositoryFullPath = [System.IO.Path]::GetFullPath($RepositoryRoot)
 $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $configDirectory = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)) 'dev.contextpick.desktop'
-$userReportPath = Join-Path $evidenceFullPath 'standard-user-lifecycle.json'
+$userReportPath = Join-Path $evidenceFullPath 'filtered-token-lifecycle.json'
 $logRoot = Join-Path $evidenceFullPath 'logs'
 $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($TestCertificatePath)
 $certThumbprint = $certificate.Thumbprint
@@ -159,10 +164,10 @@ $expectedAppDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPat
 $userReport = [ordered]@{
     status = 'in_progress'
     phase = 'starting'
-    token = [ordered]@{ name = [Security.Principal.WindowsIdentity]::GetCurrent().Name; sid = $userSid; isElevated = $false; sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId }
+    token = [ordered]@{ name = [Security.Principal.WindowsIdentity]::GetCurrent().Name; sid = $actualToken.UserSid; isElevated = $actualToken.IsElevated; isAdministrator = $actualToken.IsAdministrator; isInteractive = $actualToken.IsInteractive; elevationType = $actualToken.ElevationType; mode = 'UAC linked filtered token'; sessionId = $actualToken.SessionId; integrityRid = $actualToken.IntegrityRid }
     package = [ordered]@{ identity = $IdentityName; publisher = $Publisher; candidateSha256 = (Get-FileHash -LiteralPath $CandidatePackagePath -Algorithm SHA256).Hash.ToLowerInvariant(); candidateVersion = $ExpectedPackageVersion; installedPackageFullName = $null; installedExeSha256 = $null; upgradeSha256 = (Get-FileHash -LiteralPath $UpgradePackagePath -Algorithm SHA256).Hash.ToLowerInvariant() }
     webView2 = [ordered]@{ beforeInstall = @(); afterInstall = @() }
-    install = [ordered]@{ result = 'pending'; scope = 'current standard-user profile'; architecture = $null }
+    install = [ordered]@{ result = 'pending'; scope = 'fresh hosted runner profile'; architecture = $null }
     playwright = [ordered]@{ result = 'pending'; command = 'pnpm exec playwright test --config playwright.native.config.ts tests/native/workspace.spec.ts'; exitCode = $null }
     upgrade = [ordered]@{ result = 'pending'; expectedVersion = $ExpectedUpgradeVersion; actualVersion = $null }
     uninstall = [ordered]@{ result = 'pending'; packageRegistrationAbsent = $false; appConfigAbsent = $false; certificateAbsentFromStandardUserMyStore = $false }
@@ -179,7 +184,7 @@ try {
         throw "Repository root is not accessible to the standard user: $repositoryFullPath."
     }
     if (-not $expectedAppDataRoot.StartsWith([System.IO.Path]::GetFullPath($env:USERPROFILE), [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "APPDATA is outside the disposable standard-user profile: $expectedAppDataRoot."
+        throw "APPDATA is outside the hosted runner profile: $expectedAppDataRoot."
     }
     if (Test-Path -LiteralPath $configDirectory) { throw "Clean standard-user profile already contains ContextPick settings: $configDirectory." }
     if (@(Get-AppxPackage -Name $IdentityName -ErrorAction SilentlyContinue).Count -ne 0) { throw "A prior $IdentityName package is registered for the standard user." }
@@ -218,7 +223,7 @@ try {
     if (-not $applicationNode -or [string]::IsNullOrWhiteSpace([string]$applicationNode.GetAttribute('Id'))) { throw 'Installed package manifest does not declare an application ID for activation.' }
     $env:CONTEXTPICK_NATIVE_AUMID = "$($installed[0].PackageFamilyName)!$($applicationNode.GetAttribute('Id'))"
     $env:CONTEXTPICK_NATIVE_DEBUG_PORT = '9222'
-    $userReport.install = [ordered]@{ result = 'passed'; scope = 'current standard-user profile'; architecture = [string]$installed[0].Architecture; version = $installed[0].Version.ToString(); packageFullName = $installed[0].PackageFullName; installLocation = $installed[0].InstallLocation }
+    $userReport.install = [ordered]@{ result = 'passed'; scope = 'fresh hosted runner profile under linked filtered token'; architecture = [string]$installed[0].Architecture; version = $installed[0].Version.ToString(); packageFullName = $installed[0].PackageFullName; installLocation = $installed[0].InstallLocation }
     $userReport.package.installedPackageFullName = $installed[0].PackageFullName
     $userReport.package.installedExeSha256 = (Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
     $userReport.webView2.afterInstall = @(Get-WebView2RuntimeInventory)
@@ -293,5 +298,5 @@ try {
 }
 
 if ($failure) { Write-Error -ErrorRecord $failure }
-if ($userReport.status -ne 'passed') { throw 'Standard-user MSIX lifecycle did not pass; see standard-user-lifecycle.json.' }
-Write-Output "MSIX install, Playwright behavior, upgrade, and uninstall passed as $($userReport.token.name) (non-elevated); no signer was imported into standard-user stores, and the elevated parent performs machine trust cleanup."
+if ($userReport.status -ne 'passed') { throw 'Filtered-token MSIX lifecycle did not pass; see filtered-token-lifecycle.json.' }
+Write-Output "MSIX install, Playwright behavior, upgrade, and uninstall passed as $($userReport.token.name) in session $($userReport.token.sessionId) using the UAC linked filtered token; the runner profile remains intact."

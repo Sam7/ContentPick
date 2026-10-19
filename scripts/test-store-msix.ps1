@@ -140,43 +140,6 @@ function Write-LifecyclePhase {
     Write-Output "[$([DateTime]::UtcNow.ToString('o'))] $Message"
 }
 
-function Get-ManifestDependencyNames {
-    param([Parameter(Mandatory = $true)] $ManifestData)
-    $dependenciesProperty = $ManifestData.PSObject.Properties['dependencies']
-    if ($null -eq $dependenciesProperty -or $null -eq $dependenciesProperty.Value) { return }
-    return @($dependenciesProperty.Value.PSObject.Properties | ForEach-Object { $_.Name })
-}
-
-function Grant-TemporaryAccess {
-    param(
-        [Parameter(Mandatory = $true)] [string]$Path,
-        [Parameter(Mandatory = $true)] [string]$Rights,
-        [switch]$Recursive
-    )
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    $inheritance = if ($Recursive -and (Test-Path -LiteralPath $Path -PathType Container)) { '(OI)(CI)' } else { '' }
-    $scope = if ($Recursive) { 'recursively' } else { 'at this path' }
-    Write-LifecyclePhase "Granting temporary $Rights access $scope`: $Path"
-    $script:aclPaths.Add([pscustomobject]@{ Path = $Path; Recursive = [bool]$Recursive })
-    if ($Recursive) {
-        & icacls.exe $Path /grant "*$script:userSid`:$inheritance($Rights)" /T /L /Q | Out-Null
-    } else {
-        & icacls.exe $Path /grant "*$script:userSid`:$inheritance($Rights)" /Q | Out-Null
-    }
-    if ($LASTEXITCODE -ne 0) { throw "Could not grant temporary $Rights access to $Path (icacls exit $LASTEXITCODE)." }
-    $timer.Stop()
-    Write-LifecyclePhase "Granted temporary $Rights access in $([Math]::Round($timer.Elapsed.TotalSeconds, 1))s: $Path"
-}
-
-function Revoke-TemporaryAccess {
-    foreach ($entry in $script:aclPaths) {
-        $arguments = @($entry.Path, '/remove:g', "*$script:userSid", '/Q')
-        if ($entry.Recursive) { $arguments += @('/T', '/L') }
-        & icacls.exe @arguments | Out-Null
-        if ($LASTEXITCODE -ne 0) { $script:cleanupErrors.Add("Could not remove temporary standard-user access from $($entry.Path) (icacls exit $LASTEXITCODE).") }
-    }
-}
-
 function Get-ProcessTreeIds {
     param([Parameter(Mandatory = $true)] [int]$RootProcessId)
     $processes = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId)
@@ -206,37 +169,21 @@ function Wait-ForProcessIdsExit {
 
 function Wait-ForProcessTreeExit {
     param([Parameter(Mandatory = $true)] [int]$RootProcessId, [Parameter(Mandatory = $true)] [int]$TimeoutSeconds)
-    return Wait-ForProcessIdsExit -ProcessIds (Get-ProcessTreeIds -RootProcessId $RootProcessId) -TimeoutSeconds $TimeoutSeconds
-}
-
-function Assert-NoTemporaryUserProcesses {
-    if ($null -eq $script:temporaryUserProcessBaseline) { throw 'Temporary-user process baseline is unavailable; preserving its profile, account, and repository ACLs.' }
-    $remaining = [System.Collections.Generic.List[string]]::new()
-    foreach ($process in Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, CreationDate, SessionId) {
-        if ($null -ne $script:temporaryUserSessionId -and [int]$process.SessionId -ne [int]$script:temporaryUserSessionId) { continue }
-        $creationTicks = [long]$process.CreationDate.ToUniversalTime().Ticks
-        if ($script:temporaryUserProcessBaseline.ContainsKey([int]$process.ProcessId) -and $script:temporaryUserProcessBaseline[[int]$process.ProcessId] -eq $creationTicks) { continue }
-        $processSessionId = [int]$process.SessionId
-        try {
-            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
-        } catch {
-            $owner = $null
-        }
-        if ($null -eq $owner -or [int]$owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace([string]$owner.Sid)) {
-            try {
-                $current = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($process.ProcessId)" -Property CreationDate, SessionId -ErrorAction Stop
-            } catch {
-                throw "Could not recheck process $($process.ProcessId) after its owner SID lookup failed: $_"
+    $known = [System.Collections.Generic.HashSet[int]]::new()
+    $null = $known.Add($RootProcessId)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId)
+        do {
+            $changed = $false
+            foreach ($item in $processes) {
+                if ($known.Contains([int]$item.ParentProcessId) -and $known.Add([int]$item.ProcessId)) { $changed = $true }
             }
-            if (-not $current -or [Math]::Abs([long]$current.CreationDate.ToUniversalTime().Ticks - $creationTicks) -gt 10000 -or [int]$current.SessionId -ne $processSessionId) { continue }
-            $returnValue = if ($null -eq $owner) { 'unavailable' } else { $owner.ReturnValue }
-            throw "Could not establish the owner SID for live new process $($process.ProcessId) before temporary-account cleanup (GetOwnerSid returned $returnValue); preserving its profile, account, and repository ACLs."
-        }
-        if ($owner.Sid -eq $script:userSid) { $remaining.Add("$($process.Name) (PID $($process.ProcessId))") }
-    }
-    if ($remaining.Count -gt 0) {
-        throw "Temporary standard-user processes remain; preserving its profile, account, and repository ACLs: $($remaining -join ', ')."
-    }
+        } while ($changed)
+        if (-not ($processes | Where-Object { $known.Contains([int]$_.ProcessId) })) { return $true }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -245,7 +192,7 @@ $isLocalFallback = [bool]$AllowLocalWin11X64
 $isElevated = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($isLocalFallback) {
     if ($env:GITHUB_ACTIONS -eq 'true') { throw 'The local fallback switch is not valid inside GitHub Actions.' }
-    if (-not $isElevated) { throw 'The local fallback must be started as Administrator to provision its disposable standard-user account.' }
+    if (-not $isElevated) { throw 'The local fallback requires an elevated runner so it can provision machine-scoped test signing trust.' }
     if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) { throw 'The local fallback requires Windows.' }
     $runnerTemp = Join-Path ([System.IO.Path]::GetTempPath()) ('ContextPick-Msix-' + [Guid]::NewGuid().ToString('N'))
     $executionEnvironment = 'local-admin-fallback'
@@ -265,8 +212,9 @@ if (-not $isLocalFallback) {
     if ($env:GITHUB_ACTIONS -ne 'true' -or $executionEnvironment -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
         throw 'Store-identity MSIX signing and installation require an ephemeral GitHub-hosted Windows runner unless the explicit local fallback switch is used.'
     }
-    if (-not $isElevated) { throw 'The hosted runner must be elevated only to provision the disposable standard-user test account.' }
+    if (-not $isElevated) { throw 'The hosted runner must have an elevated token to provision temporary machine-scoped test signing trust.' }
 }
+. (Join-Path $PSScriptRoot 'run-filtered-token-process.ps1')
 if (Test-Path -LiteralPath $resultRoot) { throw "Refusing to reuse an existing lifecycle evidence directory: $resultRoot." }
 $null = New-Item -ItemType Directory -Path $resultRoot
 $reportPath = Join-Path $resultRoot 'lifecycle-evidence.json'
@@ -304,31 +252,26 @@ $pfxPassword = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGene
 $certificateCreated = $false
 $machineTrustInstalled = $false
 $childExited = $true
-$accountCreated = $false
-$script:userSid = $null
-$script:aclPaths = [System.Collections.Generic.List[object]]::new()
 $script:cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $pwshPath = (Get-Process -Id $PID).Path
-$bootstrapPath = Join-Path $resultRoot 'standard-user-bootstrap.ps1'
-$stdoutPath = Join-Path $logRoot 'standard-user.stdout.log'
-$stderrPath = Join-Path $logRoot 'standard-user.stderr.log'
-$userName = 'cpMsix' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
-$standardUserReportPath = Join-Path $resultRoot 'standard-user-lifecycle.json'
-$userProfile = $null
-$securePassword = $null
+$bootstrapPath = Join-Path $resultRoot 'filtered-token-bootstrap.ps1'
+$stdoutPath = Join-Path $logRoot 'filtered-token.stdout.log'
+$stderrPath = Join-Path $logRoot 'filtered-token.stderr.log'
+$filteredTokenReportPath = Join-Path $resultRoot 'filtered-token-lifecycle.json'
 $child = $null
-$script:temporaryUserProcessBaseline = @{}
-$script:temporaryUserSessionId = $null
+$runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+$userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $certThumbprint = $null
 $previousMsixAppBinary = $env:CONTEXTPICK_MSIX_APP_BINARY
 $report = [ordered]@{
     status = 'in_progress'
-    runner = [ordered]@{ environment = $executionEnvironment; image = $env:ImageOS; imageVersion = $env:ImageVersion; architecture = $hostArchitecture; windowsVersion = $hostVersion; minimumBuild = $minimumBuild; buildTokenElevated = $isElevated; testTokenElevated = $null }
+    runner = [ordered]@{ environment = $executionEnvironment; image = $env:ImageOS; imageVersion = $env:ImageVersion; architecture = $hostArchitecture; windowsVersion = $hostVersion; minimumBuild = $minimumBuild; buildTokenElevated = $isElevated; testTokenElevated = $null; testTokenMode = $null; testTokenSid = $null; testTokenSessionId = $null; testTokenIntegrityRid = $null }
     package = [ordered]@{ identity = $identityName; publisher = $publisher; architecture = 'x64'; appVersion = $appVersionText; version = $packageVersion; sha256TestCandidate = $null; sha256Unsigned = $null; sha256TestSigned = $null; sha256UpgradeUnsigned = $null; sha256UpgradeTestSigned = $null }
     wack = [ordered]@{ result = 'pending'; reportPath = $null; detail = $null }
-    standardUser = $null
-    cleanup = [ordered]@{ temporaryUserRemoved = $false; temporaryProfileRemoved = $false; repositoryAclRestored = $false; signingCertificateRemoved = $false; privateSigningKeyRemoved = $false }
+    filteredTokenLifecycle = $null
+    cleanup = [ordered]@{ runnerProfilePreserved = $true; signingCertificateRemoved = $false; privateSigningKeyRemoved = $false }
     generatedAtUtc = [DateTime]::UtcNow.ToString('o')
     failure = $null
 }
@@ -342,6 +285,19 @@ try {
     if ($osBuild -lt $minimumBuild) { throw "Windows build $osBuild is below the Store package minimum $minimumBuild." }
     if ($existingPackages.Count -ne 0 -or $existingPackagesAllUsers.Count -ne 0) { throw "A prior $identityName package exists on this runner; refusing to replace it." }
     if (Test-Path -LiteralPath $msixBuildRoot) { throw "Isolated MSIX build directory already exists; refusing to reuse it: $msixBuildRoot." }
+
+    $linkedToken = [ContextPick.FilteredTokenLauncher]::InspectLinkedToken()
+    $report.runner.testTokenElevated = $linkedToken.IsElevated
+    $report.runner.testTokenMode = 'UAC linked filtered token'
+    $report.runner.testTokenSid = $linkedToken.UserSid
+    $report.runner.testTokenSessionId = $linkedToken.SessionId
+    $report.runner.testTokenIntegrityRid = $linkedToken.IntegrityRid
+    if ($linkedToken.UserSid -ne $runnerSid -or $linkedToken.SessionId -ne $currentSessionId -or $linkedToken.IsElevated -or $linkedToken.IsAdministrator -or -not $linkedToken.IsInteractive -or $linkedToken.IntegrityRid -ne 0x2000 -or $linkedToken.ElevationType -ne 3) {
+        throw 'Runner linked-token preflight failed its SID, session, elevation, integrity, or interactive-token checks.'
+    }
+    $report.runner.testTokenPreflight = [ordered]@{ result = 'passed'; elevationType = $linkedToken.ElevationType; interactive = $linkedToken.IsInteractive; administrator = $linkedToken.IsAdministrator }
+    Write-ValidationReport
+    Write-LifecyclePhase "Linked filtered-token preflight passed for runner SID $runnerSid in session $currentSessionId."
 
     Write-Output "Windows MSIX lifecycle: $hostVersion ($hostArchitecture), environment $executionEnvironment, image $($env:ImageOS) $($env:ImageVersion)."
     Push-Location $repoRoot
@@ -461,203 +417,56 @@ try {
     Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'AddMachineTrustedPeople', '-CertificatePath', $cerPath, '-Thumbprint', $certThumbprint, '-ExpectedSubject', $publisher) -LogPath (Join-Path $logRoot 'install-machine-trusted-people.log') -TimeoutSeconds 120
     $machineTrustInstalled = $true
 
-    Write-LifecyclePhase 'Creating disposable standard-user account and profile.'
-    $userSid = $null
-    $userPasswordBytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
-    $passwordString = 'Cp1!' + [Convert]::ToBase64String($userPasswordBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-    [Array]::Clear($userPasswordBytes, 0, $userPasswordBytes.Length)
-    $securePassword = ConvertTo-SecureString -String $passwordString -AsPlainText -Force
-    $null = New-LocalUser -Name $userName -Password $securePassword -Description 'ContextPick Store MSIX test account'
-    $accountCreated = $true
-    $userSid = (Get-LocalUser -Name $userName).SID.Value
-    $script:userSid = $userSid
-    $userProfile = Join-Path ([Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').ProfilesDirectory)) $userName
-    $accountName = "$env:COMPUTERNAME\$userName"
-    $credential = [PSCredential]::new($accountName, $securePassword)
-
+    Write-LifecyclePhase 'Preflighting the runner linked filtered token and clean profile.'
+    . (Join-Path $PSScriptRoot 'run-filtered-token-process.ps1')
+    $runnerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $userSid = $runnerIdentity.User.Value
+    $currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
     $nodeCommand = Get-Command node.exe -ErrorAction Stop | Select-Object -First 1
     $nodeHome = Split-Path -Parent $nodeCommand.Source
     $pnpmHome = if (-not [string]::IsNullOrWhiteSpace($env:PNPM_HOME)) { $env:PNPM_HOME } else { Split-Path -Parent ((Get-Command pnpm -ErrorAction Stop | Select-Object -First 1).Source) }
-    $null = New-Item -ItemType Directory -Path (Join-Path $resultRoot 'corepack') -Force
-    $null = New-Item -ItemType Directory -Path (Join-Path $resultRoot 'standard-user-temp') -Force
+    $corepackHome = Join-Path $resultRoot 'corepack'
+    $testTemp = Join-Path $resultRoot 'filtered-token-temp'
     $playwrightResults = Join-Path $resultRoot 'playwright-results'
     $screenshots = Join-Path $resultRoot 'screenshots'
     $viteCache = Join-Path $resultRoot 'vite-cache'
-    foreach ($directory in @($playwrightResults, $screenshots, $viteCache)) {
+    foreach ($directory in @($corepackHome, $testTemp, $playwrightResults, $screenshots, $viteCache)) {
         $null = New-Item -ItemType Directory -Path $directory -Force
     }
-    $null = New-Item -ItemType File -Path $standardUserReportPath -Force
-    Write-LifecyclePhase 'Granting the disposable standard user access to required test inputs and tools.'
-    Grant-TemporaryAccess -Path $repoRoot -Rights 'RX'
-    foreach ($relativeDirectory in @('node_modules', 'src', 'tests\native', 'scripts')) {
-        Grant-TemporaryAccess -Path (Join-Path $repoRoot $relativeDirectory) -Rights 'RX' -Recursive
+    $null = New-Item -ItemType File -Path $filteredTokenReportPath -Force
+    $previousCorepackHome = $env:COREPACK_HOME
+    try {
+        $env:COREPACK_HOME = $corepackHome
+        $corepackCommand = Get-Command corepack.cmd -ErrorAction Stop | Select-Object -First 1
+        & $corepackCommand.Source pnpm --version
+        if ($LASTEXITCODE -ne 0) { throw "Could not prewarm the pinned pnpm package manager (Corepack exit $LASTEXITCODE)." }
+    } finally {
+        if ($null -eq $previousCorepackHome) { Remove-Item Env:COREPACK_HOME -ErrorAction SilentlyContinue }
+        else { $env:COREPACK_HOME = $previousCorepackHome }
     }
-    $playwrightPackageLink = Get-Item -LiteralPath (Join-Path $repoRoot 'node_modules\@playwright\test') -Force
-    if (($playwrightPackageLink.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        $nodeModulesRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'node_modules'))
-        $nodeModulesPrefix = $nodeModulesRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-        $repositoryPrefix = $repoRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-        $playwrightPackageTarget = [string]$playwrightPackageLink.Target
-        if (-not [IO.Path]::IsPathRooted($playwrightPackageTarget)) {
-            $playwrightPackageTarget = Join-Path (Split-Path -Parent $playwrightPackageLink.FullName) $playwrightPackageTarget
-        }
-        $playwrightPackageTarget = [IO.Path]::GetFullPath($playwrightPackageTarget)
-        if (-not $playwrightPackageTarget.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to grant access through an unexpected Playwright package link target: $playwrightPackageTarget."
-        }
-        $playwrightTargetAncestor = $playwrightPackageTarget
-        while ($playwrightTargetAncestor.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            $targetAncestorItem = Get-Item -LiteralPath $playwrightTargetAncestor -Force
-            if (($targetAncestorItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "Refusing to grant access through a nested reparse point in the Playwright target: $playwrightTargetAncestor."
-            }
-            $playwrightTargetAncestor = Split-Path -Parent $playwrightTargetAncestor
-        }
-        # pnpm places package dependencies as sibling junctions under its virtual
-        # store's node_modules, so resolve dependencies declared by each manifest.
-        $playwrightPackageDirectories = [System.Collections.Generic.List[string]]::new()
-        $playwrightPackageFiles = [System.Collections.Generic.List[string]]::new()
-        $playwrightVisitedPackages = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        $playwrightVisitedDirectories = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        $playwrightVisitedFiles = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        $playwrightPackageQueue = [System.Collections.Generic.Queue[string]]::new()
-        $playwrightPackageQueue.Enqueue($playwrightPackageTarget)
-        while ($playwrightPackageQueue.Count -gt 0) {
-            $playwrightPackageRoot = $playwrightPackageQueue.Dequeue()
-            if (-not $playwrightVisitedPackages.Add($playwrightPackageRoot)) { continue }
-            $playwrightPackageManifest = Join-Path $playwrightPackageRoot 'package.json'
-            if (-not (Test-Path -LiteralPath $playwrightPackageManifest -PathType Leaf)) {
-                throw "A Playwright dependency has no package manifest: $playwrightPackageManifest."
-            }
-            try { $playwrightPackageManifestData = Get-Content -LiteralPath $playwrightPackageManifest -Raw | ConvertFrom-Json }
-            catch { throw "Could not read Playwright package manifest $playwrightPackageManifest`: $_" }
 
-            # The pinned runtime chain declares its required modules in dependencies;
-            # optional and peer modules are not required by this installed-app test.
-            foreach ($dependencyName in (Get-ManifestDependencyNames $playwrightPackageManifestData)) {
-                $dependencyFound = $false
-                $playwrightDependencySearchPath = $playwrightPackageRoot
-                while ([string]::Equals($playwrightDependencySearchPath, $repoRoot, [StringComparison]::OrdinalIgnoreCase) -or $playwrightDependencySearchPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                    $dependencyCandidate = [IO.Path]::GetFullPath((Join-Path $playwrightDependencySearchPath (Join-Path 'node_modules' $dependencyName)))
-                    if (-not $dependencyCandidate.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                        throw "Refusing to probe a Playwright dependency outside node_modules: $dependencyCandidate."
-                    }
-                    $dependencyItem = Get-Item -LiteralPath $dependencyCandidate -Force -ErrorAction SilentlyContinue
-                    if ($null -ne $dependencyItem) {
-                        if (-not $dependencyItem.PSIsContainer) {
-                            throw "Resolved Playwright dependency is not a directory: $dependencyCandidate."
-                        }
-                        if (($dependencyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                            $dependencyLinkTarget = $dependencyItem.ResolveLinkTarget($true)
-                            if ($null -eq $dependencyLinkTarget) {
-                                throw "Could not resolve Playwright dependency link $dependencyCandidate."
-                            }
-                            $playwrightDependencyPath = [IO.Path]::GetFullPath($dependencyLinkTarget.FullName)
-                        } else {
-                            $playwrightDependencyPath = [IO.Path]::GetFullPath($dependencyItem.FullName)
-                        }
-                        if (-not $playwrightDependencyPath.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                            throw "Refusing to grant access through a Playwright dependency outside node_modules: $playwrightDependencyPath."
-                        }
-                        $dependencyAncestor = $playwrightDependencyPath
-                        while ($dependencyAncestor.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                            $dependencyAncestorItem = Get-Item -LiteralPath $dependencyAncestor -Force
-                            if (($dependencyAncestorItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                                throw "Refusing to grant access through an unresolved Playwright dependency link: $dependencyAncestor."
-                            }
-                            $dependencyAncestor = Split-Path -Parent $dependencyAncestor
-                        }
-                        Write-LifecyclePhase "Resolved Playwright dependency '$dependencyName' to $playwrightDependencyPath."
-                        $playwrightPackageQueue.Enqueue($playwrightDependencyPath)
-                        $dependencyFound = $true
-                        break
-                    }
-                    $playwrightDependencySearchPath = Split-Path -Parent $playwrightDependencySearchPath
-                }
-                if (-not $dependencyFound) {
-                    throw "Could not resolve declared Playwright dependency '$dependencyName' beneath node_modules."
-                }
-            }
-
-            $playwrightDirectoryQueue = [System.Collections.Generic.Queue[string]]::new()
-            $playwrightDirectoryQueue.Enqueue($playwrightPackageRoot)
-            while ($playwrightDirectoryQueue.Count -gt 0) {
-                $playwrightDirectory = $playwrightDirectoryQueue.Dequeue()
-                if (-not $playwrightVisitedDirectories.Add($playwrightDirectory)) { continue }
-                $playwrightPackageDirectories.Add($playwrightDirectory)
-                foreach ($playwrightItem in Get-ChildItem -LiteralPath $playwrightDirectory -Force) {
-                    if ($playwrightItem.Name -eq 'node_modules') { continue }
-                    $playwrightItemPath = [IO.Path]::GetFullPath($playwrightItem.FullName)
-                    if (($playwrightItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                        throw "Refusing to grant access through an unexpected link in the Playwright package: $playwrightItemPath."
-                    }
-                    if (-not $playwrightItemPath.StartsWith($nodeModulesPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                        throw "Refusing to grant access outside node_modules: $playwrightItemPath."
-                    }
-                    if ($playwrightItem.PSIsContainer) {
-                        if (-not $playwrightVisitedDirectories.Contains($playwrightItemPath)) {
-                            $playwrightDirectoryQueue.Enqueue($playwrightItemPath)
-                        }
-                    } elseif ($playwrightVisitedFiles.Add($playwrightItemPath)) {
-                        $playwrightPackageFiles.Add($playwrightItemPath)
-                    }
-                }
-            }
-        }
-        Write-LifecyclePhase "Granting access to $($playwrightVisitedPackages.Count) Playwright packages, $($playwrightPackageDirectories.Count) directories and $($playwrightPackageFiles.Count) files."
-        foreach ($playwrightPackageDirectory in $playwrightPackageDirectories) {
-            Grant-TemporaryAccess -Path $playwrightPackageDirectory -Rights 'RX'
-        }
-        foreach ($playwrightPackageFile in $playwrightPackageFiles) {
-            Grant-TemporaryAccess -Path $playwrightPackageFile -Rights 'RX'
-        }
-    }
-    foreach ($relativeFile in @('index.html', 'package.json', 'pnpm-lock.yaml', 'playwright.native.config.ts', 'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json')) {
-        Grant-TemporaryAccess -Path (Join-Path $repoRoot $relativeFile) -Rights 'RX'
-    }
-    Grant-TemporaryAccess -Path $resultRoot -Rights 'RX' -Recursive
-    foreach ($directory in @($logRoot, $playwrightResults, $screenshots, $viteCache, (Join-Path $resultRoot 'standard-user-temp'), (Join-Path $resultRoot 'corepack'))) {
-        Grant-TemporaryAccess -Path $directory -Rights 'M' -Recursive
-    }
-    Grant-TemporaryAccess -Path $standardUserReportPath -Rights 'M'
-    Grant-TemporaryAccess -Path $nodeHome -Rights 'RX'
-    if (-not [string]::IsNullOrWhiteSpace($pnpmHome) -and (Test-Path -LiteralPath $pnpmHome)) { Grant-TemporaryAccess -Path $pnpmHome -Rights 'RX' }
-
-    $helperPath = Join-Path $PSScriptRoot 'test-store-msix-standard-user.ps1'
-    $bootstrapLines = @(
-        '& ' + (ConvertTo-PowerShellLiteral $helperPath) + ' -CandidatePackagePath ' + (ConvertTo-PowerShellLiteral $candidateSigned) + ' -UpgradePackagePath ' + (ConvertTo-PowerShellLiteral $upgradeSigned) + ' -TestCertificatePath ' + (ConvertTo-PowerShellLiteral $cerPath) + ' -ExpectedPackageVersion ' + (ConvertTo-PowerShellLiteral $packageVersion) + ' -ExpectedUpgradeVersion ' + (ConvertTo-PowerShellLiteral $upgradeVersion) + ' -IdentityName ' + (ConvertTo-PowerShellLiteral $identityName) + ' -Publisher ' + (ConvertTo-PowerShellLiteral $publisher) + ' -EvidenceRoot ' + (ConvertTo-PowerShellLiteral $resultRoot) + ' -RepositoryRoot ' + (ConvertTo-PowerShellLiteral $repoRoot)
-        'exit $LASTEXITCODE'
-    )
-    [System.IO.File]::WriteAllText($bootstrapPath, [string]::Join([Environment]::NewLine, $bootstrapLines), [Text.UTF8Encoding]::new($false))
-    $childArguments = '-NoLogo -NoProfile -File "' + $bootstrapPath.Replace('"', '\"') + '"'
-    $childCommandLineLength = ('"' + $pwshPath + '" ' + $childArguments).Length
-    if ($childCommandLineLength -ge 1024) { throw "Standard-user bootstrap command exceeds CreateProcessWithLogonW's 1,024-character limit ($childCommandLineLength)." }
-
-    $environment = @{}
-    foreach ($variable in Get-ChildItem Env:) { $environment[$variable.Name] = $null }
     $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
     if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = $env:SystemRoot }
-    if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'Could not determine the Windows system directory for the standard-user smoke environment.' }
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'Could not determine the Windows system directory for the filtered-token smoke environment.' }
     $windowsPowerShellPath = Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0'
-    if (-not (Test-Path -LiteralPath (Join-Path $windowsPowerShellPath 'powershell.exe') -PathType Leaf)) {
-        throw "Windows PowerShell executable was not found: $(Join-Path $windowsPowerShellPath 'powershell.exe')."
-    }
     $systemDriveRoot = [System.IO.Path]::GetPathRoot($systemRoot)
     $systemDrive = $systemDriveRoot.TrimEnd('\')
+    $environment = @{}
+    foreach ($variable in Get-ChildItem Env:) { $environment[$variable.Name] = $null }
     $environmentOverrides = @{
         ALLUSERSPROFILE = Join-Path $systemDriveRoot 'ProgramData'
-        APPDATA = Join-Path $userProfile 'AppData\Roaming'
+        APPDATA = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
         CI = 'true'
         COMPUTERNAME = $env:COMPUTERNAME
         COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
-        COREPACK_HOME = Join-Path $resultRoot 'corepack'
+        COREPACK_HOME = $corepackHome
+        GITHUB_ACTIONS = if ($isLocalFallback) { 'false' } else { 'true' }
         GITHUB_WORKSPACE = $repoRoot
         HOMEDRIVE = $systemDrive
         HOMEPATH = $userProfile.Substring($systemDrive.Length)
-        LOCALAPPDATA = Join-Path $userProfile 'AppData\Local'
+        LOCALAPPDATA = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
         PATH = "$nodeHome;$pnpmHome;$PSHOME;$windowsPowerShellPath;$systemRoot\System32;$systemRoot"
         PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
-        PNPM_HOME = $pnpmHome
         PROCESSOR_ARCHITECTURE = if ($hostArchitecture -eq 'Arm64') { 'ARM64' } else { 'AMD64' }
         ProgramData = Join-Path $systemDriveRoot 'ProgramData'
         ProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
@@ -668,44 +477,87 @@ try {
         RUNNER_OS = 'Windows'
         RUNNER_TEMP = $runnerTemp
         CONTEXTPICK_LOCAL_MSIX_FALLBACK = if ($isLocalFallback) { '1' } else { '0' }
-        GITHUB_ACTIONS = if ($isLocalFallback) { 'false' } else { 'true' }
         SystemDrive = $systemDrive
         SystemRoot = $systemRoot
-        TEMP = Join-Path $resultRoot 'standard-user-temp'
-        TMP = Join-Path $resultRoot 'standard-user-temp'
-        USERDOMAIN = $env:COMPUTERNAME
-        USERNAME = $userName
+        TEMP = $testTemp
+        TMP = $testTemp
+        USERDOMAIN = $env:USERDOMAIN
+        USERNAME = $env:USERNAME
         USERPROFILE = $userProfile
         WINDIR = $systemRoot
     }
     foreach ($entry in $environmentOverrides.GetEnumerator()) { $environment[$entry.Key] = $entry.Value }
 
-    Write-LifecyclePhase 'Starting installed-app lifecycle under the disposable standard user.'
-    $script:temporaryUserProcessBaseline = @{}
-    foreach ($existingProcess in Get-CimInstance -ClassName Win32_Process -Property ProcessId, CreationDate) {
-        $script:temporaryUserProcessBaseline[[int]$existingProcess.ProcessId] = [long]$existingProcess.CreationDate.ToUniversalTime().Ticks
+    $helperPath = Join-Path $PSScriptRoot 'test-store-msix-standard-user.ps1'
+    $bootstrapLines = [System.Collections.Generic.List[string]]::new()
+    $bootstrapLines.Add('$ErrorActionPreference = ''Stop''')
+    foreach ($entry in $environment.GetEnumerator()) {
+        if ($null -ne $entry.Value) {
+            $bootstrapLines.Add('[Environment]::SetEnvironmentVariable(' + (ConvertTo-PowerShellLiteral ([string]$entry.Key)) + ', ' + (ConvertTo-PowerShellLiteral ([string]$entry.Value)) + ", 'Process')")
+        }
     }
-    $child = Start-Process -FilePath $pwshPath -ArgumentList $childArguments -Credential $credential -LoadUserProfile -Environment $environment -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $helperArguments = @(
+        '-CandidatePackagePath', $candidateSigned,
+        '-UpgradePackagePath', $upgradeSigned,
+        '-TestCertificatePath', $cerPath,
+        '-ExpectedPackageVersion', $packageVersion,
+        '-ExpectedUpgradeVersion', $upgradeVersion,
+        '-IdentityName', $identityName,
+        '-Publisher', $publisher,
+        '-EvidenceRoot', $resultRoot,
+        '-RepositoryRoot', $repoRoot
+    )
+    $helperCommand = '& ' + (ConvertTo-PowerShellLiteral $helperPath) + ' ' + (($helperArguments | ForEach-Object { ConvertTo-PowerShellLiteral ([string]$_) }) -join ' ')
+    $bootstrapLines.Add('try { ' + $helperCommand + ' *> ' + (ConvertTo-PowerShellLiteral $stdoutPath) + '; exit 0 }')
+    $bootstrapLines.Add('catch { $_ | Out-File -LiteralPath ' + (ConvertTo-PowerShellLiteral $stdoutPath) + ' -Append -Encoding utf8; exit 1 }')
+    [System.IO.File]::WriteAllText($bootstrapPath, [string]::Join([Environment]::NewLine, $bootstrapLines), [Text.UTF8Encoding]::new($false))
+    $parseTokens = $null
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrapLines -join [Environment]::NewLine, [ref]$parseTokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) { throw "Could not parse filtered-token MSIX bootstrap: $($parseErrors[0].Message)" }
+
+    Write-LifecyclePhase "Starting MSIX install, activation, upgrade, and uninstall under filtered runner token $runnerSid in session $currentSessionId."
+    $childArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $bootstrapPath)
+    $launch = Start-ContextPickFilteredTokenProcess -FilePath $pwshPath -ArgumentList $childArguments -WorkingDirectory $repoRoot -Environment $environment
+    $child = $launch.Process
+    $childExited = $false
+    if ($launch.Token.UserSid -ne $runnerSid -or $launch.Token.SessionId -ne $currentSessionId -or $launch.Token.IsElevated -or $launch.Token.IsAdministrator -or $launch.Token.IntegrityRid -ne 0x2000) {
+        throw 'Filtered-token launcher returned a process that does not meet the runner-session identity checks.'
+    }
     $childProcess = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($child.Id)" -Property SessionId
-    if (-not $childProcess) { throw 'Could not identify the disposable user process session before running the MSIX lifecycle.' }
-    $script:temporaryUserSessionId = [int]$childProcess.SessionId
+    if (-not $childProcess) { throw 'Could not identify the filtered-token MSIX test process session.' }
     $childOwner = Invoke-CimMethod -InputObject $childProcess -MethodName GetOwnerSid -ErrorAction Stop
-    if ([int]$childOwner.ReturnValue -ne 0 -or $childOwner.Sid -ne $userSid) { throw 'The disposable MSIX test process did not start in the expected standard-user session.' }
+    if ($childOwner.ReturnValue -ne 0 -or $childOwner.Sid -ne $runnerSid -or [int]$childProcess.SessionId -ne $currentSessionId) {
+        throw 'Filtered-token MSIX test process did not start as the runner SID in the runner session.'
+    }
+    $report.runner.testTokenElevated = $launch.Token.IsElevated
+    $report.runner.testTokenMode = 'UAC linked filtered token'
+    $report.runner.testTokenSid = $launch.Token.UserSid
+    $report.runner.testTokenSessionId = $launch.Token.SessionId
+    $report.runner.testTokenIntegrityRid = $launch.Token.IntegrityRid
+    $report.cleanFirstInstall = [ordered]@{
+        scope = 'fresh GitHub-hosted runner profile under its linked filtered token'
+        packageRegistrationsForAllUsersBeforeInstall = $existingPackagesAllUsers.Count
+        machineRootTrustPresentBeforeInstall = $false
+        machineTrustedPeoplePresentBeforeInstall = $true
+        lifecycleCompletedBeforeWack = $false
+    }
+    Write-ValidationReport
     $childTimer = [Diagnostics.Stopwatch]::StartNew()
     $childCompleted = $false
     while (-not $childCompleted -and $childTimer.Elapsed -lt [TimeSpan]::FromMinutes(55)) {
         $childCompleted = $child.WaitForExit(30 * 1000)
         if (-not $childCompleted) {
             $phase = 'unknown'
-            if (Test-Path -LiteralPath $standardUserReportPath -PathType Leaf) {
+            if (Test-Path -LiteralPath $filteredTokenReportPath -PathType Leaf) {
                 try {
-                    $childReport = Get-Content -LiteralPath $standardUserReportPath -Raw | ConvertFrom-Json
+                    $childReport = Get-Content -LiteralPath $filteredTokenReportPath -Raw | ConvertFrom-Json
                     if (-not [string]::IsNullOrWhiteSpace([string]$childReport.phase)) { $phase = [string]$childReport.phase }
                 } catch { $phase = 'reading child report failed' }
             }
             $stdoutBytes = if (Test-Path -LiteralPath $stdoutPath) { (Get-Item -LiteralPath $stdoutPath).Length } else { 0 }
             $stderrBytes = if (Test-Path -LiteralPath $stderrPath) { (Get-Item -LiteralPath $stderrPath).Length } else { 0 }
-            Write-LifecyclePhase "Standard-user lifecycle still running after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m; phase=$phase; stdout=${stdoutBytes}B; stderr=${stderrBytes}B."
+            Write-LifecyclePhase "Filtered-token lifecycle still running after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m; phase=$phase; stdout=${stdoutBytes}B; stderr=${stderrBytes}B."
         }
     }
     $childTimer.Stop()
@@ -714,32 +566,33 @@ try {
         try {
             $child.Kill($true)
             if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) {
-                throw 'Timed-out standard-user MSIX test process tree did not stop.'
+                throw 'Timed-out filtered-token MSIX test process tree did not stop.'
             }
             $childExited = $true
-        } catch { throw "Standard-user MSIX lifecycle exceeded 55 minutes and its process tree could not be confirmed stopped: $_" }
-        throw 'Standard-user MSIX lifecycle exceeded 55 minutes.'
+        } catch { throw "Filtered-token MSIX lifecycle exceeded 55 minutes and its process tree could not be confirmed stopped: $_" }
+        throw 'Filtered-token MSIX lifecycle exceeded 55 minutes.'
     }
     $child.Refresh()
     $childExited = $false
-    if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) { throw 'The standard-user helper exited while one of its descendants remained active.' }
+    if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) { throw 'The filtered-token helper exited while one of its descendants remained active.' }
     $childExited = $true
     if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath | Write-Output }
     if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Warning $_ } }
     if ($child.ExitCode -ne 0) { throw "Standard-user MSIX lifecycle failed with exit code $($child.ExitCode)." }
-    if (-not (Test-Path -LiteralPath $standardUserReportPath -PathType Leaf)) { throw 'Standard-user helper did not emit its lifecycle evidence JSON.' }
-    $standardUserReport = Get-Content -LiteralPath $standardUserReportPath -Raw | ConvertFrom-Json
-    $report.standardUser = $standardUserReport
-    Write-LifecyclePhase "Standard-user lifecycle exited with status '$($standardUserReport.status)' after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m."
-    $report.runner.testTokenElevated = $standardUserReport.token.isElevated
-    if ($standardUserReport.status -ne 'passed' -or $standardUserReport.token.isElevated -ne $false) {
-        throw 'The MSIX lifecycle did not pass under a verified non-elevated standard-user token.'
+    if (-not (Test-Path -LiteralPath $filteredTokenReportPath -PathType Leaf)) { throw 'Standard-user helper did not emit its lifecycle evidence JSON.' }
+    $filteredTokenReport = Get-Content -LiteralPath $filteredTokenReportPath -Raw | ConvertFrom-Json
+    $report.filteredTokenLifecycle = $filteredTokenReport
+    Write-LifecyclePhase "Filtered-token lifecycle exited with status '$($filteredTokenReport.status)' after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m."
+    $report.runner.testTokenElevated = $filteredTokenReport.token.isElevated
+    if ($filteredTokenReport.status -ne 'passed' -or $filteredTokenReport.token.isElevated -ne $false -or $filteredTokenReport.token.isAdministrator -ne $false -or $filteredTokenReport.token.isInteractive -ne $true -or [int]$filteredTokenReport.token.elevationType -ne 3 -or $filteredTokenReport.token.mode -ne 'UAC linked filtered token' -or $filteredTokenReport.token.sid -ne $runnerSid -or [int]$filteredTokenReport.token.sessionId -ne $currentSessionId -or [int]$filteredTokenReport.token.integrityRid -ne 0x2000) {
+        throw 'The MSIX lifecycle did not pass under the verified UAC linked filtered token in the runner session.'
     }
 
     # Record the exact trust prerequisite required by Windows for self-signed MSIX
-    # deployment. The disposable standard-user profile still has no app registration
+    # deployment. The fresh hosted runner profile still has no app registration
     # or app data before install, and package operations remain non-elevated.
     $report.cleanFirstInstall = [ordered]@{
+        scope = 'fresh GitHub-hosted runner profile under its linked filtered token'
         packageRegistrationsForAllUsersBeforeInstall = $existingPackagesAllUsers.Count
         machineRootTrustPresentBeforeInstall = $false
         machineTrustedPeoplePresentBeforeInstall = $true
@@ -799,27 +652,8 @@ try {
     Write-ValidationReport
     Write-LifecyclePhase "Production Store candidate verified without debugging arguments: $($report.package.sha256Unsigned)."
 
-    Assert-NoTemporaryUserProcesses
-    Revoke-TemporaryAccess
-    if ($script:cleanupErrors.Count -gt 0) { throw ($script:cleanupErrors -join ' ') }
-    $report.cleanup.repositoryAclRestored = $true
-
-    $profileEntry = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$userSid'" -ErrorAction SilentlyContinue
-    if ($profileEntry) {
-        $profilePath = [System.IO.Path]::GetFullPath([string]$profileEntry.LocalPath)
-        $usersRoot = [System.IO.Path]::GetFullPath((Join-Path $env:SystemDrive 'Users')).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-        if ($profileEntry.Loaded) { throw 'Temporary standard-user profile remains loaded; refusing to remove it.' }
-        if (-not $profilePath.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $profilePath) -ne $userName -or $profileEntry.Special) {
-            throw "Refusing to remove unexpected standard-user profile path: $profilePath."
-        }
-        Remove-CimInstance -InputObject $profileEntry
-        if (Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$userSid'" -ErrorAction SilentlyContinue) { throw 'Temporary standard-user profile remains after cleanup.' }
-    }
-    $report.cleanup.temporaryProfileRemoved = $true
-    Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue
-    if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) { throw 'Temporary standard-user account remains after cleanup.' }
-    $accountCreated = $false
-    $report.cleanup.temporaryUserRemoved = $true
+    $report.cleanup.runnerProfilePreserved = $true
+    $report.cleanFirstInstall.lifecycleCompletedBeforeWack = $true
     if ($certificateCreated) {
         Write-LifecyclePhase 'Removing temporary signer from all test certificate stores.'
         Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'RemoveTemporaryCertificate', '-Thumbprint', $certThumbprint) -LogPath (Join-Path $logRoot 'remove-temporary-signing-certificate.log') -TimeoutSeconds 120
@@ -834,34 +668,17 @@ try {
     $report.failure = [ordered]@{ message = $_.Exception.Message; category = $_.CategoryInfo.Category.ToString(); script = $_.InvocationInfo.ScriptName; line = $_.InvocationInfo.ScriptLineNumber }
     throw
 } finally {
-    if ($childExited) {
-        if ($accountCreated) {
-            try {
-                Assert-NoTemporaryUserProcesses
-                Revoke-TemporaryAccess
-                if ($script:cleanupErrors.Count -gt 0) { throw ($script:cleanupErrors -join ' ') }
-                $report.cleanup.repositoryAclRestored = $true
-                $profileEntry = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$userSid'" -ErrorAction SilentlyContinue
-                if ($profileEntry) {
-                    $profilePath = [System.IO.Path]::GetFullPath([string]$profileEntry.LocalPath)
-                    $usersRoot = [System.IO.Path]::GetFullPath((Join-Path $env:SystemDrive 'Users')).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-                    if ($profileEntry.Loaded -or -not $profilePath.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $profilePath) -ne $userName -or $profileEntry.Special) {
-                        throw "Refusing to remove unexpected or loaded standard-user profile: $profilePath."
-                    }
-                    Remove-CimInstance -InputObject $profileEntry
-                    if (Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$userSid'" -ErrorAction SilentlyContinue) { throw 'Temporary user profile remains after cleanup.' }
-                    $report.cleanup.temporaryProfileRemoved = $true
-                } else { $report.cleanup.temporaryProfileRemoved = $true }
-                Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue
-                if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) { throw 'Temporary standard-user account remains after cleanup.' }
-                $report.cleanup.temporaryUserRemoved = $true
-                $accountCreated = $false
-            } catch { $cleanupErrors.Add("Temporary account/profile cleanup failed: $($_.Exception.Message)") }
-        }
-    } else {
-        $cleanupErrors.Add('The standard-user process tree did not stop; retained its profile and ACLs for hosted-runner teardown.')
+    if (-not $childExited -and $null -ne $child) {
+        try {
+            $child.Refresh()
+            if (-not $child.HasExited) { $child.Kill($true) }
+            if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) { throw 'The lifecycle child tree did not stop.' }
+            $childExited = $true
+        } catch { $cleanupErrors.Add("The filtered-token lifecycle process tree did not stop; discard the hosted runner: $($_.Exception.Message)") }
     }
-
+    if (-not $childExited) { $cleanupErrors.Add('The filtered-token lifecycle process tree did not stop; the hosted runner must be discarded.') }
+    if ($null -ne $child) { $child.Dispose() }
+    $report.cleanup.runnerProfilePreserved = $true
     if ($certThumbprint) {
         try {
             Write-LifecyclePhase 'Removing temporary signer from all test certificate stores.'
@@ -873,7 +690,7 @@ try {
             $cleanupErrors.Add("Test-certificate trust cleanup failed: $($_.Exception.Message)")
         }
     }
-    if (-not $childExited -or ($accountCreated -and -not $report.cleanup.temporaryProfileRemoved)) {
+    if (-not $childExited) {
         $report.cleanup.signingCertificateRemoved = $false
     }
     if (Test-Path -LiteralPath $msixBuildRoot) {
@@ -902,7 +719,6 @@ try {
     if ($machineTrustInstalled) {
         $cleanupErrors.Add('Runner-only signer trust was installed but its cleanup did not complete.')
     }
-    if ($securePassword) { $securePassword.Dispose() }
     $pfxPassword = $null
     $passwordString = $null
     $credential = $null
@@ -915,4 +731,4 @@ try {
 }
 
 if ($report.status -ne 'passed') { throw 'MSIX Windows 11 lifecycle did not pass; see lifecycle-evidence.json and retained logs.' }
-Write-Output "Clean Windows 11 25H2+ x64 MSIX lifecycle passed under a standard user. Store candidate SHA-256: $($report.package.sha256Unsigned)"
+Write-Output "Clean Windows 11 25H2+ x64 MSIX lifecycle passed under a UAC linked filtered token. Store candidate SHA-256: $($report.package.sha256Unsigned)"
