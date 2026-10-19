@@ -93,25 +93,28 @@ test('installed MSIX Playwright checks skip the unused Vite development server',
   assert.match(nativeConfig, /command: 'corepack pnpm dev:web/);
 });
 
-test('installed MSIX fixture activates by AUMID and scopes WebView2 debugging to that package', async () => {
+test('installed MSIX fixture activates by AUMID with test-only loopback WebView2 debugging', async () => {
   const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
   const fixture = await readFile(new URL('../tests/native/native.fixture.ts', import.meta.url), 'utf8');
 
   assert.match(standardUserScript, /Get-AppxPackageManifest -Package \$installed\[0\]/);
   assert.match(standardUserScript, /CONTEXTPICK_NATIVE_AUMID = "\$\(\$installed\[0\]\.PackageFamilyName\)!\$\(\$applicationNode\.GetAttribute\('Id'\)\)"/);
   assert.match(fixture, /if \(appUserModelId\) \{[\s\S]*?activatePackagedApplication\(appUserModelId, nativeExe\)/);
+  assert.match(fixture, /CONTEXTPICK_NATIVE_DEBUG_PORT/);
   assert.match(fixture, /ActivateApplication\(\$env:CONTEXTPICK_NATIVE_AUMID/);
   assert.match(fixture, /owner\.Sid -ne \$identity\.User\.Value/);
   assert.match(fixture, /process\.SessionId -ne \$sessionId/);
   assert.match(fixture, /hasCdpListenerInProcessTree\(port, root\)/);
   assert.match(fixture, /LocalAddress -notin @\('127\.0\.0\.1', '::1'\)/);
-  assert.match(fixture, /Refusing to override existing WebView2 policy/);
-  assert.match(fixture, /HKCU:\\Software\\Policies\\Microsoft\\Edge\\WebView2/);
-  assert.match(fixture, /clearPackagedWebViewDebugging\(process\.env\.CONTEXTPICK_NATIVE_AUMID, packagedPolicySetup\)/);
-  assert.match(fixture, /catch \(error\) \{\s*processCleanupError = error;\s*\}[\s\S]*?if \(packagedPolicySetup && process\.env\.CONTEXTPICK_NATIVE_AUMID\)[\s\S]*?if \(processCleanupError\) throw processCleanupError/);
-  assert.match(fixture, /Failed to remove temporary WebView2 policy/);
-  assert.match(fixture, /policy rollback failed:/);
-  assert.doesNotMatch(fixture, /clearPackagedWebViewDebugging\(appUserModelId, packagedPolicySetup\)\.catch\(\(\) => undefined\)/);
+  assert.doesNotMatch(fixture, /Software\\Policies\\Microsoft\\Edge\\WebView2/);
+
+  const lifecycleScript = await readFile(new URL('./test-store-msix.ps1', import.meta.url), 'utf8');
+  assert.match(lifecycleScript, /additionalBrowserArgs = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-address=127\.0\.0\.1 --remote-debugging-port=\$testWebViewDebugPort"/);
+  assert.match(lifecycleScript, /tauri', 'build', '--config', \$testTauriConfigPath/);
+  assert.match(lifecycleScript, /tauri', 'build', '--target', 'x86_64-pc-windows-msvc', '--no-bundle'\) -LogPath \(Join-Path \$logRoot 'tauri-x64-store-build\.log'\)/);
+  assert.match(lifecycleScript, /\$productionExecutableHash = \(Get-FileHash -LiteralPath \$appBinary -Algorithm SHA256\)\.Hash\.ToLowerInvariant\(\)[\s\S]*?if \(\$productionExecutableHash -eq \$testConfigExecutableHash\)/);
+  assert.match(lifecycleScript, /Production Store candidate must remain unsigned/);
+  assert.match(lifecycleScript, /sha256Unsigned = \(Get-FileHash -LiteralPath \$storeCandidateUnsigned/);
 });
 
 test('test-signing certificate generation is bounded, code-signing scoped, and cleanup tracked', async () => {

@@ -162,6 +162,27 @@ function Assert-NoTemporaryAccountProcesses {
     }
 }
 
+function Remove-NsisTemporaryUninstaller {
+    param([Parameter(Mandatory = $true)] [string]$TemporaryDirectory)
+
+    $temporaryRoot = [System.IO.Path]::GetFullPath($TemporaryDirectory).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    foreach ($directory in @(Get-ChildItem -LiteralPath $TemporaryDirectory -Directory -Force -Filter '~nsu*.tmp' -ErrorAction SilentlyContinue)) {
+        $resolvedDirectory = [System.IO.Path]::GetFullPath($directory.FullName)
+        if (-not $resolvedDirectory.StartsWith($temporaryRoot, [System.StringComparison]::OrdinalIgnoreCase) -or $directory.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Refusing to remove unexpected NSIS temporary directory: $resolvedDirectory."
+        }
+        $entries = @(Get-ChildItem -LiteralPath $resolvedDirectory -Force)
+        if ($entries.Count -ne 1 -or $entries[0].Name -cne 'Un.exe' -or $entries[0].PSIsContainer -or $entries[0].Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Refusing to remove NSIS temporary directory with unexpected contents: $resolvedDirectory."
+        }
+        $uninstallerPath = [System.IO.Path]::GetFullPath($entries[0].FullName)
+        $runningUninstaller = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ExecutablePath | Where-Object { [string]::Equals([string]$_.ExecutablePath, $uninstallerPath, [System.StringComparison]::OrdinalIgnoreCase) })
+        if ($runningUninstaller.Count -gt 0) { throw "Refusing to remove a running NSIS temporary uninstaller: $uninstallerPath." }
+        Remove-Item -LiteralPath $uninstallerPath -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $resolvedDirectory -Force -ErrorAction Stop
+    }
+}
+
 if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw 'PowerShell 7.4 or newer is required.' }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
     throw 'The temporary standard-user installer smoke is reserved for a GitHub-hosted Windows runner.'
@@ -351,6 +372,7 @@ $childSessionId = [int]$child.SessionId
     $smokeFailure = $_
 } finally {
     if ($childExited) {
+        try { Remove-NsisTemporaryUninstaller -TemporaryDirectory $tempDir } catch { $script:cleanupErrors.Add("Could not remove the verified NSIS temporary uninstaller: $_") }
         if ($script:userSid) { Revoke-TemporaryAccess }
         if ($accountCreated) {
             try {

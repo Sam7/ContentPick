@@ -217,6 +217,7 @@ try {
     $applicationNode = $manifest.SelectSingleNode("//*[local-name()='Application']")
     if (-not $applicationNode -or [string]::IsNullOrWhiteSpace([string]$applicationNode.GetAttribute('Id'))) { throw 'Installed package manifest does not declare an application ID for activation.' }
     $env:CONTEXTPICK_NATIVE_AUMID = "$($installed[0].PackageFamilyName)!$($applicationNode.GetAttribute('Id'))"
+    $env:CONTEXTPICK_NATIVE_DEBUG_PORT = '9222'
     $userReport.install = [ordered]@{ result = 'passed'; scope = 'current standard-user profile'; architecture = [string]$installed[0].Architecture; version = $installed[0].Version.ToString(); packageFullName = $installed[0].PackageFullName; installLocation = $installed[0].InstallLocation }
     $userReport.package.installedPackageFullName = $installed[0].PackageFullName
     $userReport.package.installedExeSha256 = (Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -269,6 +270,7 @@ try {
     $userReport.failure = [ordered]@{ message = $_.Exception.Message; category = $_.CategoryInfo.Category.ToString(); script = $_.InvocationInfo.ScriptName; line = $_.InvocationInfo.ScriptLineNumber }
 } finally {
     Remove-Item Env:\CONTEXTPICK_NATIVE_EXECUTABLE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CONTEXTPICK_NATIVE_DEBUG_PORT -ErrorAction SilentlyContinue
     Remove-Item Env:\CONTEXTPICK_NATIVE_CONFIG_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:\CONTEXTPICK_PLAYWRIGHT_OUTPUT_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:\CONTEXTPICK_SCREENSHOT_DIR -ErrorAction SilentlyContinue

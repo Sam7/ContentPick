@@ -248,6 +248,8 @@ $publisher = 'CN=9CF819D8-048A-42F9-91C4-E85E76577891'
 $minimumBuild = 26200
 $msixBuildRoot = Join-Path $repoRoot ('target\msix\lifecycle-' + [Guid]::NewGuid().ToString('N'))
 $packageLayout = Join-Path $msixBuildRoot 'package-layout'
+$testTauriConfigPath = Join-Path $msixBuildRoot 'tauri-test-debug.conf.json'
+$testWebViewDebugPort = 9222
 $appVersionText = (Get-Content -LiteralPath (Join-Path $repoRoot 'src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json).version
 if ($appVersionText -notmatch '^(\d+)\.(\d+)\.(\d+)$') { throw "Expected stable three-part app version, received $appVersionText." }
 $parts = $appVersionText.Split('.') | ForEach-Object { [int]$_ }
@@ -265,7 +267,7 @@ $candidateUnsigned = Join-Path $msixBuildRoot "ContextPick-$appVersionText.msix"
 $upgradeUnsigned = Join-Path $msixBuildRoot 'ContextPick-upgrade-test.msix'
 $candidateSigned = Join-Path $resultRoot "ContextPick-$appVersionText-test-signed.msix"
 $upgradeSigned = Join-Path $resultRoot 'ContextPick-upgrade-test-signed.msix'
-$candidateEvidence = Join-Path $resultRoot "ContextPick-$appVersionText.msix"
+$candidateEvidence = Join-Path $resultRoot "ContextPick-$appVersionText-test-debug.msix"
 $pfxPath = Join-Path $privateRoot 'runner-only-test-signing.pfx'
 $cerPath = Join-Path $resultRoot 'runner-only-test-signing.cer'
 $pfxPassword = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(36))
@@ -291,7 +293,7 @@ $previousMsixAppBinary = $env:CONTEXTPICK_MSIX_APP_BINARY
 $report = [ordered]@{
     status = 'in_progress'
     runner = [ordered]@{ environment = $executionEnvironment; image = $env:ImageOS; imageVersion = $env:ImageVersion; architecture = $hostArchitecture; windowsVersion = $hostVersion; minimumBuild = $minimumBuild; buildTokenElevated = $isElevated; testTokenElevated = $null }
-    package = [ordered]@{ identity = $identityName; publisher = $publisher; architecture = 'x64'; appVersion = $appVersionText; version = $packageVersion; sha256Unsigned = $null; sha256TestSigned = $null; sha256UpgradeUnsigned = $null; sha256UpgradeTestSigned = $null }
+    package = [ordered]@{ identity = $identityName; publisher = $publisher; architecture = 'x64'; appVersion = $appVersionText; version = $packageVersion; sha256TestCandidate = $null; sha256Unsigned = $null; sha256TestSigned = $null; sha256UpgradeUnsigned = $null; sha256UpgradeTestSigned = $null }
     wack = [ordered]@{ result = 'pending'; reportPath = $null; detail = $null }
     standardUser = $null
     cleanup = [ordered]@{ temporaryUserRemoved = $false; temporaryProfileRemoved = $false; repositoryAclRestored = $false; signingCertificateRemoved = $false; privateSigningKeyRemoved = $false }
@@ -319,11 +321,26 @@ try {
         $env:CONTEXTPICK_MSIX_MAX_VERSION_TESTED = $hostVersion
         Invoke-NativeCommand -FilePath 'corepack' -ArgumentList @('pnpm', 'licenses:rust', 'windows-x64') -LogPath (Join-Path $logRoot 'rust-licenses.log')
         Invoke-NativeCommand -FilePath 'node' -ArgumentList @('licenses/generate-frontend-notices.mjs') -LogPath (Join-Path $logRoot 'frontend-licenses.log')
-        Invoke-NativeCommand -FilePath 'corepack' -ArgumentList @('pnpm', 'exec', 'tauri', 'build', '--target', 'x86_64-pc-windows-msvc', '--no-bundle') -LogPath (Join-Path $logRoot 'tauri-x64-build.log')
+        $null = New-Item -ItemType Directory -Path $msixBuildRoot -Force
+        $testTauriConfig = @{
+            app = @{
+                windows = @(@{
+                    title = 'ContextPick'
+                    width = 1200
+                    height = 800
+                    minWidth = 720
+                    minHeight = 520
+                    additionalBrowserArgs = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-address=127.0.0.1 --remote-debugging-port=$testWebViewDebugPort"
+                })
+            }
+        } | ConvertTo-Json -Depth 8
+        Set-Content -LiteralPath $testTauriConfigPath -Value $testTauriConfig -Encoding utf8
+        Invoke-NativeCommand -FilePath 'corepack' -ArgumentList @('pnpm', 'exec', 'tauri', 'build', '--config', $testTauriConfigPath, '--target', 'x86_64-pc-windows-msvc', '--no-bundle') -LogPath (Join-Path $logRoot 'tauri-x64-test-build.log')
 
         $targetRelease = Join-Path $repoRoot 'target\x86_64-pc-windows-msvc\release'
         $appBinary = Join-Path $targetRelease 'contextpick.exe'
         if (-not (Test-Path -LiteralPath $appBinary -PathType Leaf)) { throw "x64 release build output is missing: $appBinary." }
+        $testConfigExecutableHash = (Get-FileHash -LiteralPath $appBinary -Algorithm SHA256).Hash.ToLowerInvariant()
         $env:CONTEXTPICK_MSIX_APP_BINARY = [System.IO.Path]::GetRelativePath($repoRoot, $appBinary).Replace('\', '/')
         Invoke-NativeCommand -FilePath 'node' -ArgumentList @('scripts/prepare-msix.mjs', $packageLayout) -LogPath (Join-Path $logRoot 'prepare-msix.log')
         Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('exec', '--yes', '--package=@microsoft/winappcli@0.7.1', '--', 'winapp', 'package', $packageLayout, '--no-sign', '--output', $candidateUnsigned) -LogPath (Join-Path $logRoot 'package-msix.log') -TimeoutSeconds 1200
@@ -338,7 +355,7 @@ try {
     if ($candidateIdentity.ProcessorArchitecture -notmatch 'x64') { throw "Candidate MSIX is not an x64 package: $($candidateIdentity.ProcessorArchitecture)." }
     $unsignedHash = (Get-FileHash -LiteralPath $candidateUnsigned -Algorithm SHA256).Hash.ToLowerInvariant()
     Copy-Item -LiteralPath $candidateUnsigned -Destination $candidateEvidence
-    $report.package.sha256Unsigned = $unsignedHash
+    $report.package.sha256TestCandidate = $unsignedHash
     $report.package.sha256TestSigned = $null
     $report.package.sizeBytes = (Get-Item -LiteralPath $candidateUnsigned).Length
     $report.package.manifestArchitecture = $candidateIdentity.ProcessorArchitecture
@@ -713,6 +730,34 @@ try {
     }
     if ($report.wack.result -eq 'failed') { throw 'WACK failed against the exact test-signed candidate package; see retained WACK report and logs.' }
 
+    Write-LifecyclePhase 'Building the production Store candidate without test-only WebView2 debugging arguments.'
+    Push-Location $repoRoot
+    try {
+        Invoke-NativeCommand -FilePath 'corepack' -ArgumentList @('pnpm', 'exec', 'tauri', 'build', '--target', 'x86_64-pc-windows-msvc', '--no-bundle') -LogPath (Join-Path $logRoot 'tauri-x64-store-build.log')
+        $productionExecutableHash = (Get-FileHash -LiteralPath $appBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($productionExecutableHash -eq $testConfigExecutableHash) {
+            throw 'Production Tauri build retained the test-config executable; refusing to package a Store candidate with test-only WebView2 debugging arguments.'
+        }
+        Invoke-NativeCommand -FilePath 'node' -ArgumentList @('scripts/prepare-msix.mjs', $packageLayout) -LogPath (Join-Path $logRoot 'prepare-store-msix.log')
+        $storeCandidateUnsigned = Join-Path $resultRoot "ContextPick-$appVersionText.msix"
+        Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('exec', '--yes', '--package=@microsoft/winappcli@0.7.1', '--', 'winapp', 'package', $packageLayout, '--no-sign', '--output', $storeCandidateUnsigned) -LogPath (Join-Path $logRoot 'package-store-msix.log') -TimeoutSeconds 1200
+    } finally { Pop-Location }
+    if (-not (Test-Path -LiteralPath $storeCandidateUnsigned -PathType Leaf)) { throw 'The production Store candidate MSIX was not created.' }
+    $storeIdentity = Get-MsixIdentity -PackagePath $storeCandidateUnsigned
+    if ($storeIdentity.Name -ne $identityName -or $storeIdentity.Publisher -cne $publisher -or $storeIdentity.Version -ne $packageVersion -or $storeIdentity.ProcessorArchitecture -notmatch 'x64') {
+        throw "Production Store candidate identity mismatch: $($storeIdentity | ConvertTo-Json -Compress)."
+    }
+    $storeArchive = [System.IO.Compression.ZipFile]::OpenRead($storeCandidateUnsigned)
+    try {
+        if ($storeArchive.GetEntry('AppxSignature.p7x')) { throw 'Production Store candidate must remain unsigned.' }
+    } finally { $storeArchive.Dispose() }
+    $report.package.sha256Unsigned = (Get-FileHash -LiteralPath $storeCandidateUnsigned -Algorithm SHA256).Hash.ToLowerInvariant()
+    $report.package.storeCandidateSizeBytes = (Get-Item -LiteralPath $storeCandidateUnsigned).Length
+    $report.package.sha256TestConfigExecutable = $testConfigExecutableHash
+    $report.package.sha256ProductionExecutable = $productionExecutableHash
+    Write-ValidationReport
+    Write-LifecyclePhase "Production Store candidate verified without debugging arguments: $($report.package.sha256Unsigned)."
+
     Revoke-TemporaryAccess
     if ($script:cleanupErrors.Count -gt 0) { throw ($script:cleanupErrors -join ' ') }
     $report.cleanup.repositoryAclRestored = $true
@@ -827,4 +872,4 @@ try {
 }
 
 if ($report.status -ne 'passed') { throw 'MSIX Windows 11 lifecycle did not pass; see lifecycle-evidence.json and retained logs.' }
-Write-Output "Clean Windows 11 25H2+ x64 MSIX lifecycle passed under a standard user. Candidate SHA-256: $unsignedHash"
+Write-Output "Clean Windows 11 25H2+ x64 MSIX lifecycle passed under a standard user. Store candidate SHA-256: $($report.package.sha256Unsigned)"

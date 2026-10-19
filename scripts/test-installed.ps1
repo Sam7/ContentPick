@@ -117,7 +117,7 @@ function Wait-ForContextPickRemoval {
 function Stop-InstallerLaunchedContextPick {
     param(
         [Parameter(Mandatory = $true)] [DateTime]$InstallerStartedAt,
-        [Parameter(Mandatory = $true)] [object[]]$ProcessBaseline
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]]$ProcessBaseline
     )
 
     $script:processTreeStopped = $false

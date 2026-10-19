@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 const cleanupTestPath = fileURLToPath(new URL('./test-installed-standard-user-cleanup.ps1', import.meta.url));
 const cleanupScriptPath = fileURLToPath(new URL('./test-installed-standard-user.ps1', import.meta.url));
+const installerScriptPath = fileURLToPath(new URL('./test-installed.ps1', import.meta.url));
 
 test('installer cleanup passes /L as one icacls argument', { skip: process.platform !== 'win32' }, () => {
   const result = spawnSync('pwsh.exe', ['-NoProfile', '-File', cleanupTestPath, '-SourcePath', cleanupScriptPath], {
@@ -21,4 +22,15 @@ test('installer cleanup passes /L as one icacls argument', { skip: process.platf
 test('process baseline cleanup accepts an empty pre-existing process snapshot', async () => {
   const source = await readFile(cleanupScriptPath, 'utf8');
   assert.match(source, /\[AllowEmptyCollection\(\)\]\s*\[object\[\]\]\$ProcessBaseline/);
+  const installerSource = await readFile(installerScriptPath, 'utf8');
+  assert.match(installerSource, /\[AllowEmptyCollection\(\)\]\s*\[object\[\]\]\$ProcessBaseline/);
+});
+
+test('NSIS temp cleanup removes only an owned and idle uninstaller from the isolated temp directory', async () => {
+  const source = await readFile(cleanupScriptPath, 'utf8');
+  assert.match(source, /function Remove-NsisTemporaryUninstaller/);
+  assert.match(source, /-Filter '~nsu\*\.tmp'/);
+  assert.match(source, /Refusing to remove NSIS temporary directory with unexpected contents/);
+  assert.match(source, /running NSIS temporary uninstaller/);
+  assert.match(source, /Remove-NsisTemporaryUninstaller -TemporaryDirectory \$tempDir/);
 });

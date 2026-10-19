@@ -204,109 +204,6 @@ async function waitForCdp(port: number, root: { processId: number; executablePat
 }
 
 type PackagedRootIdentity = { processId: number; creationTicks: string; executablePath: string; sessionId: number; ownerSid: string };
-type PackagedPolicySetup = { createdKeys: string[] };
-
-async function configurePackagedWebViewDebugging(appUserModelId: string, port: number, userDataFolder: string): Promise<PackagedPolicySetup> {
-  if (process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS || process.env.WEBVIEW2_USER_DATA_FOLDER) {
-    throw new Error('Cannot configure packaged WebView2 debugging while conflicting WebView2 environment overrides are set.');
-  }
-  const script = String.raw`
-$ErrorActionPreference = 'Stop'
-$appId = $env:CONTEXTPICK_WEBVIEW_AUMID
-$paths = @(
-  'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments',
-  'HKCU:\Software\Policies\Microsoft\Edge\WebView2\UserDataFolder'
-)
-foreach ($path in $paths) {
-  $policyName = Split-Path -Leaf $path
-  foreach ($hive in @('HKCU:', 'HKLM:')) {
-    $candidate = Join-Path $hive (Join-Path 'Software\Policies\Microsoft\Edge\WebView2' $policyName)
-    if (Test-Path -LiteralPath $candidate) {
-      foreach ($name in @($appId, '*')) {
-        $existing = Get-ItemProperty -LiteralPath $candidate -Name $name -ErrorAction SilentlyContinue
-        if ($null -ne $existing) { throw "Refusing to override existing WebView2 policy $policyName for '$name'." }
-      }
-    }
-  }
-}
-$created = [System.Collections.Generic.List[string]]::new()
-try {
-  $values = @(
-    @($paths[0], "--remote-debugging-address=127.0.0.1 --remote-debugging-port=$env:CONTEXTPICK_WEBVIEW_PORT"),
-    @($paths[1], $env:CONTEXTPICK_WEBVIEW_USER_DATA)
-  )
-  foreach ($entry in $values) {
-    $path = [string]$entry[0]
-    $value = [string]$entry[1]
-    $cursor = $path
-    while ($cursor -like 'HKCU:*' -and -not (Test-Path -LiteralPath $cursor)) { $created.Insert(0, $cursor); $cursor = Split-Path -Parent $cursor }
-    $null = New-Item -Path $path -Force
-    $null = New-ItemProperty -LiteralPath $path -Name $appId -Value $value -PropertyType String
-  }
-  [pscustomobject]@{ createdKeys = @($created) } | ConvertTo-Json -Compress -Depth 3
-} catch {
-  $setupError = $_
-  $rollbackErrors = [System.Collections.Generic.List[string]]::new()
-  foreach ($path in $paths) {
-    try {
-      if (Test-Path -LiteralPath $path) {
-        $before = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Name -ieq $appId })
-        if ($before.Count -gt 0) { Remove-ItemProperty -LiteralPath $path -Name $appId -ErrorAction Stop }
-        $after = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Name -ieq $appId })
-        if ($after.Count -gt 0) { throw "Temporary AUMID policy remains at $path." }
-      }
-    } catch { $rollbackErrors.Add("${path}: $_") }
-  }
-  foreach ($path in @($created | Sort-Object Length -Descending)) {
-    try {
-      if (Test-Path -LiteralPath $path) {
-        $names = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' })
-        $children = @(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue)
-        if ($names.Count -eq 0 -and $children.Count -eq 0) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
-      }
-    } catch { $rollbackErrors.Add("${path}: $_") }
-  }
-  if ($rollbackErrors.Count -gt 0) { throw "WebView2 debugging setup failed ($setupError); policy rollback failed: $($rollbackErrors -join '; ')" }
-  throw $setupError
-}
-`;
-  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    windowsHide: true,
-    timeout: 10_000,
-    env: { ...process.env, CONTEXTPICK_WEBVIEW_AUMID: appUserModelId, CONTEXTPICK_WEBVIEW_PORT: String(port), CONTEXTPICK_WEBVIEW_USER_DATA: userDataFolder },
-  });
-  return JSON.parse(stdout.trim()) as PackagedPolicySetup;
-}
-
-async function clearPackagedWebViewDebugging(appUserModelId: string, setup: PackagedPolicySetup): Promise<void> {
-  const createdKeys = Buffer.from(JSON.stringify(setup.createdKeys), 'utf8').toString('base64');
-  const script = String.raw`
-$ErrorActionPreference = 'Stop'
-$appId = $env:CONTEXTPICK_WEBVIEW_AUMID
-$paths = @('HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments', 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\UserDataFolder')
-foreach ($path in $paths) {
-  if (Test-Path -LiteralPath $path) {
-    $before = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Name -ieq $appId })
-    if ($before.Count -gt 0) { Remove-ItemProperty -LiteralPath $path -Name $appId -ErrorAction Stop }
-    $after = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Name -ieq $appId })
-    if ($after.Count -gt 0) { throw "Failed to remove temporary WebView2 policy '$appId' from $path." }
-  }
-}
-$created = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${createdKeys}')) | ConvertFrom-Json
-foreach ($path in @($created | Sort-Object Length -Descending)) {
-  if (Test-Path -LiteralPath $path) {
-    $names = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' })
-    $children = @(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue)
-    if ($names.Count -eq 0 -and $children.Count -eq 0) { Remove-Item -LiteralPath $path -Force }
-  }
-}
-`;
-  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    windowsHide: true,
-    timeout: 10_000,
-    env: { ...process.env, CONTEXTPICK_WEBVIEW_AUMID: appUserModelId },
-  });
-}
 
 async function activatePackagedApplication(appUserModelId: string, expectedExecutablePath: string): Promise<PackagedRootIdentity> {
   const script = String.raw`
@@ -650,7 +547,6 @@ export const test = base.extend<NativeFixtures>({
     let child: ChildProcess | undefined;
     let activeProcessId: number | undefined;
     let activeRootIdentity: PackagedRootIdentity | undefined;
-    let packagedPolicySetup: PackagedPolicySetup | undefined;
     let browser: Browser | undefined;
     let page: Page | undefined;
     let startupMs = 0;
@@ -669,16 +565,6 @@ export const test = base.extend<NativeFixtures>({
       } catch (error) {
         processCleanupError = error;
       }
-      if (packagedPolicySetup && process.env.CONTEXTPICK_NATIVE_AUMID) {
-        try {
-          await clearPackagedWebViewDebugging(process.env.CONTEXTPICK_NATIVE_AUMID, packagedPolicySetup);
-          packagedPolicySetup = undefined;
-        } catch (policyCleanupError) {
-          processCleanupError = processCleanupError
-            ? new AggregateError([processCleanupError, policyCleanupError], 'Native process cleanup and WebView2 policy cleanup both failed.', { cause: processCleanupError })
-            : policyCleanupError;
-        }
-      }
       if (processCleanupError) throw processCleanupError;
       child = undefined;
       activeProcessId = undefined;
@@ -687,23 +573,16 @@ export const test = base.extend<NativeFixtures>({
 
     const launch = async (): Promise<Page> => {
       if (browser) await stop();
-      const port = await availablePort();
       const startedAt = Date.now();
       let appOutputTail = '';
       const appUserModelId = installedExe ? process.env.CONTEXTPICK_NATIVE_AUMID?.trim() : undefined;
+      const packagedDebugPort = appUserModelId ? Number(process.env.CONTEXTPICK_NATIVE_DEBUG_PORT) : undefined;
+      if (appUserModelId && (!Number.isInteger(packagedDebugPort) || packagedDebugPort! < 1024 || packagedDebugPort! > 65535)) {
+        throw new Error('Installed MSIX tests require a valid test-only WebView2 debugging port.');
+      }
+      const port = appUserModelId ? packagedDebugPort! : await availablePort();
       if (appUserModelId) {
-        packagedPolicySetup = await configurePackagedWebViewDebugging(appUserModelId, port, webviewProfile);
-        try {
-          activeRootIdentity = await activatePackagedApplication(appUserModelId, nativeExe);
-        } catch (error) {
-          try {
-            await clearPackagedWebViewDebugging(appUserModelId, packagedPolicySetup);
-            packagedPolicySetup = undefined;
-          } catch (policyCleanupError) {
-            throw new AggregateError([error, policyCleanupError], 'AUMID activation failed and temporary WebView2 policy cleanup also failed.', { cause: policyCleanupError });
-          }
-          throw new Error('AUMID activation failed after temporary WebView2 policy setup.', { cause: error });
-        }
+        activeRootIdentity = await activatePackagedApplication(appUserModelId, nativeExe);
         activeProcessId = activeRootIdentity.processId;
         memorySampler.start(activeProcessId, nativeExe, activeRootIdentity.creationTicks);
       } else {
