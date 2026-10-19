@@ -223,19 +223,24 @@ public interface IApplicationActivationManager {
 public static class ContextPickActivation {
   [DllImport("ole32.dll", PreserveSig=true)]
   public static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint context, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out IApplicationActivationManager manager);
+  public static int ActivateApplication(string appUserModelId, out uint processId) {
+    Guid clsid = new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C");
+    Guid iid = new Guid("2e941141-7f97-4756-ba1d-9decde894a3d");
+    processId = 0;
+    IApplicationActivationManager manager;
+    int result = CoCreateInstance(ref clsid, IntPtr.Zero, 0x1, ref iid, out manager);
+    if (result < 0) return result;
+    try { return manager.ActivateApplication(appUserModelId, "", 0, out processId); }
+    finally { if (manager != null && Marshal.IsComObject(manager)) Marshal.ReleaseComObject(manager); }
+  }
 }
 '@
 $activationStartedTicks = [DateTime]::UtcNow.Ticks
 $expectedPath = [System.IO.Path]::GetFullPath($env:CONTEXTPICK_NATIVE_EXECUTABLE)
 $baselinePids = [System.Collections.Generic.HashSet[int]]::new()
 foreach ($existing in Get-CimInstance Win32_Process -Property ProcessId,ExecutablePath | Where-Object { [string]::Equals([string]$_.ExecutablePath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase) }) { $null = $baselinePids.Add([int]$existing.ProcessId) }
-$clsid = [Guid]'45BA127D-10A8-46EA-8AB7-56EA9078943C'
-$iid = [Guid]'2e941141-7f97-4756-ba1d-9decde894a3d'
-$manager = $null
-$activationResult = [ContextPickActivation]::CoCreateInstance([ref]$clsid, [IntPtr]::Zero, 0x1, [ref]$iid, [ref]$manager)
-if ($activationResult -lt 0) { throw "In-process ApplicationActivationManager creation failed (HRESULT 0x$($activationResult.ToString('X8')))." }
 [uint32]$processId = 0
-$hresult = $manager.ActivateApplication($env:CONTEXTPICK_NATIVE_AUMID, '', 0, [ref]$processId)
+$hresult = [ContextPickActivation]::ActivateApplication($env:CONTEXTPICK_NATIVE_AUMID, [ref]$processId)
 if ($hresult -lt 0) { throw "AUMID activation failed (HRESULT 0x$($hresult.ToString('X8')))." }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -248,11 +253,9 @@ if ($baselinePids.Contains([int]$processId)) { throw 'AUMID activation reused a 
   $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
   if (-not $owner.Sid -or $owner.Sid -ne $identity.User.Value) { throw 'AUMID activation returned a process owned by a different user.' }
   if ([int]$process.SessionId -ne $sessionId) { throw 'AUMID activation returned a process in a different session.' }
-[GC]::KeepAlive($manager)
 [Console]::Out.WriteLine('CONTEXT_PICK_ACTIVATED ' + ([pscustomobject]@{ processId=[int]$processId; creationTicks=[string]$creationTicks; executablePath=$expectedPath; sessionId=$sessionId; ownerSid=[string]$owner.Sid } | ConvertTo-Json -Compress))
 [Console]::Out.Flush()
 [void][Console]::In.ReadLine()
-[GC]::KeepAlive($manager)
 `;
   const host = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,

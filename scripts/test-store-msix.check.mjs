@@ -116,7 +116,9 @@ test('installed MSIX fixture activates by AUMID with test-only loopback WebView2
   assert.match(standardUserScript, /CONTEXTPICK_NATIVE_AUMID = "\$\(\$installed\[0\]\.PackageFamilyName\)!\$\(\$applicationNode\.GetAttribute\('Id'\)\)"/);
   assert.match(fixture, /if \(appUserModelId\) \{[\s\S]*?activatePackagedApplication\(appUserModelId, nativeExe\)/);
   assert.match(fixture, /CONTEXTPICK_NATIVE_DEBUG_PORT/);
-  assert.match(fixture, /IApplicationActivationManager[\s\S]*?CoCreateInstance\(\[ref\]\$clsid, \[IntPtr\]::Zero, 0x1/);
+  assert.match(fixture, /IApplicationActivationManager[\s\S]*?public static int ActivateApplication\(string appUserModelId, out uint processId\)[\s\S]*?CoCreateInstance\(ref clsid, IntPtr\.Zero, 0x1, ref iid, out manager\)[\s\S]*?manager\.ActivateApplication\(appUserModelId, "", 0, out processId\)/);
+  assert.match(fixture, /\[ContextPickActivation\]::ActivateApplication\(\$env:CONTEXTPICK_NATIVE_AUMID, \[ref\]\$processId\)/);
+  assert.doesNotMatch(fixture, /\$manager\.ActivateApplication/);
   assert.match(fixture, /AUMID activation failed \(HRESULT 0x/);
   assert.match(fixture, /owner\.Sid -ne \$identity\.User\.Value/);
   assert.match(fixture, /process\.SessionId -ne \$sessionId/);
@@ -127,7 +129,6 @@ test('installed MSIX fixture activates by AUMID with test-only loopback WebView2
   assert.match(fixture, /await expect\(page\.getByRole\('tree', \{ name: 'Workspace files' \}\)\)\.toBeVisible\(\);\s*if \(appUserModelId\) \{ await releaseActivationHost\(activationHost\); activationHost = undefined; \}/);
   assert.match(fixture, /hasCdpListenerInProcessTree\(port, root\)/);
   assert.match(fixture, /LocalAddress -ne '127\.0\.0\.1'/);
-  assert.match(fixture, /\[GC\]::KeepAlive\(\$manager\)/);
   assert.doesNotMatch(fixture, /Software\\Policies\\Microsoft\\Edge\\WebView2/);
 
   const lifecycleScript = await readFile(new URL('./test-store-msix.ps1', import.meta.url), 'utf8');
