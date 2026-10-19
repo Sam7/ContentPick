@@ -209,6 +209,36 @@ function Wait-ForProcessTreeExit {
     return Wait-ForProcessIdsExit -ProcessIds (Get-ProcessTreeIds -RootProcessId $RootProcessId) -TimeoutSeconds $TimeoutSeconds
 }
 
+function Assert-NoTemporaryUserProcesses {
+    if ($null -eq $script:temporaryUserProcessBaseline) { throw 'Temporary-user process baseline is unavailable; preserving its profile, account, and repository ACLs.' }
+    $remaining = [System.Collections.Generic.List[string]]::new()
+    foreach ($process in Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, CreationDate, SessionId) {
+        if ($null -ne $script:temporaryUserSessionId -and [int]$process.SessionId -ne [int]$script:temporaryUserSessionId) { continue }
+        $creationTicks = [long]$process.CreationDate.ToUniversalTime().Ticks
+        if ($script:temporaryUserProcessBaseline.ContainsKey([int]$process.ProcessId) -and $script:temporaryUserProcessBaseline[[int]$process.ProcessId] -eq $creationTicks) { continue }
+        $processSessionId = [int]$process.SessionId
+        try {
+            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+        } catch {
+            $owner = $null
+        }
+        if ($null -eq $owner -or [int]$owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace([string]$owner.Sid)) {
+            try {
+                $current = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($process.ProcessId)" -Property CreationDate, SessionId -ErrorAction Stop
+            } catch {
+                throw "Could not recheck process $($process.ProcessId) after its owner SID lookup failed: $_"
+            }
+            if (-not $current -or [Math]::Abs([long]$current.CreationDate.ToUniversalTime().Ticks - $creationTicks) -gt 10000 -or [int]$current.SessionId -ne $processSessionId) { continue }
+            $returnValue = if ($null -eq $owner) { 'unavailable' } else { $owner.ReturnValue }
+            throw "Could not establish the owner SID for live new process $($process.ProcessId) before temporary-account cleanup (GetOwnerSid returned $returnValue); preserving its profile, account, and repository ACLs."
+        }
+        if ($owner.Sid -eq $script:userSid) { $remaining.Add("$($process.Name) (PID $($process.ProcessId))") }
+    }
+    if ($remaining.Count -gt 0) {
+        throw "Temporary standard-user processes remain; preserving its profile, account, and repository ACLs: $($remaining -join ', ')."
+    }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $previousRunnerTemp = $env:RUNNER_TEMP
 $isLocalFallback = [bool]$AllowLocalWin11X64
@@ -288,6 +318,8 @@ $standardUserReportPath = Join-Path $resultRoot 'standard-user-lifecycle.json'
 $userProfile = $null
 $securePassword = $null
 $child = $null
+$script:temporaryUserProcessBaseline = @{}
+$script:temporaryUserSessionId = $null
 $certThumbprint = $null
 $previousMsixAppBinary = $env:CONTEXTPICK_MSIX_APP_BINARY
 $report = [ordered]@{
@@ -649,7 +681,16 @@ try {
     foreach ($entry in $environmentOverrides.GetEnumerator()) { $environment[$entry.Key] = $entry.Value }
 
     Write-LifecyclePhase 'Starting installed-app lifecycle under the disposable standard user.'
+    $script:temporaryUserProcessBaseline = @{}
+    foreach ($existingProcess in Get-CimInstance -ClassName Win32_Process -Property ProcessId, CreationDate) {
+        $script:temporaryUserProcessBaseline[[int]$existingProcess.ProcessId] = [long]$existingProcess.CreationDate.ToUniversalTime().Ticks
+    }
     $child = Start-Process -FilePath $pwshPath -ArgumentList $childArguments -Credential $credential -LoadUserProfile -Environment $environment -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $childProcess = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($child.Id)" -Property SessionId
+    if (-not $childProcess) { throw 'Could not identify the disposable user process session before running the MSIX lifecycle.' }
+    $script:temporaryUserSessionId = [int]$childProcess.SessionId
+    $childOwner = Invoke-CimMethod -InputObject $childProcess -MethodName GetOwnerSid -ErrorAction Stop
+    if ([int]$childOwner.ReturnValue -ne 0 -or $childOwner.Sid -ne $userSid) { throw 'The disposable MSIX test process did not start in the expected standard-user session.' }
     $childTimer = [Diagnostics.Stopwatch]::StartNew()
     $childCompleted = $false
     while (-not $childCompleted -and $childTimer.Elapsed -lt [TimeSpan]::FromMinutes(55)) {
@@ -758,6 +799,7 @@ try {
     Write-ValidationReport
     Write-LifecyclePhase "Production Store candidate verified without debugging arguments: $($report.package.sha256Unsigned)."
 
+    Assert-NoTemporaryUserProcesses
     Revoke-TemporaryAccess
     if ($script:cleanupErrors.Count -gt 0) { throw ($script:cleanupErrors -join ' ') }
     $report.cleanup.repositoryAclRestored = $true
@@ -795,6 +837,7 @@ try {
     if ($childExited) {
         if ($accountCreated) {
             try {
+                Assert-NoTemporaryUserProcesses
                 Revoke-TemporaryAccess
                 if ($script:cleanupErrors.Count -gt 0) { throw ($script:cleanupErrors -join ' ') }
                 $report.cleanup.repositoryAclRestored = $true

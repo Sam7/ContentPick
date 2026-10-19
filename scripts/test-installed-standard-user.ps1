@@ -95,6 +95,24 @@ function Revoke-TemporaryAccess {
     }
 }
 
+function Restore-RunnerOwnershipOfSmokeArtifacts {
+    $resultsFullPath = [System.IO.Path]::GetFullPath($resultsDir)
+    $outputPrefix = [System.IO.Path]::GetFullPath($outputRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $resultsFullPath.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Refusing to restore ownership outside the dedicated smoke output directory.'
+    }
+    $entries = @((Get-Item -LiteralPath $resultsFullPath -Force)) + @(Get-ChildItem -LiteralPath $resultsFullPath -Force -Recurse)
+    foreach ($entry in $entries) {
+        if ($entry.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Refusing to restore artifact ownership through a reparse point: $($entry.FullName)."
+        }
+    }
+    $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if ($runnerSid -eq $script:userSid) { throw 'Refusing to restore smoke artifact ownership to the disposable user.' }
+    & icacls.exe $resultsFullPath /setowner "*$runnerSid" /T /C /Q /L
+    if ($LASTEXITCODE -ne 0) { throw "Could not restore runner ownership for disposable Playwright artifacts (icacls exit $LASTEXITCODE)." }
+}
+
 function ConvertTo-PowerShellLiteral {
     param([Parameter(Mandatory = $true)] [string]$Value)
     return "'" + $Value.Replace("'", "''") + "'"
@@ -251,7 +269,17 @@ try {
     Grant-TemporaryAccess -Path $outputRoot -Rights 'M'
     Grant-TemporaryAccess -Path $resultsDir -Rights 'M' -Inheritable
     Grant-TemporaryAccess -Path $tempDir -Rights 'M' -Inheritable
-    Grant-TemporaryAccess -Path $corepackDir -Rights 'M' -Inheritable
+    $previousCorepackHome = $env:COREPACK_HOME
+    try {
+        $env:COREPACK_HOME = $corepackDir
+        $corepackCommand = Get-Command corepack.cmd -ErrorAction Stop | Select-Object -First 1
+        & $corepackCommand.Source pnpm --version
+        if ($LASTEXITCODE -ne 0) { throw "Could not prewarm the pinned pnpm package manager (Corepack exit $LASTEXITCODE)." }
+    } finally {
+        if ($null -eq $previousCorepackHome) { Remove-Item Env:COREPACK_HOME -ErrorAction SilentlyContinue }
+        else { $env:COREPACK_HOME = $previousCorepackHome }
+    }
+    Grant-TemporaryAccess -Path $corepackDir -Rights 'RX' -Inheritable -Recursive
 
     $nodeCommand = Get-Command node.exe -ErrorAction Stop | Select-Object -First 1
     $nodeHome = Split-Path -Parent $nodeCommand.Source
@@ -373,9 +401,13 @@ $childSessionId = [int]$child.SessionId
 } finally {
     if ($childExited) {
         try { Remove-NsisTemporaryUninstaller -TemporaryDirectory $tempDir } catch { $script:cleanupErrors.Add("Could not remove the verified NSIS temporary uninstaller: $_") }
-        if ($script:userSid) { Revoke-TemporaryAccess }
+        if ($script:userSid) {
+            try { Restore-RunnerOwnershipOfSmokeArtifacts } catch { $script:cleanupErrors.Add("Could not safely restore runner ownership of smoke artifacts: $_") }
+            Revoke-TemporaryAccess
+        }
         if ($accountCreated) {
             try {
+                if ($script:cleanupErrors.Count -gt 0) { throw 'Smoke access/ownership cleanup failed; preserving the temporary account and profile.' }
                 $userProfile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$script:userSid'" -ErrorAction SilentlyContinue
                 if ($userProfile) {
                     $profilePath = [System.IO.Path]::GetFullPath([string]$userProfile.LocalPath)

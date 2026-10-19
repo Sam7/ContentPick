@@ -26,6 +26,23 @@ test('process baseline cleanup accepts an empty pre-existing process snapshot', 
   assert.match(installerSource, /\[AllowEmptyCollection\(\)\]\s*\[object\[\]\]\$ProcessBaseline/);
 });
 
+test('standard-user Corepack cache is prewarmed by the runner and read-only for the disposable account', async () => {
+  const source = await readFile(cleanupScriptPath, 'utf8');
+  assert.match(source, /\$env:COREPACK_HOME = \$corepackDir[\s\S]*?corepack\.cmd[\s\S]*?pnpm --version/);
+  assert.match(source, /Grant-TemporaryAccess -Path \$corepackDir -Rights 'RX' -Inheritable -Recursive/);
+  assert.doesNotMatch(source, /Grant-TemporaryAccess -Path \$corepackDir -Rights 'M'/);
+});
+
+test('Playwright artifacts regain runner ownership only inside the verified output subtree', async () => {
+  const source = await readFile(cleanupScriptPath, 'utf8');
+  assert.match(source, /function Restore-RunnerOwnershipOfSmokeArtifacts/);
+  assert.match(source, /Refusing to restore ownership outside the dedicated smoke output directory/);
+  assert.match(source, /\$entries = @\(\(Get-Item[^\n]+\)\) \+ @\(Get-ChildItem[^\n]+-Recurse\)/);
+  assert.match(source, /FileAttributes\]::ReparsePoint/);
+  assert.match(source, /icacls\.exe \$resultsFullPath \/setowner "\*\$runnerSid" \/T \/C \/Q \/L/);
+  assert.match(source, /Restore-RunnerOwnershipOfSmokeArtifacts[\s\S]*?Revoke-TemporaryAccess/);
+});
+
 test('NSIS temp cleanup removes only an owned and idle uninstaller from the isolated temp directory', async () => {
   const source = await readFile(cleanupScriptPath, 'utf8');
   assert.match(source, /function Remove-NsisTemporaryUninstaller/);

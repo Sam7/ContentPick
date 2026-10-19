@@ -84,7 +84,22 @@ test('checkout-root access does not inherit and report permissions target an exi
 
 test('failure-path cleanup records restored repository ACLs only after successful revocation', () => {
   const finallyBlock = script.slice(script.lastIndexOf('} finally {'));
-  assert.match(finallyBlock, /Revoke-TemporaryAccess\s+if \(\$script:cleanupErrors\.Count -gt 0\) \{ throw[\s\S]*?\$report\.cleanup\.repositoryAclRestored = \$true/);
+  assert.match(finallyBlock, /Assert-NoTemporaryUserProcesses\s+Revoke-TemporaryAccess\s+if \(\$script:cleanupErrors\.Count -gt 0\) \{ throw[\s\S]*?\$report\.cleanup\.repositoryAclRestored = \$true/);
+});
+
+test('temporary standard-user processes are audited before account and ACL cleanup', () => {
+  assert.match(script, /function Assert-NoTemporaryUserProcesses/);
+  assert.match(script, /Invoke-CimMethod -InputObject \$process -MethodName GetOwnerSid -ErrorAction Stop/);
+  assert.match(script, /\[int\]\$owner\.ReturnValue -ne 0/);
+  assert.match(script, /\$null -eq \$owner -or \[int\]\$owner\.ReturnValue -ne 0/);
+  assert.match(script, /temporaryUserProcessBaseline\[\[int\]\$process\.ProcessId\]/);
+  assert.match(script, /\[int\]\$process\.SessionId -ne \[int\]\$script:temporaryUserSessionId/);
+  assert.match(script, /\$script:temporaryUserProcessBaseline = @\{\}/);
+  assert.match(script, /Could not recheck process \$\(\$process\.ProcessId\) after its owner SID lookup failed/);
+  assert.match(script, /Property CreationDate, SessionId -ErrorAction Stop/);
+  assert.match(script, /Temporary standard-user processes remain; preserving its profile, account, and repository ACLs/);
+  const cleanup = script.slice(script.indexOf('function Assert-NoTemporaryUserProcesses'));
+  assert.match(cleanup, /Assert-NoTemporaryUserProcesses\s+Revoke-TemporaryAccess/);
 });
 
 test('installed MSIX Playwright checks skip the unused Vite development server', async () => {
@@ -101,11 +116,18 @@ test('installed MSIX fixture activates by AUMID with test-only loopback WebView2
   assert.match(standardUserScript, /CONTEXTPICK_NATIVE_AUMID = "\$\(\$installed\[0\]\.PackageFamilyName\)!\$\(\$applicationNode\.GetAttribute\('Id'\)\)"/);
   assert.match(fixture, /if \(appUserModelId\) \{[\s\S]*?activatePackagedApplication\(appUserModelId, nativeExe\)/);
   assert.match(fixture, /CONTEXTPICK_NATIVE_DEBUG_PORT/);
-  assert.match(fixture, /ActivateApplication\(\$env:CONTEXTPICK_NATIVE_AUMID/);
+  assert.match(fixture, /IApplicationActivationManager[\s\S]*?CoCreateInstance\(\[ref\]\$clsid, \[IntPtr\]::Zero, 0x1/);
+  assert.match(fixture, /AUMID activation failed \(HRESULT 0x/);
   assert.match(fixture, /owner\.Sid -ne \$identity\.User\.Value/);
   assert.match(fixture, /process\.SessionId -ne \$sessionId/);
+  assert.match(fixture, /CONTEXT_PICK_ACTIVATED /);
+  assert.match(fixture, /\[Console\]::In\.ReadLine\(\)/);
+  assert.match(fixture, /releaseActivationHost\(activationHost\)/);
+  assert.match(fixture, /let activationHost: ChildProcess \| undefined/);
+  assert.match(fixture, /await expect\(page\.getByRole\('tree', \{ name: 'Workspace files' \}\)\)\.toBeVisible\(\);\s*if \(appUserModelId\) \{ await releaseActivationHost\(activationHost\); activationHost = undefined; \}/);
   assert.match(fixture, /hasCdpListenerInProcessTree\(port, root\)/);
-  assert.match(fixture, /LocalAddress -notin @\('127\.0\.0\.1', '::1'\)/);
+  assert.match(fixture, /LocalAddress -ne '127\.0\.0\.1'/);
+  assert.match(fixture, /\[GC\]::KeepAlive\(\$manager\)/);
   assert.doesNotMatch(fixture, /Software\\Policies\\Microsoft\\Edge\\WebView2/);
 
   const lifecycleScript = await readFile(new URL('./test-store-msix.ps1', import.meta.url), 'utf8');

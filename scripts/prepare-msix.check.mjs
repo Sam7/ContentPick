@@ -26,7 +26,7 @@ async function fixture() {
     await mkdir(path.dirname(source), { recursive: true });
     await writeFile(source, `synthetic:${file}`);
   }
-  await writeFile(path.join(root, 'src-tauri/tauri.conf.json'), JSON.stringify({ version: '0.9.1' }));
+  await writeFile(path.join(root, 'src-tauri/tauri.conf.json'), JSON.stringify({ version: '0.9.2' }));
   await mkdir(path.join(root, 'packaging/msix'), { recursive: true });
   await copyFile(path.join(repoRoot, 'packaging/msix/Package.appxmanifest.template.xml'), path.join(root, 'packaging/msix/Package.appxmanifest.template.xml'));
   return root;
@@ -42,10 +42,10 @@ test('prepares a complete MSIX package layout with reserved Store identity and m
   await writeFile(path.join(outputDir, 'stale-package-content.txt'), 'old');
   try {
     const result = await prepare(root, outputDir);
-    assert.equal(result.packageVersion, '1.9.1.0');
+    assert.equal(result.packageVersion, '1.9.2.0');
     assert.equal(result.identityName, 'DotSam.ContextPick');
     const manifest = await readFile(path.join(outputDir, 'Package.appxmanifest'), 'utf8');
-    assert.match(manifest, /Name="DotSam\.ContextPick"\s+Publisher="CN=9CF819D8-048A-42F9-91C4-E85E76577891"\s+Version="1\.9\.1\.0"/);
+    assert.match(manifest, /Name="DotSam\.ContextPick"\s+Publisher="CN=9CF819D8-048A-42F9-91C4-E85E76577891"\s+Version="1\.9\.2\.0"/);
     assert.match(manifest, /<PublisherDisplayName>DotSam<\/PublisherDisplayName>/);
     assert.match(manifest, /MinVersion="10\.0\.26200\.0" MaxVersionTested="10\.0\.26200\.9457"/);
     assert.doesNotMatch(manifest, /\{\{[A-Z_]+\}\}/);

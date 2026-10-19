@@ -2,6 +2,7 @@ import { test as base, expect } from '@playwright/test';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { access, copyFile, cp, lstat, mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import type { Writable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Browser, Page } from '@playwright/test';
@@ -205,9 +206,13 @@ async function waitForCdp(port: number, root: { processId: number; executablePat
 
 type PackagedRootIdentity = { processId: number; creationTicks: string; executablePath: string; sessionId: number; ownerSid: string };
 
-async function activatePackagedApplication(appUserModelId: string, expectedExecutablePath: string): Promise<PackagedRootIdentity> {
+type PackagedActivation = { identity: PackagedRootIdentity; host: ChildProcess };
+
+async function activatePackagedApplication(appUserModelId: string, expectedExecutablePath: string): Promise<PackagedActivation> {
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -227,32 +232,86 @@ foreach ($existing in Get-CimInstance Win32_Process -Property ProcessId,Executab
 $clsid = [Guid]'45BA127D-10A8-46EA-8AB7-56EA9078943C'
 $iid = [Guid]'2e941141-7f97-4756-ba1d-9decde894a3d'
 $manager = $null
-$activationResult = [ContextPickActivation]::CoCreateInstance([ref]$clsid, [IntPtr]::Zero, 0x4, [ref]$iid, [ref]$manager)
-if ($activationResult -lt 0) { throw [ComponentModel.Win32Exception]::new($activationResult) }
+$activationResult = [ContextPickActivation]::CoCreateInstance([ref]$clsid, [IntPtr]::Zero, 0x1, [ref]$iid, [ref]$manager)
+if ($activationResult -lt 0) { throw "In-process ApplicationActivationManager creation failed (HRESULT 0x$($activationResult.ToString('X8')))." }
 [uint32]$processId = 0
 $hresult = $manager.ActivateApplication($env:CONTEXTPICK_NATIVE_AUMID, '', 0, [ref]$processId)
-if ($hresult -lt 0) { throw [ComponentModel.Win32Exception]::new($hresult) }
-if ($baselinePids.Contains([int]$processId)) { throw 'AUMID activation reused a process that existed before this fixture launch.' }
-$process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -Property ProcessId,ExecutablePath,CreationDate,SessionId
-if (-not $process) { throw "AUMID activation returned missing PID $processId." }
-if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$process.ExecutablePath), $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw "AUMID activation returned a process at an unexpected path." }
-$creationTicks = [long]$process.CreationDate.ToUniversalTime().Ticks
-if ($creationTicks -lt $activationStartedTicks) { throw 'AUMID activation returned a process that predates this fixture launch.' }
+if ($hresult -lt 0) { throw "AUMID activation failed (HRESULT 0x$($hresult.ToString('X8')))." }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
 $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
-if (-not $owner.Sid -or $owner.Sid -ne $identity.User.Value) { throw 'AUMID activation returned a process owned by a different user.' }
-if ([int]$process.SessionId -ne $sessionId) { throw 'AUMID activation returned a process in a different session.' }
-[pscustomobject]@{ processId=[int]$processId; creationTicks=[string]$creationTicks; executablePath=$expectedPath; sessionId=$sessionId; ownerSid=[string]$owner.Sid } | ConvertTo-Json -Compress
+if ($baselinePids.Contains([int]$processId)) { throw 'AUMID activation reused a process that existed before this fixture launch.' }
+  $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -Property ProcessId,ExecutablePath,CreationDate,SessionId
+  if (-not $process) { throw "AUMID activation returned missing PID $processId." }
+  if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$process.ExecutablePath), $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw "AUMID activation returned a process at an unexpected path." }
+  $creationTicks = [long]$process.CreationDate.ToUniversalTime().Ticks
+  if ($creationTicks -lt $activationStartedTicks) { throw 'AUMID activation returned a process that predates this fixture launch.' }
+  $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+  if (-not $owner.Sid -or $owner.Sid -ne $identity.User.Value) { throw 'AUMID activation returned a process owned by a different user.' }
+  if ([int]$process.SessionId -ne $sessionId) { throw 'AUMID activation returned a process in a different session.' }
+[GC]::KeepAlive($manager)
+[Console]::Out.WriteLine('CONTEXT_PICK_ACTIVATED ' + ([pscustomobject]@{ processId=[int]$processId; creationTicks=[string]$creationTicks; executablePath=$expectedPath; sessionId=$sessionId; ownerSid=[string]$owner.Sid } | ConvertTo-Json -Compress))
+[Console]::Out.Flush()
+[void][Console]::In.ReadLine()
+[GC]::KeepAlive($manager)
 `;
-  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+  const host = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,
-    timeout: 20_000,
+    stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, CONTEXTPICK_NATIVE_AUMID: appUserModelId, CONTEXTPICK_NATIVE_EXECUTABLE: expectedExecutablePath },
   });
-  const result = JSON.parse(stdout.trim()) as PackagedRootIdentity;
-  if (!Number.isInteger(result.processId) || result.processId <= 0 || !/^\d+$/.test(result.creationTicks) || !result.ownerSid) throw new Error('AUMID activation returned an incomplete process identity.');
-  return result;
+  let stderrTail = '';
+  host.stderr?.on('data', (chunk: Buffer) => { stderrTail = `${stderrTail}${chunk.toString('utf8')}`.slice(-4_000); });
+  let identity: PackagedRootIdentity;
+  try {
+    identity = await new Promise<PackagedRootIdentity>((resolve, reject) => {
+    let output = '';
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error(`Timed out waiting for standard-user AUMID activation.${stderrTail ? ` ${stderrTail}` : ''}`)), 25_000);
+    const finish = (error?: Error, value?: PackagedRootIdentity) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else if (value) resolve(value);
+      else reject(new Error('AUMID activation helper returned no process identity.'));
+    };
+    host.once('error', (error) => finish(error));
+    host.once('close', (code, signal) => finish(new Error(`AUMID activation helper exited before reporting its process identity (code ${code}, signal ${signal}).${stderrTail ? ` ${stderrTail}` : ''}`)));
+    host.stdout?.on('data', (chunk: Buffer) => {
+      output = `${output}${chunk.toString('utf8')}`.slice(-8_000);
+      const lines = output.split(/\r?\n/);
+      for (const line of lines) {
+        const prefix = 'CONTEXT_PICK_ACTIVATED ';
+        if (!line.startsWith(prefix)) continue;
+        try {
+          const result = JSON.parse(line.slice(prefix.length)) as PackagedRootIdentity;
+          if (!Number.isInteger(result.processId) || result.processId <= 0 || !/^\d+$/.test(result.creationTicks) || !result.ownerSid) throw new Error('AUMID activation returned an incomplete process identity.');
+          finish(undefined, result);
+        } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+        return;
+      }
+    });
+    });
+  } catch (error) {
+    try { await releaseActivationHost(host); } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'AUMID activation failed and the helper process could not be released cleanly.', { cause: cleanupError });
+    }
+    throw error;
+  }
+  return { identity, host };
+}
+
+async function releaseActivationHost(host: ChildProcess | undefined): Promise<void> {
+  if (!host || host.exitCode !== null || host.signalCode !== null) return;
+  const closed = new Promise<void>((resolve) => host.once('close', () => resolve()));
+  (host.stdin as Writable | null)?.end('\n');
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = await Promise.race([closed.then(() => false), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), 5_000); })]);
+  if (timer) clearTimeout(timer);
+  if (!timedOut) return;
+  host.kill();
+  await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+  if (host.exitCode === null && host.signalCode === null) throw new Error('Could not release the in-process AUMID activation helper.');
 }
 
 async function isVerifiedNativeProcessRunning(processId: number, expectedExecutablePath: string, creationTicks?: string): Promise<boolean> {
@@ -281,7 +340,7 @@ $processes = @{}
 foreach ($item in $all) { $processes[[int]$item.ProcessId] = $item }
 $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$env:CONTEXTPICK_CDP_PORT) -ErrorAction SilentlyContinue)
 foreach ($listener in $listeners) {
-  if ([string]$listener.LocalAddress -notin @('127.0.0.1', '::1')) { continue }
+  if ([string]$listener.LocalAddress -ne '127.0.0.1') { continue }
   $current = [int]$listener.OwningProcess
   $seen = [System.Collections.Generic.HashSet[int]]::new()
   while ($current -ne [int]$env:CONTEXTPICK_CDP_ROOT_PID -and $processes.ContainsKey($current) -and $seen.Add($current)) { $current = [int]$processes[$current].ParentProcessId }
@@ -545,6 +604,7 @@ export const test = base.extend<NativeFixtures>({
       if (!requestedRealPath || requestedRealPath !== repoRealPath) throw new Error('The real-workspace fixture is restricted to the checked-out ContextPick repository.');
     }
     let child: ChildProcess | undefined;
+    let activationHost: ChildProcess | undefined;
     let activeProcessId: number | undefined;
     let activeRootIdentity: PackagedRootIdentity | undefined;
     let browser: Browser | undefined;
@@ -560,10 +620,11 @@ export const test = base.extend<NativeFixtures>({
       page = undefined;
       await memorySampler.stop();
       let processCleanupError: unknown;
+      try { await releaseActivationHost(activationHost); activationHost = undefined; } catch (error) { processCleanupError = error; }
       try {
         if (activeProcessId !== undefined) await stopTree(activeProcessId, child, memorySampler.processIdentities(), nativeExe, activeRootIdentity?.creationTicks);
       } catch (error) {
-        processCleanupError = error;
+        processCleanupError = processCleanupError ? new AggregateError([processCleanupError, error], 'Native process cleanup failed.') : error;
       }
       if (processCleanupError) throw processCleanupError;
       child = undefined;
@@ -582,7 +643,9 @@ export const test = base.extend<NativeFixtures>({
       }
       const port = appUserModelId ? packagedDebugPort! : await availablePort();
       if (appUserModelId) {
-        activeRootIdentity = await activatePackagedApplication(appUserModelId, nativeExe);
+        const activation = await activatePackagedApplication(appUserModelId, nativeExe);
+        activeRootIdentity = activation.identity;
+        activationHost = activation.host;
         activeProcessId = activeRootIdentity.processId;
         memorySampler.start(activeProcessId, nativeExe, activeRootIdentity.creationTicks);
       } else {
@@ -620,6 +683,7 @@ export const test = base.extend<NativeFixtures>({
       if (requestedWorkspace) await expect(page.locator('.workspace-path')).toHaveAttribute('title', root);
       else await expect(page.locator('.workspace-path')).toContainText(path.basename(ownedDir));
       await expect(page.getByRole('tree', { name: 'Workspace files' })).toBeVisible();
+      if (appUserModelId) { await releaseActivationHost(activationHost); activationHost = undefined; }
       await expect(page.locator('.panel-heading p').first()).toContainText('items discovered', { timeout: 60_000 });
       if (nativeScale) await expect(page.locator('.panel-heading p').first()).toHaveText('20004 items discovered', { timeout: 120_000 });
       await expect(page.getByRole('button', { name: 'Copy context' })).toBeEnabled();

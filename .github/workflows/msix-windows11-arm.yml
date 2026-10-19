@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ['v*']
     paths:
       - '.github/workflows/msix-windows11-arm.yml'
       - 'crates/**'
@@ -86,3 +87,122 @@ jobs:
           path: ${{ runner.temp }}/contextpick-msix-validation/**
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Retain unsigned Store submission package
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          $source = Join-Path $env:RUNNER_TEMP "contextpick-msix-validation/ContextPick-$version.msix"
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Unsigned Store candidate is missing: $source." }
+          $destination = Join-Path $env:RUNNER_TEMP 'contextpick-store-submit'
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          Copy-Item -LiteralPath $source -Destination $destination
+
+      - name: Upload unsigned Store submission package
+        uses: actions/upload-artifact@v4
+        with:
+          name: contextpick-msix-store-candidate-${{ github.run_number }}-${{ github.sha }}
+          path: ${{ runner.temp }}/contextpick-store-submit/ContextPick-*.msix
+          if-no-files-found: error
+          retention-days: 14
+
+  submit-microsoft-store:
+    name: Submit verified MSIX to Microsoft Store
+    if: startsWith(github.ref, 'refs/tags/v') && vars.MSSTORE_PUBLISH_ENABLED == 'true'
+    needs: msix-lifecycle
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Require Microsoft Store publishing credentials
+        shell: pwsh
+        env:
+          TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+        run: |
+          $missing = @('TENANT_ID', 'CLIENT_ID', 'CLIENT_SECRET', 'SELLER_ID') | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) }
+          if ($missing.Count -gt 0) { throw "Microsoft Store publishing is enabled, but these repository secrets are missing: $($missing -join ', ')." }
+
+      - name: Wait for CI on this tag and require success
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $deadline = [DateTime]::UtcNow.AddMinutes(150)
+          $run = $null
+          do {
+            $runs = gh run list --workflow ci.yml --commit $env:GITHUB_SHA --limit 100 --json status,conclusion,headBranch,event,headSha,databaseId | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Could not query the CI workflow run.' }
+            $run = $runs | Where-Object { $_.headSha -eq $env:GITHUB_SHA -and $_.headBranch -ceq $env:GITHUB_REF_NAME -and $_.event -eq 'push' } | Select-Object -First 1
+            if ($run -and $run.status -eq 'completed') {
+              if ($run.conclusion -ne 'success') { throw "CI run $($run.databaseId) concluded $($run.conclusion); Store submission cancelled." }
+              break
+            }
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'Timed out waiting for the CI workflow run for this tag.' }
+            Start-Sleep -Seconds 30
+          } while ($true)
+          Write-Output "CI run $($run.databaseId) succeeded for commit $env:GITHUB_SHA."
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: contextpick-msix-store-candidate-${{ github.run_number }}-${{ github.sha }}
+          path: store-package
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: contextpick-msix-win11-arm64-${{ github.run_number }}-${{ github.sha }}
+          path: lifecycle-evidence
+
+      - name: Verify package identity, version, and checksum
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -cne "v$version") { throw "Tag $env:GITHUB_REF_NAME does not match app version $version." }
+          $package = Join-Path $PWD "store-package/ContextPick-$version.msix"
+          if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { throw "Store package is missing: $package." }
+          $reports = @(Get-ChildItem -LiteralPath 'lifecycle-evidence' -Filter 'lifecycle-evidence.json' -File -Recurse)
+          if ($reports.Count -ne 1) { throw "Expected one lifecycle report for the candidate, found $($reports.Count)." }
+          $report = Get-Content -LiteralPath $reports[0].FullName -Raw | ConvertFrom-Json
+          if ($report.status -cne 'passed') { throw "Lifecycle report status is not passed: $($report.status)." }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($package)
+          try {
+            $entry = $archive.GetEntry('AppxManifest.xml')
+            if (-not $entry) { throw 'AppxManifest.xml is missing.' }
+            if ($archive.GetEntry('AppxSignature.p7x')) { throw 'Store submission candidate must remain unsigned.' }
+            $reader = [IO.StreamReader]::new($entry.Open())
+            try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            $identity = $manifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
+            if ($identity.GetAttribute('Name') -cne 'DotSam.ContextPick' -or $identity.GetAttribute('Publisher') -cne 'CN=9CF819D8-048A-42F9-91C4-E85E76577891' -or $identity.GetAttribute('Version') -cne "$([int]($version.Split('.')[0]) + 1).$($version.Split('.')[1]).$($version.Split('.')[2]).0" -or $identity.GetAttribute('ProcessorArchitecture') -notmatch 'x64') {
+              throw "Unexpected Store package identity: $($identity.OuterXml)"
+            }
+          } finally { $archive.Dispose() }
+          $hash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -cne [string]$report.package.sha256Unsigned) { throw "Downloaded MSIX hash $hash does not match the lifecycle-verified candidate $($report.package.sha256Unsigned)." }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "STORE_PACKAGE_PATH=$package" -Encoding utf8
+          Write-Output "Verified Store package SHA-256 against lifecycle report: $hash"
+
+      - name: Configure Microsoft Store Developer CLI
+        uses: microsoft/microsoft-store-apppublisher@cc9910a8d59f2eb55cbb83df0a3800cf3b5300e0 # v1.4
+        with:
+          version: v0.4.3
+
+      - name: Submit package to Microsoft Store
+        shell: pwsh
+        env:
+          TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+        run: |
+          msstore reconfigure --tenantId "$env:TENANT_ID" --sellerId "$env:SELLER_ID" --clientId "$env:CLIENT_ID" --clientSecret "$env:CLIENT_SECRET"
+          if ($LASTEXITCODE -ne 0) { throw 'Microsoft Store CLI configuration failed.' }
+          msstore publish "$env:STORE_PACKAGE_PATH" -id 9NJ3T87DK1SJ
+          if ($LASTEXITCODE -ne 0) { throw 'Microsoft Store package submission failed.' }
