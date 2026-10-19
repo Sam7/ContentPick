@@ -114,6 +114,79 @@ function Wait-ForContextPickRemoval {
     } while ([DateTime]::UtcNow -lt $deadline)
     return $false
 }
+function Stop-InstallerLaunchedContextPick {
+    param(
+        [Parameter(Mandatory = $true)] [DateTime]$InstallerStartedAt,
+        [Parameter(Mandatory = $true)] [object[]]$ProcessBaseline
+    )
+
+    $script:processTreeStopped = $false
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $baselineKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($baselineProcess in $ProcessBaseline) {
+        $baselineKey = '{0}|{1}|{2}' -f [int]$baselineProcess.ProcessId, $baselineProcess.CreationDate.ToUniversalTime().Ticks, [string]$baselineProcess.ExecutablePath
+        $null = $baselineKeys.Add($baselineKey)
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    $processes = @()
+    do {
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='contextpick.exe'" -Property ProcessId, ParentProcessId, SessionId, ExecutablePath, CreationDate)
+        if ($processes.Count -gt 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    foreach ($candidate in $processes) {
+        $candidatePath = [string]$candidate.ExecutablePath
+        if (-not $candidatePath.Equals($installedExe, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to stop unexpected ContextPick process $($candidate.ProcessId) at $candidatePath."
+        }
+        if ([int]$candidate.SessionId -ne $sessionId) {
+            throw "Refusing to stop ContextPick process $($candidate.ProcessId) from another Windows session."
+        }
+        if ($null -eq $candidate.CreationDate -or $candidate.CreationDate.ToUniversalTime() -lt $InstallerStartedAt) {
+            throw "Refusing to stop ContextPick process $($candidate.ProcessId) that predates this installer run."
+        }
+        $candidateKey = '{0}|{1}|{2}' -f [int]$candidate.ProcessId, $candidate.CreationDate.ToUniversalTime().Ticks, $candidatePath
+        if ($baselineKeys.Contains($candidateKey)) {
+            throw "Refusing to stop ContextPick process $($candidate.ProcessId) that existed before this installer run."
+        }
+        $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop
+        if ($owner.ReturnValue -ne 0 -or [string]$owner.Sid -ne $identity.User.Value) {
+            throw "Refusing to stop ContextPick process $($candidate.ProcessId) owned by another account."
+        }
+
+        $process = Get-Process -Id ([int]$candidate.ProcessId) -ErrorAction SilentlyContinue
+        if (-not $process) { throw "ContextPick process $($candidate.ProcessId) exited before its process identity could be revalidated." }
+        try {
+            $handlePath = $process.Path
+            $handleStartTime = $process.StartTime.ToUniversalTime()
+            $snapshotStartTime = $candidate.CreationDate.ToUniversalTime()
+            if (-not [string]::Equals([string]$handlePath, $installedExe, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing to stop PID $($process.Id) because its opened process handle points to $handlePath."
+            }
+            # CIM timestamps and Process.StartTime can differ slightly due to
+            # precision conversion, but a 1 ms bound avoids accepting a reused PID.
+            if ($handleStartTime -lt $InstallerStartedAt -or [Math]::Abs(($handleStartTime - $snapshotStartTime).TotalMilliseconds) -gt 1) {
+                throw "Refusing to stop PID $($process.Id) because its opened process handle does not match the installer-time process snapshot."
+            }
+            $descendants = @(Get-DescendantProcessIds -RootProcessId $process.Id)
+            if ($process.MainWindowHandle -ne 0) {
+                $null = $process.CloseMainWindow()
+                if ($process.WaitForExit(5000) -and (Wait-ForProcessTreeExit -RootProcessId $process.Id -DescendantProcessIds $descendants -TimeoutSeconds 5)) {
+                    continue
+                }
+            }
+            if (-not $process.HasExited) { $process.Kill($true) }
+            if (-not $process.WaitForExit(5000) -or -not (Wait-ForProcessTreeExit -RootProcessId $process.Id -DescendantProcessIds $descendants -TimeoutSeconds 5)) {
+                throw "Could not stop installer-launched ContextPick process tree rooted at PID $($process.Id)."
+            }
+        } finally {
+            $process.Dispose()
+        }
+    }
+    $script:processTreeStopped = $true
+}
 if (Test-Path -LiteralPath $appConfigDir) {
     throw "Refusing to use existing ContextPick settings at $appConfigDir. Run this smoke test under a clean Windows user profile."
 }
@@ -148,10 +221,13 @@ try {
     $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
     Write-Output "Test identity: $($currentIdentity.Name) ($($currentIdentity.User.Value))"
     Write-Output "Test session: $([Diagnostics.Process]::GetCurrentProcess().SessionId)"
+    $contextPickProcessBaseline = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='contextpick.exe'" -Property ProcessId, SessionId, ExecutablePath, CreationDate)
 
     $installationAttempted = $true
+    $installerStartedAt = [DateTime]::UtcNow
     $installExitCode = Invoke-BoundedProcess -FilePath $installer -ArgumentList @('/S') -Operation 'Silent NSIS install' -TimeoutSeconds 1200
     if ($installExitCode -ne 0) { throw "Silent NSIS install failed with exit code $installExitCode." }
+    Stop-InstallerLaunchedContextPick -InstallerStartedAt $installerStartedAt -ProcessBaseline $contextPickProcessBaseline
     $registration = @(
         Get-ChildItem -LiteralPath $uninstallRoot -ErrorAction SilentlyContinue |
             Get-ItemProperty -ErrorAction SilentlyContinue |

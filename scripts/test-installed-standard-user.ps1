@@ -72,6 +72,14 @@ function Revoke-TemporaryAccess {
         }
     }
 
+    # Reset restores inherited permissions, but ACL inheritance can leave the
+    # temporary SID on generated descendants. Remove that SID across this
+    # dedicated output tree before verifying no grant remains.
+    & icacls.exe $outputRoot /remove:g "*$script:userSid" /T /C /Q /L
+    if ($LASTEXITCODE -ne 0) {
+        $script:cleanupErrors.Add("Could not remove temporary smoke-user access from ${outputRoot} (icacls exit $LASTEXITCODE).")
+    }
+
     $findOutputRootOptions = @('/findsid', "*$script:userSid", '/T', '/C', '/Q', '/L')
     $remainingEntries = @(& icacls.exe $outputRoot @findOutputRootOptions 2>&1)
     $findSidExitCode = $LASTEXITCODE
@@ -117,6 +125,41 @@ function Wait-ForProcessTreeExit {
     } while ([DateTime]::UtcNow -lt $deadline)
 
     return $false
+}
+
+function Assert-NoTemporaryAccountProcesses {
+    param(
+        [Parameter(Mandatory = $true)] [int]$SessionId,
+        [Parameter(Mandatory = $true)] [object[]]$ProcessBaseline
+    )
+
+    $baselineKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($baselineProcess in $ProcessBaseline) {
+        if ([int]$baselineProcess.SessionId -eq $SessionId -and $null -ne $baselineProcess.CreationDate) {
+            $baselineKey = '{0}|{1}' -f [int]$baselineProcess.ProcessId, $baselineProcess.CreationDate.ToUniversalTime().Ticks
+            $null = $baselineKeys.Add($baselineKey)
+        }
+    }
+    $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "SessionId=$SessionId" -Property ProcessId, SessionId, Name, CreationDate)
+    foreach ($process in $processes) {
+        if ([int]$process.SessionId -ne $SessionId) { continue }
+        $creationTicks = if ($null -ne $process.CreationDate) { $process.CreationDate.ToUniversalTime().Ticks } else { 'unknown' }
+        $processKey = '{0}|{1}' -f [int]$process.ProcessId, $creationTicks
+        $wasPresentBeforeChild = $baselineKeys.Contains($processKey)
+        try {
+            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+        } catch {
+            if ($wasPresentBeforeChild) { continue }
+            throw "Could not verify the owner of process $($process.ProcessId) ($($process.Name)) in the standard-user smoke session; preserving the temporary account and ACLs: $_"
+        }
+        if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace([string]$owner.Sid)) {
+            if ($wasPresentBeforeChild) { continue }
+            throw "Could not verify the owner of process $($process.ProcessId) ($($process.Name)) in the standard-user smoke session (GetOwnerSid returned $($owner.ReturnValue)); preserving the temporary account and ACLs."
+        }
+        if ([string]$owner.Sid -eq $script:userSid) {
+            throw "Temporary smoke account still owns process $($process.ProcessId) ($($process.Name)); preserving the account and ACLs for runner teardown."
+        }
+    }
 }
 
 if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw 'PowerShell 7.4 or newer is required.' }
@@ -270,11 +313,14 @@ try {
         throw "Standard-user smoke launch command line exceeds the CreateProcessWithLogonW 1,024-character limit ($childCommandLineLength)."
     }
 
+    $processBaseline = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, SessionId, CreationDate)
     $child = Start-Process -FilePath $pwshPath `
         -ArgumentList $childArguments `
         -Credential $credential -LoadUserProfile -Environment $environment `
         -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+$childExited = $false
+$childSessionId = [int]$child.SessionId
 
     if (-not $child.WaitForExit(30 * 60 * 1000)) {
         $childExited = $false
@@ -283,6 +329,7 @@ try {
             if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) {
                 throw 'The timed-out standard-user smoke process tree did not stop.'
             }
+            Assert-NoTemporaryAccountProcesses -SessionId $childSessionId -ProcessBaseline $processBaseline
             $childExited = $true
         } catch {
             throw "Standard-user smoke exceeded 30 minutes and its process tree could not be confirmed stopped: $_"
@@ -295,6 +342,7 @@ try {
     if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) {
         throw 'The standard-user smoke process exited while a descendant process was still running.'
     }
+    Assert-NoTemporaryAccountProcesses -SessionId $childSessionId -ProcessBaseline $processBaseline
     $childExited = $true
     if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath }
     if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Warning $_ } }

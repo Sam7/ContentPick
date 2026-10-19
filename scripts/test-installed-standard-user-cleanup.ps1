@@ -79,6 +79,22 @@ $findCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/findsid' })
 if ($findCalls.Count -ne 2) { throw "Expected the final output-root verification and one unrelated path verification, got $($findCalls.Count)." }
 $resetCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/reset' })
 if ($resetCalls.Count -ne 7) { throw "Expected root and scratch-directory ACL resets, got $($resetCalls.Count)." }
+$outputSweepCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/remove:g' -and $_ -contains $outputRoot })
+if ($outputSweepCalls.Count -ne 1) { throw "Expected one recursive output-tree SID cleanup sweep, got $($outputSweepCalls.Count)." }
+$outputSweep = @($outputSweepCalls[0])
+if (@($outputSweep | Where-Object { $_ -eq "*$script:userSid" }).Count -ne 1 -or @($outputSweep | Where-Object { $_ -eq '/T' }).Count -ne 1 -or @($outputSweep | Where-Object { $_ -eq '/L' }).Count -ne 1) {
+    throw 'The output-tree SID cleanup sweep must remove only the temporary SID recursively and preserve reparse-point safety.'
+}
+$outputSweepIndex = -1
+$outputFindIndex = -1
+for ($callIndex = 0; $callIndex -lt $script:icaclsCalls.Count; $callIndex++) {
+    $call = @($script:icaclsCalls[$callIndex])
+    if ($call -contains '/remove:g' -and $call -contains $outputRoot) { $outputSweepIndex = $callIndex }
+    if ($call -contains '/findsid' -and $call -contains $outputRoot) { $outputFindIndex = $callIndex }
+}
+if ($outputSweepIndex -lt 0 -or $outputFindIndex -le $outputSweepIndex) {
+    throw 'The output-tree SID verification must run after its recursive cleanup sweep.'
+}
 $rootResetCall = @($resetCalls[0])
 if (@($rootResetCall | Where-Object { $_ -eq $outputRoot }).Count -ne 1 -or @($rootResetCall | Where-Object { $_ -eq '/T' }).Count -ne 0) {
     throw 'The output-root direct ACL must be reset before its scratch directories.'
