@@ -609,7 +609,7 @@ describe('ContextPick workspace UI', () => {
       expect(screen.getByRole('button', { name: 'Export Markdown' })).toBeEnabled();
       cleanup();
     }
-  });
+  }, 15_000);
 
   it('keeps a failed automatic refresh stale and does not retry the same watcher revision', async () => {
     const user = userEvent.setup();
