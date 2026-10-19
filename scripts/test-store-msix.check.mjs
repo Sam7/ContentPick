@@ -16,6 +16,9 @@ test('MSIX lifecycle uses a restricted runner token and preserves the runner acc
   assert.match(script, /restrictedTokenReport\.token\.desktopName -ne 'Default'/);
   assert.match(script, /restrictedTokenReport\.token\.sessionId/);
   assert.match(script, /restrictedTokenReport\.token\.integrityRid/);
+  assert.match(script, /\$helperParameters = \[ordered\]@\{/);
+  assert.match(script, /\$helperCommand = '& ' .* \+ ' @helperParameters'/);
+  assert.doesNotMatch(script, /\$helperArguments\s*=\s*@\(/);
   assert.match(script, /runnerProfilePreserved = \$true/);
   assert.match(script, /restricted-token-lifecycle\.json/);
   assert.match(standardUserScript, /mode = 'same-session restricted runner token'/);

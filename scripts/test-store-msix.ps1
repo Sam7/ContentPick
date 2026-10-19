@@ -502,18 +502,23 @@ try {
             $bootstrapLines.Add('[Environment]::SetEnvironmentVariable(' + (ConvertTo-PowerShellLiteral ([string]$entry.Key)) + ', ' + (ConvertTo-PowerShellLiteral ([string]$entry.Value)) + ", 'Process')")
         }
     }
-    $helperArguments = @(
-        '-CandidatePackagePath', $candidateSigned,
-        '-UpgradePackagePath', $upgradeSigned,
-        '-TestCertificatePath', $cerPath,
-        '-ExpectedPackageVersion', $packageVersion,
-        '-ExpectedUpgradeVersion', $upgradeVersion,
-        '-IdentityName', $identityName,
-        '-Publisher', $publisher,
-        '-EvidenceRoot', $resultRoot,
-        '-RepositoryRoot', $repoRoot
-    )
-    $helperCommand = '& ' + (ConvertTo-PowerShellLiteral $helperPath) + ' ' + (($helperArguments | ForEach-Object { ConvertTo-PowerShellLiteral ([string]$_) }) -join ' ')
+    $helperParameters = [ordered]@{
+        CandidatePackagePath = $candidateSigned
+        UpgradePackagePath = $upgradeSigned
+        TestCertificatePath = $cerPath
+        ExpectedPackageVersion = $packageVersion
+        ExpectedUpgradeVersion = $upgradeVersion
+        IdentityName = $identityName
+        Publisher = $publisher
+        EvidenceRoot = $resultRoot
+        RepositoryRoot = $repoRoot
+    }
+    $bootstrapLines.Add('$helperParameters = @{')
+    foreach ($entry in $helperParameters.GetEnumerator()) {
+        $bootstrapLines.Add('    ' + [string]$entry.Key + ' = ' + (ConvertTo-PowerShellLiteral ([string]$entry.Value)))
+    }
+    $bootstrapLines.Add('}')
+    $helperCommand = '& ' + (ConvertTo-PowerShellLiteral $helperPath) + ' @helperParameters'
     $bootstrapLines.Add('try { ' + $helperCommand + ' *> ' + (ConvertTo-PowerShellLiteral $stdoutPath) + '; exit 0 }')
     $bootstrapLines.Add('catch { $_ | Out-File -LiteralPath ' + (ConvertTo-PowerShellLiteral $stdoutPath) + ' -Append -Encoding utf8; exit 1 }')
     [System.IO.File]::WriteAllText($bootstrapPath, [string]::Join([Environment]::NewLine, $bootstrapLines), [Text.UTF8Encoding]::new($false))
