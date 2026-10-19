@@ -38,45 +38,72 @@ $script:userSid = 'S-1-5-21-123-456-789-1001'
 $script:aclPaths = [System.Collections.Generic.List[string]]::new()
 $script:cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $outputRoot = 'C:\runner-temp\contextpick-standard-user-smoke'
+$resultsDir = Join-Path $outputRoot 'playwright'
+$tempDir = Join-Path $outputRoot 'temp'
+$corepackDir = Join-Path $outputRoot 'corepack'
 $repoRoot = 'C:\runner\repo'
 Grant-TemporaryAccess -Path $outputRoot -Rights 'M'
-Grant-TemporaryAccess -Path $repoRoot -Rights 'RX' -Recursive
+Grant-TemporaryAccess -Path $resultsDir -Rights 'M' -Inheritable
+Grant-TemporaryAccess -Path $tempDir -Rights 'M' -Inheritable
+Grant-TemporaryAccess -Path $corepackDir -Rights 'M' -Inheritable
+Grant-TemporaryAccess -Path $repoRoot -Rights 'RX' -Inheritable -Recursive
 $grantCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/grant' })
-if ($grantCalls.Count -ne 2) { throw "Expected two temporary-access grant calls, got $($grantCalls.Count)." }
-if (@($grantCalls[0] | Where-Object { $_ -eq $outputRoot }).Count -ne 1 -or @($grantCalls[0] | Where-Object { $_ -eq '/T' }).Count -ne 0) {
-    throw 'The disposable output-root grant must be inheritable without explicitly changing every descendant ACL.'
+if ($grantCalls.Count -ne 5) { throw "Expected five temporary-access grant calls, got $($grantCalls.Count)." }
+if (@($grantCalls[0] | Where-Object { $_ -eq $outputRoot }).Count -ne 1 -or @($grantCalls[0] | Where-Object { $_ -eq '/T' -or $_ -match '\(OI\)\(CI\)' }).Count -ne 0) {
+    throw 'The disposable output-root grant must apply only to the root directory.'
 }
-if (@($grantCalls[1] | Where-Object { $_ -eq $repoRoot }).Count -ne 1 -or @($grantCalls[1] | Where-Object { $_ -eq '/T' }).Count -ne 1) {
+if (@($grantCalls[0] | Where-Object { $_ -eq "*$script:userSid`:(M)" }).Count -ne 1) {
+    throw 'The output-root grant must give the temporary user modify access without inheritance.'
+}
+foreach ($scratchPath in @($resultsDir, $tempDir, $corepackDir)) {
+    $scratchGrant = @($grantCalls | Where-Object { $_ -contains $scratchPath })
+    if ($scratchGrant.Count -ne 1 -or @($scratchGrant[0] | Where-Object { $_ -eq "*$script:userSid`:(OI)(CI)(M)" }).Count -ne 1 -or @($scratchGrant[0] | Where-Object { $_ -eq '/T' }).Count -ne 0) {
+        throw "The inheritable write grant must be scoped to scratch directory $scratchPath."
+    }
+}
+if (@($grantCalls[4] | Where-Object { $_ -eq $repoRoot }).Count -ne 1 -or @($grantCalls[4] | Where-Object { $_ -eq '/T' }).Count -ne 1) {
     throw 'The read-only repository grant must recursively cover pre-existing files.'
 }
 $script:aclPaths = [System.Collections.Generic.List[string]]::new()
 $script:cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $otherPath = 'C:\runner-temp\contextpick-candidate'
 $script:aclPaths.Add($outputRoot)
+$script:aclPaths.Add($resultsDir)
+$script:aclPaths.Add($tempDir)
+$script:aclPaths.Add($corepackDir)
 $script:aclPaths.Add($otherPath)
 Revoke-TemporaryAccess
 
 if ($script:cleanupErrors.Count -ne 0) { throw ($script:cleanupErrors -join [Environment]::NewLine) }
 $findCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/findsid' })
-if ($findCalls.Count -ne 2) { throw "Expected two SID verification calls, got $($findCalls.Count)." }
+if ($findCalls.Count -ne 2) { throw "Expected the final output-root verification and one unrelated path verification, got $($findCalls.Count)." }
 $resetCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/reset' })
-if ($resetCalls.Count -ne 2) { throw "Expected two output-root ACL resets, got $($resetCalls.Count)." }
+if ($resetCalls.Count -ne 7) { throw "Expected root and scratch-directory ACL resets, got $($resetCalls.Count)." }
 $rootResetCall = @($resetCalls[0])
-$childResetCall = @($resetCalls[1])
 if (@($rootResetCall | Where-Object { $_ -eq $outputRoot }).Count -ne 1 -or @($rootResetCall | Where-Object { $_ -eq '/T' }).Count -ne 0) {
-    throw 'The output-root inheritable ACL must be reset before recursively resetting its contents.'
+    throw 'The output-root direct ACL must be reset before its scratch directories.'
 }
 if (@($rootResetCall | Where-Object { $_ -eq '/L' }).Count -ne 1) {
     throw 'The output-root ACL reset must preserve reparse-point safety with one /L argument.'
 }
-if (@($childResetCall | Where-Object { $_ -eq $outputRoot }).Count -ne 1 -or @($childResetCall | Where-Object { $_ -eq '/T' }).Count -ne 1) {
-    throw 'The recursive output-root ACL reset must follow the root reset.'
+foreach ($scratchIndex in 0..2) {
+    $scratchPath = @($resultsDir, $tempDir, $corepackDir)[$scratchIndex]
+    $rootResetIndex = 1 + ($scratchIndex * 2)
+    $recursiveResetIndex = $rootResetIndex + 1
+    $scratchRootReset = @($resetCalls[$rootResetIndex])
+    $scratchTreeReset = @($resetCalls[$recursiveResetIndex])
+    if (@($scratchRootReset | Where-Object { $_ -eq $scratchPath }).Count -ne 1 -or @($scratchRootReset | Where-Object { $_ -eq '/T' }).Count -ne 0) {
+        throw "Scratch ACL for $scratchPath must reset before its descendants."
+    }
+    if (@($scratchTreeReset | Where-Object { $_ -eq $scratchPath }).Count -ne 1 -or @($scratchTreeReset | Where-Object { $_ -eq '/T' }).Count -ne 1) {
+        throw "Recursive scratch ACL reset for $scratchPath must follow its root reset."
+    }
+    if (@($scratchTreeReset | Where-Object { $_ -eq '/L' }).Count -ne 1) {
+        throw "Recursive scratch ACL reset for $scratchPath must preserve reparse-point safety with one /L argument."
+    }
 }
-if (@($childResetCall | Where-Object { $_ -eq '/L' }).Count -ne 1) {
-    throw 'The recursive output-root ACL reset must preserve reparse-point safety with one /L argument.'
-}
-$rootFindCall = @($findCalls[0])
-$otherFindCall = @($findCalls[1])
+$otherFindCall = @($findCalls[0])
+$rootFindCall = @($findCalls[1])
 if (@($rootFindCall | Where-Object { $_ -eq '/L' }).Count -ne 1) {
     throw 'The output-root SID verification must pass /L as one argument.'
 }
@@ -86,4 +113,4 @@ if (@($rootFindCall | Where-Object { $_ -eq '/' -or $_ -eq 'L' }).Count -ne 0) {
 if (@($otherFindCall | Where-Object { $_ -eq '/L' -or $_ -eq '/' -or $_ -eq 'L' }).Count -ne 0) {
     throw 'The non-output-root SID verification must not pass /L.'
 }
-Write-Output 'Temporary grants avoid recursive explicit ACLs on disposable output; cleanup resets the inheritable root ACL first and preserves /L as one icacls argument.'
+Write-Output 'Temporary write grants are scoped to scratch directories; cleanup resets them before verifying the output tree and preserves /L as one icacls argument.'

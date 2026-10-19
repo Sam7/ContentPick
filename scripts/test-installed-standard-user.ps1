@@ -9,10 +9,12 @@ function Grant-TemporaryAccess {
     param(
         [Parameter(Mandatory = $true)] [string]$Path,
         [Parameter(Mandatory = $true)] [string]$Rights,
+        [switch]$Inheritable,
         [switch]$Recursive
     )
 
-    $grantOptions = @($Path, '/grant', "*$script:userSid`:(OI)(CI)($Rights)")
+    $inheritanceFlags = if ($Inheritable) { '(OI)(CI)' } else { '' }
+    $grantOptions = @($Path, '/grant', "*$script:userSid`:$inheritanceFlags($Rights)")
     if ($Recursive) { $grantOptions += '/T' }
     $grantOptions += '/Q'
     & icacls.exe @grantOptions
@@ -22,15 +24,20 @@ function Grant-TemporaryAccess {
 
 function Revoke-TemporaryAccess {
     foreach ($path in $script:aclPaths) {
-        if ([string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-            # The standard user creates files under this disposable RUNNER_TEMP tree.
-            # Remove the inheritable grant at the root before resetting child-created ACLs.
+        $isOutputRoot = [string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)
+        $outputPrefix = $outputRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        $isOutputChild = $path.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($isOutputRoot -or $isOutputChild) {
+            # Output-root access is direct only. Inheritance begins at the three
+            # disposable scratch directories recorded separately in aclPaths.
             & icacls.exe $path /reset /Q /L
             if ($LASTEXITCODE -ne 0) {
                 $script:cleanupErrors.Add("Could not reset temporary smoke-user access from $path (icacls exit $LASTEXITCODE).")
                 continue
             }
-            & icacls.exe $path /reset /T /C /Q /L
+            if ($isOutputChild) {
+                & icacls.exe $path /reset /T /C /Q /L
+            }
         } else {
             & icacls.exe $path /remove:g "*$script:userSid" /T /Q
         }
@@ -39,10 +46,10 @@ function Revoke-TemporaryAccess {
             continue
         }
 
+        if ($isOutputRoot -or $isOutputChild) { continue }
+
         $findSidOptions = @()
-        if ([string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $findSidOptions += '/L'
-        }
+        if ($isOutputRoot) { $findSidOptions += '/L' }
         $remainingEntries = @(& icacls.exe $path /findsid "*$script:userSid" /T /C /Q @findSidOptions 2>&1)
         $findSidExitCode = $LASTEXITCODE
         $noMatchLines = @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' })
@@ -63,6 +70,20 @@ function Revoke-TemporaryAccess {
                 $script:cleanupErrors.Add("Temporary smoke-user access remains or could not be verified on ${path}: $details")
             }
         }
+    }
+
+    $findOutputRootOptions = @('/findsid', "*$script:userSid", '/T', '/C', '/Q', '/L')
+    $remainingEntries = @(& icacls.exe $outputRoot @findOutputRootOptions 2>&1)
+    $findSidExitCode = $LASTEXITCODE
+    $noMatchLines = @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' })
+    $processedLines = @($remainingEntries | Where-Object { $_ -match '^Successfully processed \d+ files; Failed processing 0 files\.?$' })
+    $unexpectedLines = @($remainingEntries | Where-Object {
+        $_ -notmatch '^No files with a matching SID was found\.?$' -and
+        $_ -notmatch '^Successfully processed \d+ files; Failed processing 0 files\.?$'
+    })
+    if ($findSidExitCode -notin @(0, 1332) -or $noMatchLines.Count -ne 1 -or $processedLines.Count -ne 1 -or $unexpectedLines.Count -ne 0) {
+        $details = if ($remainingEntries.Count -gt 0) { $remainingEntries -join ' | ' } else { 'icacls returned no verification output' }
+        $script:cleanupErrors.Add("Temporary smoke-user access remains or could not be verified on ${outputRoot}: $details")
     }
 }
 
@@ -161,13 +182,16 @@ try {
     if ($adminSids -contains $script:userSid) { throw 'The temporary smoke account must not belong to Administrators.' }
 
     Write-Output "Temporary standard test account: $accountName ($($script:userSid))"
-    Grant-TemporaryAccess -Path $repoRoot -Rights 'RX' -Recursive
-    Grant-TemporaryAccess -Path $candidateRoot -Rights 'RX' -Recursive
+    Grant-TemporaryAccess -Path $repoRoot -Rights 'RX' -Inheritable -Recursive
+    Grant-TemporaryAccess -Path $candidateRoot -Rights 'RX' -Inheritable -Recursive
     Grant-TemporaryAccess -Path $outputRoot -Rights 'M'
+    Grant-TemporaryAccess -Path $resultsDir -Rights 'M' -Inheritable
+    Grant-TemporaryAccess -Path $tempDir -Rights 'M' -Inheritable
+    Grant-TemporaryAccess -Path $corepackDir -Rights 'M' -Inheritable
 
     $nodeCommand = Get-Command node.exe -ErrorAction Stop | Select-Object -First 1
     $nodeHome = Split-Path -Parent $nodeCommand.Source
-    Grant-TemporaryAccess -Path $nodeHome -Rights 'RX' -Recursive
+    Grant-TemporaryAccess -Path $nodeHome -Rights 'RX' -Inheritable -Recursive
 
     $testScript = Join-Path $PSScriptRoot 'test-installed.ps1'
     $pwshPath = (Get-Process -Id $PID).Path
