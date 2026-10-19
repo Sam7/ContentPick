@@ -8,10 +8,14 @@ $ErrorActionPreference = 'Stop'
 function Grant-TemporaryAccess {
     param(
         [Parameter(Mandatory = $true)] [string]$Path,
-        [Parameter(Mandatory = $true)] [string]$Rights
+        [Parameter(Mandatory = $true)] [string]$Rights,
+        [switch]$Recursive
     )
 
-    & icacls.exe $Path /grant "*$script:userSid`:(OI)(CI)($Rights)" /T /Q
+    $grantOptions = @($Path, '/grant', "*$script:userSid`:(OI)(CI)($Rights)")
+    if ($Recursive) { $grantOptions += '/T' }
+    $grantOptions += '/Q'
+    & icacls.exe @grantOptions
     if ($LASTEXITCODE -ne 0) { throw "Could not grant temporary $Rights access to $Path (icacls exit $LASTEXITCODE)." }
     $script:aclPaths.Add($Path)
 }
@@ -157,13 +161,13 @@ try {
     if ($adminSids -contains $script:userSid) { throw 'The temporary smoke account must not belong to Administrators.' }
 
     Write-Output "Temporary standard test account: $accountName ($($script:userSid))"
-    Grant-TemporaryAccess -Path $repoRoot -Rights 'RX'
-    Grant-TemporaryAccess -Path $candidateRoot -Rights 'RX'
+    Grant-TemporaryAccess -Path $repoRoot -Rights 'RX' -Recursive
+    Grant-TemporaryAccess -Path $candidateRoot -Rights 'RX' -Recursive
     Grant-TemporaryAccess -Path $outputRoot -Rights 'M'
 
     $nodeCommand = Get-Command node.exe -ErrorAction Stop | Select-Object -First 1
     $nodeHome = Split-Path -Parent $nodeCommand.Source
-    Grant-TemporaryAccess -Path $nodeHome -Rights 'RX'
+    Grant-TemporaryAccess -Path $nodeHome -Rights 'RX' -Recursive
 
     $testScript = Join-Path $PSScriptRoot 'test-installed.ps1'
     $pwshPath = (Get-Process -Id $PID).Path

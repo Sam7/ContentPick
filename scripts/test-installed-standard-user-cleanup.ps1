@@ -15,6 +15,12 @@ $cleanupFunction = $ast.Find({
 }, $true)
 if (-not $cleanupFunction) { throw 'Revoke-TemporaryAccess was not found.' }
 Invoke-Expression $cleanupFunction.Extent.Text
+$grantFunction = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Grant-TemporaryAccess'
+}, $true)
+if (-not $grantFunction) { throw 'Grant-TemporaryAccess was not found.' }
+Invoke-Expression $grantFunction.Extent.Text
 
 $script:icaclsCalls = [System.Collections.Generic.List[object]]::new()
 function icacls.exe {
@@ -32,6 +38,19 @@ $script:userSid = 'S-1-5-21-123-456-789-1001'
 $script:aclPaths = [System.Collections.Generic.List[string]]::new()
 $script:cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $outputRoot = 'C:\runner-temp\contextpick-standard-user-smoke'
+$repoRoot = 'C:\runner\repo'
+Grant-TemporaryAccess -Path $outputRoot -Rights 'M'
+Grant-TemporaryAccess -Path $repoRoot -Rights 'RX' -Recursive
+$grantCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/grant' })
+if ($grantCalls.Count -ne 2) { throw "Expected two temporary-access grant calls, got $($grantCalls.Count)." }
+if (@($grantCalls[0] | Where-Object { $_ -eq $outputRoot }).Count -ne 1 -or @($grantCalls[0] | Where-Object { $_ -eq '/T' }).Count -ne 0) {
+    throw 'The disposable output-root grant must be inheritable without explicitly changing every descendant ACL.'
+}
+if (@($grantCalls[1] | Where-Object { $_ -eq $repoRoot }).Count -ne 1 -or @($grantCalls[1] | Where-Object { $_ -eq '/T' }).Count -ne 1) {
+    throw 'The read-only repository grant must recursively cover pre-existing files.'
+}
+$script:aclPaths = [System.Collections.Generic.List[string]]::new()
+$script:cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $otherPath = 'C:\runner-temp\contextpick-candidate'
 $script:aclPaths.Add($outputRoot)
 $script:aclPaths.Add($otherPath)
@@ -67,4 +86,4 @@ if (@($rootFindCall | Where-Object { $_ -eq '/' -or $_ -eq 'L' }).Count -ne 0) {
 if (@($otherFindCall | Where-Object { $_ -eq '/L' -or $_ -eq '/' -or $_ -eq 'L' }).Count -ne 0) {
     throw 'The non-output-root SID verification must not pass /L.'
 }
-Write-Output 'Revoke-TemporaryAccess resets the inheritable output-root ACL first and preserves /L as one icacls argument.'
+Write-Output 'Temporary grants avoid recursive explicit ACLs on disposable output; cleanup resets the inheritable root ACL first and preserves /L as one icacls argument.'
