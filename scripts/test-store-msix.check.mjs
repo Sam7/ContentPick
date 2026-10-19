@@ -4,19 +4,25 @@ import test from 'node:test';
 
 const script = await readFile(new URL('./test-store-msix.ps1', import.meta.url), 'utf8');
 
-test('MSIX lifecycle uses a linked filtered token and preserves the runner account and profile', async () => {
-  const helper = await readFile(new URL('./run-filtered-token-process.ps1', import.meta.url), 'utf8');
+test('MSIX lifecycle uses a restricted runner token and preserves the runner account and profile', async () => {
+  const helper = await readFile(new URL('./run-restricted-token-process.ps1', import.meta.url), 'utf8');
   const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
-  assert.match(script, /run-filtered-token-process\.ps1/);
-  assert.match(script, /Start-ContextPickFilteredTokenProcess/);
-  assert.match(script, /testTokenMode = 'UAC linked filtered token'/);
-  assert.match(script, /filteredTokenReport\.token\.sid -ne \$runnerSid/);
-  assert.match(script, /filteredTokenReport\.token\.sessionId/);
-  assert.match(script, /filteredTokenReport\.token\.integrityRid/);
+  assert.match(script, /run-restricted-token-process\.ps1/);
+  assert.match(script, /Start-ContextPickRestrictedTokenProcess/);
+  assert.match(script, /testTokenMode = 'same-session restricted runner token'/);
+  assert.match(script, /restrictedTokenReport\.token\.sid -ne \$runnerSid/);
+  assert.match(script, /restrictedTokenReport\.token\.authenticationId -ne \$runnerAuthenticationId/);
+  assert.match(script, /restrictedTokenReport\.token\.logonSid -ne \$runnerLogonSid/);
+  assert.match(script, /restrictedTokenReport\.token\.desktopName -ne 'Default'/);
+  assert.match(script, /restrictedTokenReport\.token\.sessionId/);
+  assert.match(script, /restrictedTokenReport\.token\.integrityRid/);
   assert.match(script, /runnerProfilePreserved = \$true/);
-  assert.match(script, /filtered-token-lifecycle\.json/);
-  assert.match(standardUserScript, /mode = 'UAC linked filtered token'/);
-  assert.match(standardUserScript, /scope = 'fresh hosted runner profile under linked filtered token'/);
+  assert.match(script, /restricted-token-lifecycle\.json/);
+  assert.match(standardUserScript, /mode = 'same-session restricted runner token'/);
+  assert.match(helper, /if \(elevated\) throw/);
+  assert.match(helper, /if \(currentSession == 0\)/);
+  assert.match(script, /runnerDesktopName -ne 'Default'/);
+  assert.match(standardUserScript, /scope = 'fresh hosted runner profile under restricted runner token'/);
   assert.doesNotMatch(script + helper, /CreateProcessWithLogonW|New-LocalUser|Remove-LocalUser|Grant-TemporaryAccess|Revoke-TemporaryAccess|icacls\.exe.*\/(?:grant|remove:g)/);
 });
 
@@ -123,14 +129,14 @@ test('temporary machine-root trust uses a bounded noninteractive X509Store helpe
   assert.doesNotMatch(helper, /Import-Certificate|PromptForChoice|Windows\.Forms/i);
 });
 
-test('certificate cleanup is marked incomplete if the filtered-token lifecycle process remains', () => {
+test('certificate cleanup is marked incomplete if the restricted-token lifecycle process remains', () => {
   assert.match(script, /if \(-not \$childExited\) \{\s*\$report\.cleanup\.signingCertificateRemoved = \$false/);
 });
 
 test('standard-user MSIX install uses only temporary machine TrustedPeople trust', async () => {
   const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
   const trustAdded = script.indexOf("-Operation', 'AddMachineTrustedPeople'");
-  const userLifecycle = script.indexOf('Starting MSIX install, activation, upgrade, and uninstall under filtered runner token');
+  const userLifecycle = script.indexOf('Starting MSIX install, activation, upgrade, and uninstall under restricted runner token');
   const trustRemoved = script.indexOf("-Operation', 'RemoveTemporaryCertificate'");
   assert.ok(trustAdded >= 0 && trustAdded < userLifecycle, 'install trust must exist before first package deployment');
   assert.ok(trustRemoved > userLifecycle, 'trust must be removed after the standard-user lifecycle');

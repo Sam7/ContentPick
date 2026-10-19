@@ -2,25 +2,31 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
-const launcher = await readFile(new URL('./run-filtered-token-process.ps1', import.meta.url), 'utf8');
+const launcher = await readFile(new URL('./run-restricted-token-process.ps1', import.meta.url), 'utf8');
 const smoke = await readFile(new URL('./test-installed-standard-user.ps1', import.meta.url), 'utf8');
 const lifecycle = await readFile(new URL('./test-installed.ps1', import.meta.url), 'utf8');
 
-test('filtered-token launcher fails closed unless it receives a linked UAC limited token', () => {
-  assert.match(launcher, /TokenLinkedTokenInfo/);
-  assert.match(launcher, /TokenElevationTypeFull/);
-  assert.match(launcher, /TokenElevationTypeLimited/);
-  assert.match(launcher, /DuplicateTokenEx\(linkedToken/);
-  assert.match(launcher, /CreateProcessWithTokenW/);
+test('restricted-token launcher preserves the runner logon while removing admin rights', () => {
+  assert.match(launcher, /CreateRestrictedToken/);
+  assert.match(launcher, /DisableMaxPrivilege/);
+  assert.match(launcher, /AdministratorsSid/);
+  assert.match(launcher, /SetTokenInformation\(restrictedToken, TokenIntegrityLevelInfo/);
+  assert.match(launcher, /CreateProcessAsUserW/);
+  assert.match(launcher, /InspectRestrictedToken/);
+  assert.match(launcher, /CreatedByCreateRestrictedToken = true/);
+  assert.match(launcher, /if \(elevated\) throw/);
+  assert.match(launcher, /GetAuthenticationId/);
+  assert.match(launcher, /GetLogonSid/);
+  assert.match(launcher, /GetCurrentDesktopName/);
   assert.match(launcher, /integrity != MediumIntegrityRid/);
   assert.match(launcher, /tokenSession != currentSession/);
   assert.match(launcher, /!interactive/);
   assert.match(launcher, /environmentBlock\[environmentBlock\.Length - 1\] != '\\0'/);
-  assert.doesNotMatch(launcher, /CreateProcessWithLogonW/);
+  assert.doesNotMatch(launcher, /CreateProcessWithLogonW|CreateProcessWithTokenW/);
 });
 
 test('installed smoke preserves runner identity and captures app processes after launch', () => {
-  assert.match(smoke, /Start-ContextPickFilteredTokenProcess/);
+  assert.match(smoke, /Start-ContextPickRestrictedTokenProcess/);
   assert.match(smoke, /launch\.Token\.UserSid -ne \$runnerSid/);
   assert.match(smoke, /launch\.Token\.SessionId -ne \$sessionId/);
   assert.match(smoke, /Save-LaunchDiagnostics -StartedAtUtc/);

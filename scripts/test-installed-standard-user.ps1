@@ -6,13 +6,13 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw 'PowerShell 7.4 or newer is required.' }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
-    throw 'The filtered-token installer smoke is reserved for a GitHub-hosted Windows runner.'
+    throw 'The restricted-token installer smoke is reserved for a GitHub-hosted Windows runner.'
 }
 if (-not [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'The hosted runner must be elevated to install the filtered-token launcher prerequisites.'
+    throw 'The hosted runner must be elevated to install the restricted-token launcher prerequisites.'
 }
 
-. (Join-Path $PSScriptRoot 'run-filtered-token-process.ps1')
+. (Join-Path $PSScriptRoot 'run-restricted-token-process.ps1')
 
 function ConvertTo-PowerShellLiteral {
     param([Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$Value)
@@ -138,7 +138,7 @@ if (-not $installer.StartsWith($candidatePrefix, [System.StringComparison]::Ordi
     throw 'The installer must be inside this run dedicated candidate directory.'
 }
 
-$outputRoot = [System.IO.Path]::GetFullPath((Join-Path $runnerTemp 'contextpick-filtered-token-smoke'))
+$outputRoot = [System.IO.Path]::GetFullPath((Join-Path $runnerTemp 'contextpick-restricted-token-smoke'))
 $runnerTempPrefix = $runnerTemp.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 if (-not $outputRoot.StartsWith($runnerTempPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Smoke output must remain under RUNNER_TEMP.' }
 if (Test-Path -LiteralPath $outputRoot) { throw 'The dedicated installer smoke output directory already exists.' }
@@ -147,8 +147,8 @@ $resultsDir = Join-Path $outputRoot 'playwright'
 $null = New-Item -ItemType Directory -Path $resultsDir
 $corepackDir = Join-Path $outputRoot 'corepack'
 $null = New-Item -ItemType Directory -Path $corepackDir
-$stdoutPath = Join-Path $outputRoot 'filtered-token-smoke.log'
-$bootstrapPath = Join-Path $outputRoot 'filtered-token-smoke-bootstrap.ps1'
+$stdoutPath = Join-Path $outputRoot 'restricted-token-smoke.log'
+$bootstrapPath = Join-Path $outputRoot 'restricted-token-smoke-bootstrap.ps1'
 $diagnosticsPath = Join-Path $outputRoot 'launch-diagnostics.json'
 $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -238,7 +238,7 @@ $bootstrap = [string]::Join([Environment]::NewLine, $bootstrapLines)
 $parseTokens = $null
 $parseErrors = $null
 $null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrap, [ref]$parseTokens, [ref]$parseErrors)
-if ($parseErrors.Count -gt 0) { throw "Could not parse filtered-token bootstrap: $($parseErrors[0].Message)" }
+if ($parseErrors.Count -gt 0) { throw "Could not parse restricted-token bootstrap: $($parseErrors[0].Message)" }
 [System.IO.File]::WriteAllText($bootstrapPath, $bootstrap, [Text.UTF8Encoding]::new($false))
 
 $startedAtUtc = [DateTime]::UtcNow
@@ -246,16 +246,16 @@ $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $bootstrapPa
 $child = $null
 $childExited = $true
 try {
-$launch = Start-ContextPickFilteredTokenProcess -FilePath $pwshPath -ArgumentList $arguments -WorkingDirectory $repoRoot -Environment $environment
+$launch = Start-ContextPickRestrictedTokenProcess -FilePath $pwshPath -ArgumentList $arguments -WorkingDirectory $repoRoot -Environment $environment
 $child = $launch.Process
 $childExited = $false
 if ($launch.Token.SessionId -ne $sessionId -or $launch.Token.UserSid -ne $runnerSid -or $launch.Token.IsElevated -or $launch.Token.IsAdministrator -or $launch.Token.IntegrityRid -ne 0x2000) {
-    throw 'Filtered-token launcher returned a process that does not meet the runner-session identity checks.'
+    throw 'Restricted-token launcher returned a process that does not meet the runner-session identity checks.'
 }
 $childCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($child.Id)" -Property ProcessId, SessionId
 $childOwner = Invoke-CimMethod -InputObject $childCim -MethodName GetOwnerSid -ErrorAction Stop
 if (-not $childCim -or [int]$childCim.SessionId -ne $sessionId -or $childOwner.ReturnValue -ne 0 -or $childOwner.Sid -ne $runnerSid) {
-    throw 'Filtered-token PowerShell child did not start as the runner SID in the runner session.'
+    throw 'Restricted-token PowerShell child did not start as the runner SID in the runner session.'
 }
 
 $timeout = [TimeSpan]::FromMinutes(30)
@@ -263,20 +263,20 @@ $timeout = [TimeSpan]::FromMinutes(30)
         try {
             $child.Kill($true)
             if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 15)) {
-                throw 'Filtered-token smoke process tree did not stop after timeout.'
+                throw 'Restricted-token smoke process tree did not stop after timeout.'
             }
-        } catch { throw "Filtered-token installed-app smoke timed out and cleanup could not be confirmed: $_" }
+        } catch { throw "Restricted-token installed-app smoke timed out and cleanup could not be confirmed: $_" }
         $childExited = $true
-        throw 'Filtered-token installed-app smoke exceeded 30 minutes.'
+        throw 'Restricted-token installed-app smoke exceeded 30 minutes.'
     }
     $child.Refresh()
-    if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 15)) { throw 'Filtered-token helper exited while its process descendants remained active.' }
+    if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 15)) { throw 'Restricted-token helper exited while its process descendants remained active.' }
     $childExited = $true
-    if ($child.ExitCode -ne 0) { throw "Filtered-token installer smoke failed with exit code $($child.ExitCode)." }
+    if ($child.ExitCode -ne 0) { throw "Restricted-token installer smoke failed with exit code $($child.ExitCode)." }
     $remainingAppProcesses = @(Save-LaunchDiagnostics -StartedAtUtc $startedAtUtc -UserSid $runnerSid -SessionId $sessionId -Path $diagnosticsPath)
     if ($remainingAppProcesses.Count -gt 0) { throw "Installed app left same-session app processes running: $(($remainingAppProcesses | ForEach-Object { "$($_.name) PID $($_.processId)" }) -join ', ')." }
     if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath | Write-Output }
-    Write-Output "Filtered-token installer smoke passed for runner SID $runnerSid in session $sessionId."
+    Write-Output "Restricted-token installer smoke passed for runner SID $runnerSid in session $sessionId."
 } catch {
     if ($null -ne $child -and -not $childExited) {
         try {
@@ -284,7 +284,7 @@ $timeout = [TimeSpan]::FromMinutes(30)
             if (-not $child.HasExited) { $child.Kill($true) }
             if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 15)) { throw 'Child process tree did not stop after validation failure.' }
             $childExited = $true
-        } catch { Write-Warning "Could not confirm filtered-token child cleanup: $_" }
+        } catch { Write-Warning "Could not confirm restricted-token child cleanup: $_" }
     }
     try { Save-LaunchDiagnostics -StartedAtUtc $startedAtUtc -UserSid $runnerSid -SessionId $sessionId -Path $diagnosticsPath } catch { Write-Warning "Could not capture sanitized launch diagnostics: $_" }
     if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath | Write-Output }

@@ -214,7 +214,7 @@ if (-not $isLocalFallback) {
     }
     if (-not $isElevated) { throw 'The hosted runner must have an elevated token to provision temporary machine-scoped test signing trust.' }
 }
-. (Join-Path $PSScriptRoot 'run-filtered-token-process.ps1')
+. (Join-Path $PSScriptRoot 'run-restricted-token-process.ps1')
 if (Test-Path -LiteralPath $resultRoot) { throw "Refusing to reuse an existing lifecycle evidence directory: $resultRoot." }
 $null = New-Item -ItemType Directory -Path $resultRoot
 $reportPath = Join-Path $resultRoot 'lifecycle-evidence.json'
@@ -255,22 +255,26 @@ $childExited = $true
 $script:cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $pwshPath = (Get-Process -Id $PID).Path
-$bootstrapPath = Join-Path $resultRoot 'filtered-token-bootstrap.ps1'
-$stdoutPath = Join-Path $logRoot 'filtered-token.stdout.log'
-$stderrPath = Join-Path $logRoot 'filtered-token.stderr.log'
-$filteredTokenReportPath = Join-Path $resultRoot 'filtered-token-lifecycle.json'
+$bootstrapPath = Join-Path $resultRoot 'restricted-token-bootstrap.ps1'
+$stdoutPath = Join-Path $logRoot 'restricted-token.stdout.log'
+$stderrPath = Join-Path $logRoot 'restricted-token.stderr.log'
+$restrictedTokenReportPath = Join-Path $resultRoot 'restricted-token-lifecycle.json'
 $child = $null
 $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$runnerToken = [ContextPick.RestrictedTokenLauncher]::InspectCurrent()
+$runnerAuthenticationId = $runnerToken.AuthenticationId
+$runnerLogonSid = $runnerToken.LogonSid
+$runnerDesktopName = $runnerToken.DesktopName
 $currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
 $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $certThumbprint = $null
 $previousMsixAppBinary = $env:CONTEXTPICK_MSIX_APP_BINARY
 $report = [ordered]@{
     status = 'in_progress'
-    runner = [ordered]@{ environment = $executionEnvironment; image = $env:ImageOS; imageVersion = $env:ImageVersion; architecture = $hostArchitecture; windowsVersion = $hostVersion; minimumBuild = $minimumBuild; buildTokenElevated = $isElevated; testTokenElevated = $null; testTokenMode = $null; testTokenSid = $null; testTokenSessionId = $null; testTokenIntegrityRid = $null }
+    runner = [ordered]@{ environment = $executionEnvironment; image = $env:ImageOS; imageVersion = $env:ImageVersion; architecture = $hostArchitecture; windowsVersion = $hostVersion; minimumBuild = $minimumBuild; buildTokenElevated = $isElevated; desktopName = $runnerDesktopName; testTokenElevated = $null; testTokenMode = $null; testTokenSid = $null; testTokenAuthenticationId = $null; testTokenLogonSid = $null; testTokenSessionId = $null; testTokenIntegrityRid = $null }
     package = [ordered]@{ identity = $identityName; publisher = $publisher; architecture = 'x64'; appVersion = $appVersionText; version = $packageVersion; sha256TestCandidate = $null; sha256Unsigned = $null; sha256TestSigned = $null; sha256UpgradeUnsigned = $null; sha256UpgradeTestSigned = $null }
     wack = [ordered]@{ result = 'pending'; reportPath = $null; detail = $null }
-    filteredTokenLifecycle = $null
+    restrictedTokenLifecycle = $null
     cleanup = [ordered]@{ runnerProfilePreserved = $true; signingCertificateRemoved = $false; privateSigningKeyRemoved = $false }
     generatedAtUtc = [DateTime]::UtcNow.ToString('o')
     failure = $null
@@ -286,18 +290,20 @@ try {
     if ($existingPackages.Count -ne 0 -or $existingPackagesAllUsers.Count -ne 0) { throw "A prior $identityName package exists on this runner; refusing to replace it." }
     if (Test-Path -LiteralPath $msixBuildRoot) { throw "Isolated MSIX build directory already exists; refusing to reuse it: $msixBuildRoot." }
 
-    $linkedToken = [ContextPick.FilteredTokenLauncher]::InspectLinkedToken()
-    $report.runner.testTokenElevated = $linkedToken.IsElevated
-    $report.runner.testTokenMode = 'UAC linked filtered token'
-    $report.runner.testTokenSid = $linkedToken.UserSid
-    $report.runner.testTokenSessionId = $linkedToken.SessionId
-    $report.runner.testTokenIntegrityRid = $linkedToken.IntegrityRid
-    if ($linkedToken.UserSid -ne $runnerSid -or $linkedToken.SessionId -ne $currentSessionId -or $linkedToken.IsElevated -or $linkedToken.IsAdministrator -or -not $linkedToken.IsInteractive -or $linkedToken.IntegrityRid -ne 0x2000 -or $linkedToken.ElevationType -ne 3) {
-        throw 'Runner linked-token preflight failed its SID, session, elevation, integrity, or interactive-token checks.'
+    $restrictedToken = [ContextPick.RestrictedTokenLauncher]::InspectRestrictedToken()
+    $report.runner.testTokenElevated = $restrictedToken.IsElevated
+    $report.runner.testTokenMode = 'same-session restricted runner token'
+    $report.runner.testTokenSid = $restrictedToken.UserSid
+    $report.runner.testTokenAuthenticationId = $restrictedToken.AuthenticationId
+    $report.runner.testTokenLogonSid = $restrictedToken.LogonSid
+    $report.runner.testTokenSessionId = $restrictedToken.SessionId
+    $report.runner.testTokenIntegrityRid = $restrictedToken.IntegrityRid
+    if ($runnerDesktopName -ne 'Default' -or $restrictedToken.UserSid -ne $runnerSid -or $restrictedToken.AuthenticationId -ne $runnerAuthenticationId -or $restrictedToken.LogonSid -ne $runnerLogonSid -or $restrictedToken.SessionId -ne $currentSessionId -or $restrictedToken.IsElevated -or $restrictedToken.IsAdministrator -or -not $restrictedToken.IsInteractive -or -not $restrictedToken.CreatedByCreateRestrictedToken -or $restrictedToken.IntegrityRid -ne 0x2000) {
+        throw 'Runner restricted-token preflight failed its SID, session, elevation, integrity, or interactive-token checks.'
     }
-    $report.runner.testTokenPreflight = [ordered]@{ result = 'passed'; elevationType = $linkedToken.ElevationType; interactive = $linkedToken.IsInteractive; administrator = $linkedToken.IsAdministrator }
+    $report.runner.testTokenPreflight = [ordered]@{ result = 'passed'; elevationType = $restrictedToken.ElevationType; interactive = $restrictedToken.IsInteractive; administrator = $restrictedToken.IsAdministrator; createdByCreateRestrictedToken = $restrictedToken.CreatedByCreateRestrictedToken }
     Write-ValidationReport
-    Write-LifecyclePhase "Linked filtered-token preflight passed for runner SID $runnerSid in session $currentSessionId."
+    Write-LifecyclePhase "Same-session restricted-token preflight passed for runner SID $runnerSid in session $currentSessionId."
 
     Write-Output "Windows MSIX lifecycle: $hostVersion ($hostArchitecture), environment $executionEnvironment, image $($env:ImageOS) $($env:ImageVersion)."
     Push-Location $repoRoot
@@ -417,8 +423,8 @@ try {
     Invoke-NativeCommand -FilePath $pwshPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $certificateStoreHelper, '-Operation', 'AddMachineTrustedPeople', '-CertificatePath', $cerPath, '-Thumbprint', $certThumbprint, '-ExpectedSubject', $publisher) -LogPath (Join-Path $logRoot 'install-machine-trusted-people.log') -TimeoutSeconds 120
     $machineTrustInstalled = $true
 
-    Write-LifecyclePhase 'Preflighting the runner linked filtered token and clean profile.'
-    . (Join-Path $PSScriptRoot 'run-filtered-token-process.ps1')
+    Write-LifecyclePhase 'Preflighting the runner restricted runner token and clean profile.'
+    . (Join-Path $PSScriptRoot 'run-restricted-token-process.ps1')
     $runnerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $userSid = $runnerIdentity.User.Value
     $currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -426,14 +432,14 @@ try {
     $nodeHome = Split-Path -Parent $nodeCommand.Source
     $pnpmHome = if (-not [string]::IsNullOrWhiteSpace($env:PNPM_HOME)) { $env:PNPM_HOME } else { Split-Path -Parent ((Get-Command pnpm -ErrorAction Stop | Select-Object -First 1).Source) }
     $corepackHome = Join-Path $resultRoot 'corepack'
-    $testTemp = Join-Path $resultRoot 'filtered-token-temp'
+    $testTemp = Join-Path $resultRoot 'restricted-token-temp'
     $playwrightResults = Join-Path $resultRoot 'playwright-results'
     $screenshots = Join-Path $resultRoot 'screenshots'
     $viteCache = Join-Path $resultRoot 'vite-cache'
     foreach ($directory in @($corepackHome, $testTemp, $playwrightResults, $screenshots, $viteCache)) {
         $null = New-Item -ItemType Directory -Path $directory -Force
     }
-    $null = New-Item -ItemType File -Path $filteredTokenReportPath -Force
+    $null = New-Item -ItemType File -Path $restrictedTokenReportPath -Force
     $previousCorepackHome = $env:COREPACK_HOME
     try {
         $env:COREPACK_HOME = $corepackHome
@@ -447,7 +453,7 @@ try {
 
     $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Machine')
     if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = $env:SystemRoot }
-    if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'Could not determine the Windows system directory for the filtered-token smoke environment.' }
+    if ([string]::IsNullOrWhiteSpace($systemRoot)) { throw 'Could not determine the Windows system directory for the restricted-token smoke environment.' }
     $windowsPowerShellPath = Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0'
     $systemDriveRoot = [System.IO.Path]::GetPathRoot($systemRoot)
     $systemDrive = $systemDriveRoot.TrimEnd('\')
@@ -514,29 +520,31 @@ try {
     $parseTokens = $null
     $parseErrors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseInput($bootstrapLines -join [Environment]::NewLine, [ref]$parseTokens, [ref]$parseErrors)
-    if ($parseErrors.Count -gt 0) { throw "Could not parse filtered-token MSIX bootstrap: $($parseErrors[0].Message)" }
+    if ($parseErrors.Count -gt 0) { throw "Could not parse restricted-token MSIX bootstrap: $($parseErrors[0].Message)" }
 
-    Write-LifecyclePhase "Starting MSIX install, activation, upgrade, and uninstall under filtered runner token $runnerSid in session $currentSessionId."
+    Write-LifecyclePhase "Starting MSIX install, activation, upgrade, and uninstall under restricted runner token $runnerSid in session $currentSessionId."
     $childArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $bootstrapPath)
-    $launch = Start-ContextPickFilteredTokenProcess -FilePath $pwshPath -ArgumentList $childArguments -WorkingDirectory $repoRoot -Environment $environment
+    $launch = Start-ContextPickRestrictedTokenProcess -FilePath $pwshPath -ArgumentList $childArguments -WorkingDirectory $repoRoot -Environment $environment
     $child = $launch.Process
     $childExited = $false
-    if ($launch.Token.UserSid -ne $runnerSid -or $launch.Token.SessionId -ne $currentSessionId -or $launch.Token.IsElevated -or $launch.Token.IsAdministrator -or $launch.Token.IntegrityRid -ne 0x2000) {
-        throw 'Filtered-token launcher returned a process that does not meet the runner-session identity checks.'
+    if ($launch.Token.UserSid -ne $runnerSid -or $launch.Token.AuthenticationId -ne $runnerAuthenticationId -or $launch.Token.LogonSid -ne $runnerLogonSid -or $launch.Token.DesktopName -ne 'Default' -or $launch.Token.SessionId -ne $currentSessionId -or $launch.Token.IsElevated -or $launch.Token.IsAdministrator -or $launch.Token.IntegrityRid -ne 0x2000) {
+        throw 'Restricted-token launcher returned a process that does not meet the runner-session identity checks.'
     }
     $childProcess = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($child.Id)" -Property SessionId
-    if (-not $childProcess) { throw 'Could not identify the filtered-token MSIX test process session.' }
+    if (-not $childProcess) { throw 'Could not identify the restricted-token MSIX test process session.' }
     $childOwner = Invoke-CimMethod -InputObject $childProcess -MethodName GetOwnerSid -ErrorAction Stop
     if ($childOwner.ReturnValue -ne 0 -or $childOwner.Sid -ne $runnerSid -or [int]$childProcess.SessionId -ne $currentSessionId) {
-        throw 'Filtered-token MSIX test process did not start as the runner SID in the runner session.'
+        throw 'Restricted-token MSIX test process did not start as the runner SID in the runner session.'
     }
     $report.runner.testTokenElevated = $launch.Token.IsElevated
-    $report.runner.testTokenMode = 'UAC linked filtered token'
+    $report.runner.testTokenMode = 'same-session restricted runner token'
     $report.runner.testTokenSid = $launch.Token.UserSid
+    $report.runner.testTokenAuthenticationId = $launch.Token.AuthenticationId
+    $report.runner.testTokenLogonSid = $launch.Token.LogonSid
     $report.runner.testTokenSessionId = $launch.Token.SessionId
     $report.runner.testTokenIntegrityRid = $launch.Token.IntegrityRid
     $report.cleanFirstInstall = [ordered]@{
-        scope = 'fresh GitHub-hosted runner profile under its linked filtered token'
+        scope = 'fresh GitHub-hosted runner profile under its restricted runner token'
         packageRegistrationsForAllUsersBeforeInstall = $existingPackagesAllUsers.Count
         machineRootTrustPresentBeforeInstall = $false
         machineTrustedPeoplePresentBeforeInstall = $true
@@ -549,15 +557,15 @@ try {
         $childCompleted = $child.WaitForExit(30 * 1000)
         if (-not $childCompleted) {
             $phase = 'unknown'
-            if (Test-Path -LiteralPath $filteredTokenReportPath -PathType Leaf) {
+            if (Test-Path -LiteralPath $restrictedTokenReportPath -PathType Leaf) {
                 try {
-                    $childReport = Get-Content -LiteralPath $filteredTokenReportPath -Raw | ConvertFrom-Json
+                    $childReport = Get-Content -LiteralPath $restrictedTokenReportPath -Raw | ConvertFrom-Json
                     if (-not [string]::IsNullOrWhiteSpace([string]$childReport.phase)) { $phase = [string]$childReport.phase }
                 } catch { $phase = 'reading child report failed' }
             }
             $stdoutBytes = if (Test-Path -LiteralPath $stdoutPath) { (Get-Item -LiteralPath $stdoutPath).Length } else { 0 }
             $stderrBytes = if (Test-Path -LiteralPath $stderrPath) { (Get-Item -LiteralPath $stderrPath).Length } else { 0 }
-            Write-LifecyclePhase "Filtered-token lifecycle still running after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m; phase=$phase; stdout=${stdoutBytes}B; stderr=${stderrBytes}B."
+            Write-LifecyclePhase "Restricted-token lifecycle still running after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m; phase=$phase; stdout=${stdoutBytes}B; stderr=${stderrBytes}B."
         }
     }
     $childTimer.Stop()
@@ -566,33 +574,33 @@ try {
         try {
             $child.Kill($true)
             if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) {
-                throw 'Timed-out filtered-token MSIX test process tree did not stop.'
+                throw 'Timed-out restricted-token MSIX test process tree did not stop.'
             }
             $childExited = $true
-        } catch { throw "Filtered-token MSIX lifecycle exceeded 55 minutes and its process tree could not be confirmed stopped: $_" }
-        throw 'Filtered-token MSIX lifecycle exceeded 55 minutes.'
+        } catch { throw "Restricted-token MSIX lifecycle exceeded 55 minutes and its process tree could not be confirmed stopped: $_" }
+        throw 'Restricted-token MSIX lifecycle exceeded 55 minutes.'
     }
     $child.Refresh()
     $childExited = $false
-    if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) { throw 'The filtered-token helper exited while one of its descendants remained active.' }
+    if (-not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) { throw 'The restricted-token helper exited while one of its descendants remained active.' }
     $childExited = $true
     if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath | Write-Output }
     if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Warning $_ } }
     if ($child.ExitCode -ne 0) { throw "Standard-user MSIX lifecycle failed with exit code $($child.ExitCode)." }
-    if (-not (Test-Path -LiteralPath $filteredTokenReportPath -PathType Leaf)) { throw 'Standard-user helper did not emit its lifecycle evidence JSON.' }
-    $filteredTokenReport = Get-Content -LiteralPath $filteredTokenReportPath -Raw | ConvertFrom-Json
-    $report.filteredTokenLifecycle = $filteredTokenReport
-    Write-LifecyclePhase "Filtered-token lifecycle exited with status '$($filteredTokenReport.status)' after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m."
-    $report.runner.testTokenElevated = $filteredTokenReport.token.isElevated
-    if ($filteredTokenReport.status -ne 'passed' -or $filteredTokenReport.token.isElevated -ne $false -or $filteredTokenReport.token.isAdministrator -ne $false -or $filteredTokenReport.token.isInteractive -ne $true -or [int]$filteredTokenReport.token.elevationType -ne 3 -or $filteredTokenReport.token.mode -ne 'UAC linked filtered token' -or $filteredTokenReport.token.sid -ne $runnerSid -or [int]$filteredTokenReport.token.sessionId -ne $currentSessionId -or [int]$filteredTokenReport.token.integrityRid -ne 0x2000) {
-        throw 'The MSIX lifecycle did not pass under the verified UAC linked filtered token in the runner session.'
+    if (-not (Test-Path -LiteralPath $restrictedTokenReportPath -PathType Leaf)) { throw 'Standard-user helper did not emit its lifecycle evidence JSON.' }
+    $restrictedTokenReport = Get-Content -LiteralPath $restrictedTokenReportPath -Raw | ConvertFrom-Json
+    $report.restrictedTokenLifecycle = $restrictedTokenReport
+    Write-LifecyclePhase "Restricted-token lifecycle exited with status '$($restrictedTokenReport.status)' after $([Math]::Round($childTimer.Elapsed.TotalMinutes, 1))m."
+    $report.runner.testTokenElevated = $restrictedTokenReport.token.isElevated
+    if ($restrictedTokenReport.status -ne 'passed' -or $restrictedTokenReport.token.isElevated -ne $false -or $restrictedTokenReport.token.isAdministrator -ne $false -or $restrictedTokenReport.token.isInteractive -ne $true -or $restrictedTokenReport.token.mode -ne 'same-session restricted runner token' -or $restrictedTokenReport.token.sid -ne $runnerSid -or $restrictedTokenReport.token.authenticationId -ne $runnerAuthenticationId -or $restrictedTokenReport.token.logonSid -ne $runnerLogonSid -or $restrictedTokenReport.token.desktopName -ne 'Default' -or [int]$restrictedTokenReport.token.sessionId -ne $currentSessionId -or [int]$restrictedTokenReport.token.integrityRid -ne 0x2000) {
+        throw 'The MSIX lifecycle did not pass under the verified same-session restricted runner token in the runner session.'
     }
 
     # Record the exact trust prerequisite required by Windows for self-signed MSIX
     # deployment. The fresh hosted runner profile still has no app registration
     # or app data before install, and package operations remain non-elevated.
     $report.cleanFirstInstall = [ordered]@{
-        scope = 'fresh GitHub-hosted runner profile under its linked filtered token'
+        scope = 'fresh GitHub-hosted runner profile under its restricted runner token'
         packageRegistrationsForAllUsersBeforeInstall = $existingPackagesAllUsers.Count
         machineRootTrustPresentBeforeInstall = $false
         machineTrustedPeoplePresentBeforeInstall = $true
@@ -674,9 +682,9 @@ try {
             if (-not $child.HasExited) { $child.Kill($true) }
             if (-not $child.WaitForExit(10000) -or -not (Wait-ForProcessTreeExit -RootProcessId $child.Id -TimeoutSeconds 10)) { throw 'The lifecycle child tree did not stop.' }
             $childExited = $true
-        } catch { $cleanupErrors.Add("The filtered-token lifecycle process tree did not stop; discard the hosted runner: $($_.Exception.Message)") }
+        } catch { $cleanupErrors.Add("The restricted-token lifecycle process tree did not stop; discard the hosted runner: $($_.Exception.Message)") }
     }
-    if (-not $childExited) { $cleanupErrors.Add('The filtered-token lifecycle process tree did not stop; the hosted runner must be discarded.') }
+    if (-not $childExited) { $cleanupErrors.Add('The restricted-token lifecycle process tree did not stop; the hosted runner must be discarded.') }
     if ($null -ne $child) { $child.Dispose() }
     $report.cleanup.runnerProfilePreserved = $true
     if ($certThumbprint) {
@@ -731,4 +739,4 @@ try {
 }
 
 if ($report.status -ne 'passed') { throw 'MSIX Windows 11 lifecycle did not pass; see lifecycle-evidence.json and retained logs.' }
-Write-Output "Clean Windows 11 25H2+ x64 MSIX lifecycle passed under a UAC linked filtered token. Store candidate SHA-256: $($report.package.sha256Unsigned)"
+Write-Output "Clean Windows 11 25H2+ x64 MSIX lifecycle passed under a same-session restricted runner token. Store candidate SHA-256: $($report.package.sha256Unsigned)"
