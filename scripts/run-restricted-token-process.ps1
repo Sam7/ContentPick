@@ -41,6 +41,7 @@ namespace ContextPick {
         private const int TokenImpersonation = 2;
         private const int TokenPrimary = 1;
         private const uint DisableMaxPrivilege = 0x00000001;
+        private const uint LuaToken = 0x00000004;
         private const uint GroupIntegrity = 0x00000020;
         private const string AdministratorsSid = "S-1-5-32-544";
         private const string InteractiveSid = "S-1-5-4";
@@ -229,7 +230,7 @@ namespace ContextPick {
                 if (!ConvertStringSidToSid(AdministratorsSid, out adminSid)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create Administrators SID for token restriction.");
                 if (!ConvertStringSidToSid(MediumIntegritySid, out mediumSid)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create medium-integrity SID for token restriction.");
                 SidAndAttributes disabledAdmin = new SidAndAttributes { Sid = adminSid, Attributes = 0 };
-                if (!CreateRestrictedToken(currentToken, DisableMaxPrivilege, 1, ref disabledAdmin, 0, IntPtr.Zero, 0, IntPtr.Zero, out restrictedToken)) {
+                if (!CreateRestrictedToken(currentToken, DisableMaxPrivilege | LuaToken, 1, ref disabledAdmin, 0, IntPtr.Zero, 0, IntPtr.Zero, out restrictedToken)) {
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create a restricted token for the hosted runner session.");
                 }
                 TokenMandatoryLabel label = new TokenMandatoryLabel { Label = new SidAndAttributes { Sid = mediumSid, Attributes = GroupIntegrity } };

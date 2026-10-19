@@ -9,6 +9,8 @@ const lifecycle = await readFile(new URL('./test-installed.ps1', import.meta.url
 test('restricted-token launcher preserves the runner logon while removing admin rights', () => {
   assert.match(launcher, /CreateRestrictedToken/);
   assert.match(launcher, /DisableMaxPrivilege/);
+  assert.match(launcher, /LuaToken/);
+  assert.match(launcher, /DisableMaxPrivilege \| LuaToken/);
   assert.match(launcher, /AdministratorsSid/);
   assert.match(launcher, /SetTokenInformation\(restrictedToken, TokenIntegrityLevelInfo/);
   assert.match(launcher, /CreateProcessAsUserW/);
