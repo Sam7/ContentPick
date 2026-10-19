@@ -5,6 +5,7 @@ import { test } from 'node:test';
 const launcher = await readFile(new URL('./run-restricted-token-process.ps1', import.meta.url), 'utf8');
 const smoke = await readFile(new URL('./test-installed-standard-user.ps1', import.meta.url), 'utf8');
 const lifecycle = await readFile(new URL('./test-installed.ps1', import.meta.url), 'utf8');
+const nativePreflight = await readFile(new URL('./test-restricted-native-process.ps1', import.meta.url), 'utf8');
 
 test('restricted-token launcher preserves the runner logon while removing admin rights', () => {
   assert.match(launcher, /CreateRestrictedToken/);
@@ -36,4 +37,16 @@ test('installed smoke preserves runner identity and captures app processes after
   assert.match(smoke, /runner profile already contains ContextPick/i);
   assert.doesNotMatch(smoke, /CreateProcessWithLogonW|New-LocalUser|Remove-LocalUser|icacls\.exe.*\/(?:grant|remove:g)/);
   assert.match(lifecycle, /standard, non-elevated user token/);
+});
+
+test('restricted-token native process preflight captures the original Win32 launch error before toolchain detection', () => {
+  const preflightCall = lifecycle.indexOf('Test-RestrictedNativeProcessStart');
+  const toolchainDetection = lifecycle.indexOf(". (Join-Path $repoRoot 'scripts/env.ps1')");
+  assert.ok(preflightCall >= 0 && preflightCall < toolchainDetection);
+  assert.match(nativePreflight, /SystemDirectory[\s\S]*?whoami\.exe/);
+  assert.match(nativePreflight, /UseShellExecute = \$false/);
+  assert.match(nativePreflight, /RedirectStandardOutput = \$true/);
+  assert.match(nativePreflight, /RedirectStandardError = \$true/);
+  assert.match(nativePreflight, /NativeErrorCode/);
+  assert.match(nativePreflight, /WaitForExit\(10000\)/);
 });

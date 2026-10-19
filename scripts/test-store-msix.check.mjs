@@ -31,6 +31,12 @@ test('MSIX lifecycle uses a restricted runner token and preserves the runner acc
 
 test('standard-user Playwright failures capture effective package access before execution', async () => {
   const standardUserScript = await readFile(new URL('./test-store-msix-standard-user.ps1', import.meta.url), 'utf8');
+  const nativePreflight = await readFile(new URL('./test-restricted-native-process.ps1', import.meta.url), 'utf8');
+  assert.match(standardUserScript, /test-restricted-native-process\.ps1/);
+  assert.match(standardUserScript, /Test-RestrictedNativeProcessStart/);
+  assert.match(nativePreflight, /RedirectStandardOutput = \$true/);
+  assert.match(nativePreflight, /RedirectStandardError = \$true/);
+  assert.match(nativePreflight, /NativeErrorCode/);
   assert.match(standardUserScript, /function Write-PlaywrightPackageAccessDiagnostics/);
   assert.match(standardUserScript, /node_modules\\@playwright\\test\\package\.json/);
   assert.match(standardUserScript, /Invoke-OptionalNativeDiagnostic -FilePath 'icacls\.exe'/);

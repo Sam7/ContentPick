@@ -251,6 +251,8 @@ try {
     }
     if (Test-Path -LiteralPath (Join-Path $installDir 'LICENSE')) { throw 'The project license should only be installed under licenses\LICENSE.' }
 
+    . (Join-Path $PSScriptRoot 'test-restricted-native-process.ps1')
+    Test-RestrictedNativeProcessStart
     . (Join-Path $repoRoot 'scripts/env.ps1')
     Push-Location $repoRoot
     $previousNativeExecutable = $env:CONTEXTPICK_NATIVE_EXECUTABLE

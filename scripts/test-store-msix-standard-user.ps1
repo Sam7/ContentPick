@@ -164,6 +164,8 @@ $actualToken = [ContextPick.RestrictedTokenLauncher]::InspectCurrent()
 if ($actualToken.IsElevated -or $actualToken.IsAdministrator -or -not $actualToken.IsInteractive -or $actualToken.IntegrityRid -ne 0x2000 -or $actualToken.DesktopName -ne 'Default') {
     throw 'MSIX child is not running under the expected interactive same-session restricted runner token.'
 }
+. (Join-Path $PSScriptRoot 'test-restricted-native-process.ps1')
+Test-RestrictedNativeProcessStart
 
 $repositoryFullPath = [System.IO.Path]::GetFullPath($RepositoryRoot)
 $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
