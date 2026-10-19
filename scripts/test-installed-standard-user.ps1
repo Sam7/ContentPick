@@ -30,7 +30,10 @@ function Revoke-TemporaryAccess {
             continue
         }
 
-        $findSidOptions = if ([string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)) { @('/L') } else { @() }
+        $findSidOptions = @()
+        if ([string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $findSidOptions += '/L'
+        }
         $remainingEntries = @(& icacls.exe $path /findsid "*$script:userSid" /T /C /Q @findSidOptions 2>&1)
         $findSidExitCode = $LASTEXITCODE
         $noMatchLines = @($remainingEntries | Where-Object { $_ -match '^No files with a matching SID was found\.?$' })
