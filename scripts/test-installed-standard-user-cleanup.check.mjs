@@ -1,3 +1,5 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -14,4 +16,9 @@ test('installer cleanup passes /L as one icacls argument', { skip: process.platf
   if (result.status !== 0) {
     throw new Error(`PowerShell cleanup regression failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
   }
+});
+
+test('process baseline cleanup accepts an empty pre-existing process snapshot', async () => {
+  const source = await readFile(cleanupScriptPath, 'utf8');
+  assert.match(source, /\[AllowEmptyCollection\(\)\]\s*\[object\[\]\]\$ProcessBaseline/);
 });

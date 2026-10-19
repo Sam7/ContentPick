@@ -130,7 +130,7 @@ function Wait-ForProcessTreeExit {
 function Assert-NoTemporaryAccountProcesses {
     param(
         [Parameter(Mandatory = $true)] [int]$SessionId,
-        [Parameter(Mandatory = $true)] [object[]]$ProcessBaseline
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]]$ProcessBaseline
     )
 
     $baselineKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)

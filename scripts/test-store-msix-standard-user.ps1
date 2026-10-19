@@ -213,6 +213,10 @@ try {
     if ($installed[0].Version.ToString() -ne $ExpectedPackageVersion) { throw "Installed version mismatch: $($installed[0].Version)." }
     $installedExecutable = Join-Path $installed[0].InstallLocation 'contextpick.exe'
     if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) { throw "Installed package executable is not accessible to the standard user: $installedExecutable." }
+    $manifest = Get-AppxPackageManifest -Package $installed[0]
+    $applicationNode = $manifest.SelectSingleNode("//*[local-name()='Application']")
+    if (-not $applicationNode -or [string]::IsNullOrWhiteSpace([string]$applicationNode.GetAttribute('Id'))) { throw 'Installed package manifest does not declare an application ID for activation.' }
+    $env:CONTEXTPICK_NATIVE_AUMID = "$($installed[0].PackageFamilyName)!$($applicationNode.GetAttribute('Id'))"
     $userReport.install = [ordered]@{ result = 'passed'; scope = 'current standard-user profile'; architecture = [string]$installed[0].Architecture; version = $installed[0].Version.ToString(); packageFullName = $installed[0].PackageFullName; installLocation = $installed[0].InstallLocation }
     $userReport.package.installedPackageFullName = $installed[0].PackageFullName
     $userReport.package.installedExeSha256 = (Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()

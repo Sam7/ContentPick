@@ -67,10 +67,11 @@ function createProcessTreeSampler() {
     return pending;
   };
   return {
-    start(pid: number, expectedExecutablePath: string) {
+    start(pid: number, expectedExecutablePath: string, pinnedCreationTicks?: string) {
       rootPid = pid;
-      rootCreationTicks = undefined;
+      rootCreationTicks = pinnedCreationTicks;
       executablePath = expectedExecutablePath;
+      if (pinnedCreationTicks) observedProcesses.set(pid, { processId: pid, creationTicks: pinnedCreationTicks, executablePath: expectedExecutablePath });
       timer = setInterval(() => { void sample(pid, expectedExecutablePath); }, 1_000);
       void sample(pid, expectedExecutablePath);
     },
@@ -103,7 +104,7 @@ async function availablePort(): Promise<number> {
   return address.port;
 }
 
-async function captureCdpFailureDiagnostics(port: number, child: ChildProcess, webviewProfile: string): Promise<string> {
+async function captureCdpFailureDiagnostics(port: number, processId: number, webviewProfile: string): Promise<string> {
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
 $rootPid = [int]$env:CONTEXTPICK_DIAG_PID
@@ -155,7 +156,7 @@ $profileEntryCount = if ($profileExists) { @(Get-ChildItem -LiteralPath $env:CON
       maxBuffer: 256_000,
       env: {
         ...process.env,
-        CONTEXTPICK_DIAG_PID: String(child.pid ?? 0),
+        CONTEXTPICK_DIAG_PID: String(processId),
         CONTEXTPICK_DIAG_PORT: String(port),
         CONTEXTPICK_DIAG_PROFILE: webviewProfile,
       },
@@ -173,14 +174,18 @@ function redactNativeDiagnostics(text: string): string {
   return result.slice(-8_000);
 }
 
-async function waitForCdp(port: number, child: ChildProcess, webviewProfile: string, appOutput: () => string): Promise<void> {
-  const spawnError = new Promise<never>((_resolve, reject) => child.once('error', reject));
+async function waitForCdp(port: number, root: { processId: number; executablePath: string; creationTicks?: string }, child: ChildProcess | undefined, webviewProfile: string, appOutput: () => string): Promise<void> {
+  const spawnError = child ? new Promise<never>((_resolve, reject) => child.once('error', reject)) : new Promise<never>(() => {});
   const readiness = async () => {
     const deadline = Date.now() + 30_000;
     let lastError: unknown;
     while (Date.now() < deadline) {
-      if (child.exitCode !== null) throw new Error(`ContextPick exited before WebView2 was ready (code ${child.exitCode}).`);
+      if (child?.exitCode !== null && child?.exitCode !== undefined) throw new Error(`ContextPick exited before WebView2 was ready (code ${child.exitCode}).`);
       try {
+        if (!await hasCdpListenerInProcessTree(port, root)) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          continue;
+        }
         const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1_000) });
         if (response.ok) return;
       } catch (error) {
@@ -188,7 +193,7 @@ async function waitForCdp(port: number, child: ChildProcess, webviewProfile: str
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    const diagnostics = await captureCdpFailureDiagnostics(port, child, webviewProfile);
+    const diagnostics = await captureCdpFailureDiagnostics(port, root.processId, webviewProfile);
     throw new Error([
       `Timed out waiting for the app's loopback WebView2 endpoint: ${String(lastError ?? '')}`,
       `Startup diagnostics (process paths and full command lines omitted; selected WebView2 flags retained): ${diagnostics}`,
@@ -196,6 +201,203 @@ async function waitForCdp(port: number, child: ChildProcess, webviewProfile: str
     ].join('\n'));
   };
   await Promise.race([readiness(), spawnError]);
+}
+
+type PackagedRootIdentity = { processId: number; creationTicks: string; executablePath: string; sessionId: number; ownerSid: string };
+type PackagedPolicySetup = { createdKeys: string[] };
+
+async function configurePackagedWebViewDebugging(appUserModelId: string, port: number, userDataFolder: string): Promise<PackagedPolicySetup> {
+  if (process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS || process.env.WEBVIEW2_USER_DATA_FOLDER) {
+    throw new Error('Cannot configure packaged WebView2 debugging while conflicting WebView2 environment overrides are set.');
+  }
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$appId = $env:CONTEXTPICK_WEBVIEW_AUMID
+$paths = @(
+  'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments',
+  'HKCU:\Software\Policies\Microsoft\Edge\WebView2\UserDataFolder'
+)
+foreach ($path in $paths) {
+  $policyName = Split-Path -Leaf $path
+  foreach ($hive in @('HKCU:', 'HKLM:')) {
+    $candidate = Join-Path $hive (Join-Path 'Software\Policies\Microsoft\Edge\WebView2' $policyName)
+    if (Test-Path -LiteralPath $candidate) {
+      foreach ($name in @($appId, '*')) {
+        $existing = Get-ItemProperty -LiteralPath $candidate -Name $name -ErrorAction SilentlyContinue
+        if ($null -ne $existing) { throw "Refusing to override existing WebView2 policy $policyName for '$name'." }
+      }
+    }
+  }
+}
+$created = [System.Collections.Generic.List[string]]::new()
+try {
+  $values = @(
+    @($paths[0], "--remote-debugging-address=127.0.0.1 --remote-debugging-port=$env:CONTEXTPICK_WEBVIEW_PORT"),
+    @($paths[1], $env:CONTEXTPICK_WEBVIEW_USER_DATA)
+  )
+  foreach ($entry in $values) {
+    $path = [string]$entry[0]
+    $value = [string]$entry[1]
+    $cursor = $path
+    while ($cursor -like 'HKCU:*' -and -not (Test-Path -LiteralPath $cursor)) { $created.Insert(0, $cursor); $cursor = Split-Path -Parent $cursor }
+    $null = New-Item -Path $path -Force
+    $null = New-ItemProperty -LiteralPath $path -Name $appId -Value $value -PropertyType String
+  }
+  [pscustomobject]@{ createdKeys = @($created) } | ConvertTo-Json -Compress -Depth 3
+} catch {
+  $setupError = $_
+  $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+  foreach ($path in $paths) {
+    try {
+      if (Test-Path -LiteralPath $path) {
+        $before = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Name -ieq $appId })
+        if ($before.Count -gt 0) { Remove-ItemProperty -LiteralPath $path -Name $appId -ErrorAction Stop }
+        $after = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Name -ieq $appId })
+        if ($after.Count -gt 0) { throw "Temporary AUMID policy remains at $path." }
+      }
+    } catch { $rollbackErrors.Add("${path}: $_") }
+  }
+  foreach ($path in @($created | Sort-Object Length -Descending)) {
+    try {
+      if (Test-Path -LiteralPath $path) {
+        $names = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' })
+        $children = @(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue)
+        if ($names.Count -eq 0 -and $children.Count -eq 0) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+      }
+    } catch { $rollbackErrors.Add("${path}: $_") }
+  }
+  if ($rollbackErrors.Count -gt 0) { throw "WebView2 debugging setup failed ($setupError); policy rollback failed: $($rollbackErrors -join '; ')" }
+  throw $setupError
+}
+`;
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    timeout: 10_000,
+    env: { ...process.env, CONTEXTPICK_WEBVIEW_AUMID: appUserModelId, CONTEXTPICK_WEBVIEW_PORT: String(port), CONTEXTPICK_WEBVIEW_USER_DATA: userDataFolder },
+  });
+  return JSON.parse(stdout.trim()) as PackagedPolicySetup;
+}
+
+async function clearPackagedWebViewDebugging(appUserModelId: string, setup: PackagedPolicySetup): Promise<void> {
+  const createdKeys = Buffer.from(JSON.stringify(setup.createdKeys), 'utf8').toString('base64');
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$appId = $env:CONTEXTPICK_WEBVIEW_AUMID
+$paths = @('HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments', 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\UserDataFolder')
+foreach ($path in $paths) {
+  if (Test-Path -LiteralPath $path) {
+    $before = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Name -ieq $appId })
+    if ($before.Count -gt 0) { Remove-ItemProperty -LiteralPath $path -Name $appId -ErrorAction Stop }
+    $after = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Name -ieq $appId })
+    if ($after.Count -gt 0) { throw "Failed to remove temporary WebView2 policy '$appId' from $path." }
+  }
+}
+$created = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${createdKeys}')) | ConvertFrom-Json
+foreach ($path in @($created | Sort-Object Length -Descending)) {
+  if (Test-Path -LiteralPath $path) {
+    $names = @((Get-ItemProperty -LiteralPath $path).PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' })
+    $children = @(Get-ChildItem -LiteralPath $path -ErrorAction SilentlyContinue)
+    if ($names.Count -eq 0 -and $children.Count -eq 0) { Remove-Item -LiteralPath $path -Force }
+  }
+}
+`;
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    timeout: 10_000,
+    env: { ...process.env, CONTEXTPICK_WEBVIEW_AUMID: appUserModelId },
+  });
+}
+
+async function activatePackagedApplication(appUserModelId: string, expectedExecutablePath: string): Promise<PackagedRootIdentity> {
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IApplicationActivationManager {
+  [PreserveSig] int ActivateApplication([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId, [MarshalAs(UnmanagedType.LPWStr)] string arguments, uint options, out uint processId);
+}
+public static class ContextPickActivation {
+  [DllImport("ole32.dll", PreserveSig=true)]
+  public static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint context, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out IApplicationActivationManager manager);
+}
+'@
+$activationStartedTicks = [DateTime]::UtcNow.Ticks
+$expectedPath = [System.IO.Path]::GetFullPath($env:CONTEXTPICK_NATIVE_EXECUTABLE)
+$baselinePids = [System.Collections.Generic.HashSet[int]]::new()
+foreach ($existing in Get-CimInstance Win32_Process -Property ProcessId,ExecutablePath | Where-Object { [string]::Equals([string]$_.ExecutablePath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase) }) { $null = $baselinePids.Add([int]$existing.ProcessId) }
+$clsid = [Guid]'45BA127D-10A8-46EA-8AB7-56EA9078943C'
+$iid = [Guid]'2e941141-7f97-4756-ba1d-9decde894a3d'
+$manager = $null
+$activationResult = [ContextPickActivation]::CoCreateInstance([ref]$clsid, [IntPtr]::Zero, 0x4, [ref]$iid, [ref]$manager)
+if ($activationResult -lt 0) { throw [ComponentModel.Win32Exception]::new($activationResult) }
+[uint32]$processId = 0
+$hresult = $manager.ActivateApplication($env:CONTEXTPICK_NATIVE_AUMID, '', 0, [ref]$processId)
+if ($hresult -lt 0) { throw [ComponentModel.Win32Exception]::new($hresult) }
+if ($baselinePids.Contains([int]$processId)) { throw 'AUMID activation reused a process that existed before this fixture launch.' }
+$process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -Property ProcessId,ExecutablePath,CreationDate,SessionId
+if (-not $process) { throw "AUMID activation returned missing PID $processId." }
+if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$process.ExecutablePath), $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw "AUMID activation returned a process at an unexpected path." }
+$creationTicks = [long]$process.CreationDate.ToUniversalTime().Ticks
+if ($creationTicks -lt $activationStartedTicks) { throw 'AUMID activation returned a process that predates this fixture launch.' }
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+$sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+if (-not $owner.Sid -or $owner.Sid -ne $identity.User.Value) { throw 'AUMID activation returned a process owned by a different user.' }
+if ([int]$process.SessionId -ne $sessionId) { throw 'AUMID activation returned a process in a different session.' }
+[pscustomobject]@{ processId=[int]$processId; creationTicks=[string]$creationTicks; executablePath=$expectedPath; sessionId=$sessionId; ownerSid=[string]$owner.Sid } | ConvertTo-Json -Compress
+`;
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    timeout: 20_000,
+    env: { ...process.env, CONTEXTPICK_NATIVE_AUMID: appUserModelId, CONTEXTPICK_NATIVE_EXECUTABLE: expectedExecutablePath },
+  });
+  const result = JSON.parse(stdout.trim()) as PackagedRootIdentity;
+  if (!Number.isInteger(result.processId) || result.processId <= 0 || !/^\d+$/.test(result.creationTicks) || !result.ownerSid) throw new Error('AUMID activation returned an incomplete process identity.');
+  return result;
+}
+
+async function isVerifiedNativeProcessRunning(processId: number, expectedExecutablePath: string, creationTicks?: string): Promise<boolean> {
+  const script = String.raw`
+$process = Get-CimInstance Win32_Process -Filter "ProcessId=$env:CONTEXTPICK_VERIFY_PID" -Property ExecutablePath,CreationDate
+if (-not $process) { 'false'; exit 0 }
+if (-not [string]::Equals([string]$process.ExecutablePath, [string]$env:CONTEXTPICK_VERIFY_EXECUTABLE, [System.StringComparison]::OrdinalIgnoreCase)) { 'false'; exit 0 }
+if ($env:CONTEXTPICK_VERIFY_TICKS -and [Math]::Abs([long]$process.CreationDate.ToUniversalTime().Ticks - [long]$env:CONTEXTPICK_VERIFY_TICKS) -gt 10000) { 'false'; exit 0 }
+'true'
+`;
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    timeout: 8_000,
+    env: { ...process.env, CONTEXTPICK_VERIFY_PID: String(processId), CONTEXTPICK_VERIFY_EXECUTABLE: expectedExecutablePath, CONTEXTPICK_VERIFY_TICKS: creationTicks ?? '' },
+  });
+  return stdout.trim() === 'true';
+}
+
+async function hasCdpListenerInProcessTree(port: number, root: { processId: number; executablePath: string; creationTicks?: string }): Promise<boolean> {
+  const script = String.raw`
+$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,ExecutablePath,CreationDate)
+$root = $all | Where-Object { [int]$_.ProcessId -eq [int]$env:CONTEXTPICK_CDP_ROOT_PID } | Select-Object -First 1
+if (-not $root -or -not [string]::Equals([string]$root.ExecutablePath, [string]$env:CONTEXTPICK_CDP_ROOT_EXE, [System.StringComparison]::OrdinalIgnoreCase)) { 'false'; exit 0 }
+if ($env:CONTEXTPICK_CDP_ROOT_TICKS -and [Math]::Abs([long]$root.CreationDate.ToUniversalTime().Ticks - [long]$env:CONTEXTPICK_CDP_ROOT_TICKS) -gt 10000) { 'false'; exit 0 }
+$processes = @{}
+foreach ($item in $all) { $processes[[int]$item.ProcessId] = $item }
+$listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$env:CONTEXTPICK_CDP_PORT) -ErrorAction SilentlyContinue)
+foreach ($listener in $listeners) {
+  if ([string]$listener.LocalAddress -notin @('127.0.0.1', '::1')) { continue }
+  $current = [int]$listener.OwningProcess
+  $seen = [System.Collections.Generic.HashSet[int]]::new()
+  while ($current -ne [int]$env:CONTEXTPICK_CDP_ROOT_PID -and $processes.ContainsKey($current) -and $seen.Add($current)) { $current = [int]$processes[$current].ParentProcessId }
+  if ($current -eq [int]$env:CONTEXTPICK_CDP_ROOT_PID) { 'true'; exit 0 }
+}
+'false'
+`;
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    timeout: 8_000,
+    env: { ...process.env, CONTEXTPICK_CDP_ROOT_PID: String(root.processId), CONTEXTPICK_CDP_ROOT_EXE: root.executablePath, CONTEXTPICK_CDP_ROOT_TICKS: root.creationTicks ?? '', CONTEXTPICK_CDP_PORT: String(port) },
+  });
+  return stdout.trim() === 'true';
 }
 
 async function setNativeWindowActivation(processId: number, executablePath: string, activate: boolean): Promise<NativeWindowState> {
@@ -285,15 +487,14 @@ if (($rect.Right - $rect.Left) -lt [int]$env:CONTEXTPICK_TEST_WIDTH -or ($rect.B
   });
 }
 
-async function stopTree(child: ChildProcess, observedProcesses: ObservedProcess[], expectedExecutablePath: string): Promise<void> {
+async function stopTree(rootPid: number, child: ChildProcess | undefined, observedProcesses: ObservedProcess[], expectedExecutablePath: string, rootCreationTicks?: string): Promise<void> {
   // CIM and Process.StartTime can differ by a few ticks; 1 ms covers conversion precision without matching PID reuse.
-  if (child.exitCode === null && observedProcesses.length === 0) {
-    throw new Error(`Refusing to terminate unverified native fixture process ${child.pid ?? 'unknown'}.`);
+  if ((child?.exitCode === null || await isVerifiedNativeProcessRunning(rootPid, expectedExecutablePath, rootCreationTicks)) && observedProcesses.length === 0) {
+    throw new Error(`Refusing to terminate unverified native fixture process ${rootPid}.`);
   }
   if (observedProcesses.length > 0) {
     const encodedProcesses = Buffer.from(JSON.stringify(observedProcesses), 'utf8').toString('base64');
     const encodedExecutablePath = Buffer.from(expectedExecutablePath, 'utf8').toString('base64');
-    const rootPid = child.pid ?? 0;
     const script = String.raw`
 $expected = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedProcesses}')) | ConvertFrom-Json
 $expectedExe = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedExecutablePath}'))
@@ -350,13 +551,13 @@ do {
     const remaining = result.remaining === undefined ? [] : Array.isArray(result.remaining) ? result.remaining : [result.remaining];
     if (remaining.length > 0) throw new Error(`Native fixture processes did not exit: ${remaining.join(', ')}.`);
   }
-  if (child.exitCode === null) {
+  if (child?.exitCode === null) {
     await Promise.race([
       new Promise<void>((resolve) => child.once('exit', () => resolve())),
       new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
     ]);
   }
-  if (child.exitCode === null) throw new Error(`ContextPick process ${child.pid ?? 'unknown'} did not exit after termination.`);
+  if (child?.exitCode === null || await isVerifiedNativeProcessRunning(rootPid, expectedExecutablePath, rootCreationTicks)) throw new Error(`ContextPick process ${rootPid} did not exit after termination.`);
 }
 
 async function makeSyntheticWorkspace(root: string): Promise<void> {
@@ -447,6 +648,9 @@ export const test = base.extend<NativeFixtures>({
       if (!requestedRealPath || requestedRealPath !== repoRealPath) throw new Error('The real-workspace fixture is restricted to the checked-out ContextPick repository.');
     }
     let child: ChildProcess | undefined;
+    let activeProcessId: number | undefined;
+    let activeRootIdentity: PackagedRootIdentity | undefined;
+    let packagedPolicySetup: PackagedPolicySetup | undefined;
     let browser: Browser | undefined;
     let page: Page | undefined;
     let startupMs = 0;
@@ -459,8 +663,26 @@ export const test = base.extend<NativeFixtures>({
       browser = undefined;
       page = undefined;
       await memorySampler.stop();
-      if (child) await stopTree(child, memorySampler.processIdentities(), nativeExe);
+      let processCleanupError: unknown;
+      try {
+        if (activeProcessId !== undefined) await stopTree(activeProcessId, child, memorySampler.processIdentities(), nativeExe, activeRootIdentity?.creationTicks);
+      } catch (error) {
+        processCleanupError = error;
+      }
+      if (packagedPolicySetup && process.env.CONTEXTPICK_NATIVE_AUMID) {
+        try {
+          await clearPackagedWebViewDebugging(process.env.CONTEXTPICK_NATIVE_AUMID, packagedPolicySetup);
+          packagedPolicySetup = undefined;
+        } catch (policyCleanupError) {
+          processCleanupError = processCleanupError
+            ? new AggregateError([processCleanupError, policyCleanupError], 'Native process cleanup and WebView2 policy cleanup both failed.', { cause: processCleanupError })
+            : policyCleanupError;
+        }
+      }
+      if (processCleanupError) throw processCleanupError;
       child = undefined;
+      activeProcessId = undefined;
+      activeRootIdentity = undefined;
     };
 
     const launch = async (): Promise<Page> => {
@@ -468,25 +690,46 @@ export const test = base.extend<NativeFixtures>({
       const port = await availablePort();
       const startedAt = Date.now();
       let appOutputTail = '';
-      child = spawn(nativeExe, [], {
-        cwd: repoRoot,
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          ...(installedExe ? { CONTEXTPICK_NATIVE_CONFIG_DIR: settingsDir } : { CONTEXTPICK_CONFIG_DIR: config }),
-          WEBVIEW2_USER_DATA_FOLDER: webviewProfile,
-          WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}`,
-        },
-      });
-      const retainOutputTail = (chunk: Buffer) => {
-        appOutputTail = `${appOutputTail}${chunk.toString('utf8')}`.slice(-8_000);
-      };
-      child.stdout?.on('data', retainOutputTail);
-      child.stderr?.on('data', retainOutputTail);
-      if (child.pid) memorySampler.start(child.pid, nativeExe);
-      await waitForCdp(port, child, webviewProfile, () => appOutputTail);
+      const appUserModelId = installedExe ? process.env.CONTEXTPICK_NATIVE_AUMID?.trim() : undefined;
+      if (appUserModelId) {
+        packagedPolicySetup = await configurePackagedWebViewDebugging(appUserModelId, port, webviewProfile);
+        try {
+          activeRootIdentity = await activatePackagedApplication(appUserModelId, nativeExe);
+        } catch (error) {
+          try {
+            await clearPackagedWebViewDebugging(appUserModelId, packagedPolicySetup);
+            packagedPolicySetup = undefined;
+          } catch (policyCleanupError) {
+            throw new AggregateError([error, policyCleanupError], 'AUMID activation failed and temporary WebView2 policy cleanup also failed.', { cause: policyCleanupError });
+          }
+          throw new Error('AUMID activation failed after temporary WebView2 policy setup.', { cause: error });
+        }
+        activeProcessId = activeRootIdentity.processId;
+        memorySampler.start(activeProcessId, nativeExe, activeRootIdentity.creationTicks);
+      } else {
+        child = spawn(nativeExe, [], {
+          cwd: repoRoot,
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            ...(installedExe ? { CONTEXTPICK_NATIVE_CONFIG_DIR: settingsDir } : { CONTEXTPICK_CONFIG_DIR: config }),
+            WEBVIEW2_USER_DATA_FOLDER: webviewProfile,
+            WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}`,
+          },
+        });
+        const retainOutputTail = (chunk: Buffer) => {
+          appOutputTail = `${appOutputTail}${chunk.toString('utf8')}`.slice(-8_000);
+        };
+        child.stdout?.on('data', retainOutputTail);
+        child.stderr?.on('data', retainOutputTail);
+        if (!child.pid) throw new Error('Windows did not return a PID for the native fixture process.');
+        activeProcessId = child.pid;
+        memorySampler.start(activeProcessId, nativeExe);
+      }
+      if (activeProcessId === undefined) throw new Error('Native fixture activation did not yield a process ID.');
+      await waitForCdp(port, { processId: activeProcessId, executablePath: nativeExe, creationTicks: activeRootIdentity?.creationTicks }, child, webviewProfile, () => appOutputTail);
       const connectedBrowser = await playwright.chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 10_000 });
       browser = connectedBrowser;
       const context = connectedBrowser.contexts()[0];
@@ -508,8 +751,8 @@ export const test = base.extend<NativeFixtures>({
     };
 
     const changeWindowActivation = async (activate: boolean) => {
-      if (!child?.pid) throw new Error('Native test process is not running.');
-      return setNativeWindowActivation(child.pid, nativeExe, activate);
+      if (!activeProcessId) throw new Error('Native test process is not running.');
+      return setNativeWindowActivation(activeProcessId, nativeExe, activate);
     };
 
     try {
@@ -564,8 +807,8 @@ export const test = base.extend<NativeFixtures>({
       };
       const readSettings = async () => JSON.parse(await readFile(path.join(settingsDir, 'settings.json'), 'utf8')) as Record<string, unknown>;
       await runTest({ root, get page() { if (!page) throw new Error('Native page is not running.'); return page; }, get startupMs() { return startupMs; }, launch, deactivate: () => changeWindowActivation(false), activate: () => changeWindowActivation(true), resizeWindow: async (width, height) => {
-        if (!child?.pid) throw new Error('Native test process is not running.');
-        await setNativeWindowSize(child.pid, nativeExe, width, height);
+        if (!activeProcessId) throw new Error('Native test process is not running.');
+        await setNativeWindowSize(activeProcessId, nativeExe, width, height);
       }, stop, installLegacySettings, readSettings, memoryReport: memorySampler.report });
     } catch (error) {
       testFailure = error;
