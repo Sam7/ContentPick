@@ -20,7 +20,12 @@ function Revoke-TemporaryAccess {
     foreach ($path in $script:aclPaths) {
         if ([string]::Equals($path, $outputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
             # The standard user creates files under this disposable RUNNER_TEMP tree.
-            # Reset that tree to inherited defaults so child-created ACEs are removed too.
+            # Remove the inheritable grant at the root before resetting child-created ACLs.
+            & icacls.exe $path /reset /Q /L
+            if ($LASTEXITCODE -ne 0) {
+                $script:cleanupErrors.Add("Could not reset temporary smoke-user access from $path (icacls exit $LASTEXITCODE).")
+                continue
+            }
             & icacls.exe $path /reset /T /C /Q /L
         } else {
             & icacls.exe $path /remove:g "*$script:userSid" /T /Q

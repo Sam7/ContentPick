@@ -40,6 +40,22 @@ Revoke-TemporaryAccess
 if ($script:cleanupErrors.Count -ne 0) { throw ($script:cleanupErrors -join [Environment]::NewLine) }
 $findCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/findsid' })
 if ($findCalls.Count -ne 2) { throw "Expected two SID verification calls, got $($findCalls.Count)." }
+$resetCalls = @($script:icaclsCalls | Where-Object { $_ -contains '/reset' })
+if ($resetCalls.Count -ne 2) { throw "Expected two output-root ACL resets, got $($resetCalls.Count)." }
+$rootResetCall = @($resetCalls[0])
+$childResetCall = @($resetCalls[1])
+if (@($rootResetCall | Where-Object { $_ -eq $outputRoot }).Count -ne 1 -or @($rootResetCall | Where-Object { $_ -eq '/T' }).Count -ne 0) {
+    throw 'The output-root inheritable ACL must be reset before recursively resetting its contents.'
+}
+if (@($rootResetCall | Where-Object { $_ -eq '/L' }).Count -ne 1) {
+    throw 'The output-root ACL reset must preserve reparse-point safety with one /L argument.'
+}
+if (@($childResetCall | Where-Object { $_ -eq $outputRoot }).Count -ne 1 -or @($childResetCall | Where-Object { $_ -eq '/T' }).Count -ne 1) {
+    throw 'The recursive output-root ACL reset must follow the root reset.'
+}
+if (@($childResetCall | Where-Object { $_ -eq '/L' }).Count -ne 1) {
+    throw 'The recursive output-root ACL reset must preserve reparse-point safety with one /L argument.'
+}
 $rootFindCall = @($findCalls[0])
 $otherFindCall = @($findCalls[1])
 if (@($rootFindCall | Where-Object { $_ -eq '/L' }).Count -ne 1) {
@@ -51,4 +67,4 @@ if (@($rootFindCall | Where-Object { $_ -eq '/' -or $_ -eq 'L' }).Count -ne 0) {
 if (@($otherFindCall | Where-Object { $_ -eq '/L' -or $_ -eq '/' -or $_ -eq 'L' }).Count -ne 0) {
     throw 'The non-output-root SID verification must not pass /L.'
 }
-Write-Output 'Revoke-TemporaryAccess preserves /L as one icacls argument only for the output root.'
+Write-Output 'Revoke-TemporaryAccess resets the inheritable output-root ACL first and preserves /L as one icacls argument.'
